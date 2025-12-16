@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: sqlcortex-db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build: ./apps/api
+    env_file: .env
+    environment:
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      - db
+
+  analyzer:
+    build: ./services/analyzer
+    ports:
+      - "8000:8000"
+
+  web:
+    build: ./apps/web
+    env_file: .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+      - analyzer
+
+volumes:
+  pgdata:
