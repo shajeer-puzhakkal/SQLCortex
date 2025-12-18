@@ -12,18 +12,26 @@ enum SubjectType {
   ORG
 }
 
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
 model User {
   id              String          @id @default(uuid()) @db.Uuid
   email           String          @unique
   name            String?
+  passwordHash    String          @map("password_hash")
   createdAt       DateTime        @default(now()) @map("created_at")
   updatedAt       DateTime        @updatedAt @map("updated_at")
   orgMemberships  OrgMember[]
-  apiTokens       ApiToken[]
   analyses        Analysis[]
   subscriptions   Subscription[]  @relation("user_subscriptions")
   usageCounters   UsageCounter[]  @relation("user_usage")
   projects        Project[]       @relation("user_projects")
+  sessions        Session[]
+  acceptedInvites OrgInvite[]     @relation("invite_acceptances")
 
   @@map("users")
 }
@@ -35,7 +43,8 @@ model Organization {
   updatedAt      DateTime        @updatedAt @map("updated_at")
   members        OrgMember[]
   projects       Project[]
-  apiTokens      ApiToken[]
+  invites        OrgInvite[]
+  analyses       Analysis[]
   subscriptions  Subscription[]  @relation("org_subscriptions")
   usageCounters  UsageCounter[]  @relation("org_usage")
 
@@ -44,7 +53,7 @@ model Organization {
 
 model OrgMember {
   id        String        @id @default(uuid()) @db.Uuid
-  role      String        @default("member")
+  role      OrgRole       @default(MEMBER)
   userId    String        @db.Uuid @map("user_id")
   orgId     String        @db.Uuid @map("org_id")
   createdAt DateTime      @default(now()) @map("created_at")
@@ -65,6 +74,7 @@ model Project {
   organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
   ownerUser   User?     @relation("user_projects", fields: [ownerUserId], references: [id], onDelete: SetNull)
   analyses    Analysis[]
+  apiTokens   ApiToken[]
 
   @@map("projects")
 }
@@ -73,6 +83,7 @@ model Analysis {
   id          String    @id @default(uuid()) @db.Uuid
   projectId   String?   @db.Uuid @map("project_id")
   userId      String?   @db.Uuid @map("user_id")
+  orgId       String?   @db.Uuid @map("org_id")
   sql         String
   explainJson Json      @map("explain_json")
   result      Json?     @map("result")
@@ -81,22 +92,52 @@ model Analysis {
   updatedAt   DateTime  @updatedAt @map("updated_at")
   project     Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   user        User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
   @@map("analyses")
 }
 
 model ApiToken {
-  id         String   @id @default(uuid()) @db.Uuid
-  tokenHash  String   @unique @map("token_hash")
-  label      String?
-  userId     String?  @db.Uuid @map("user_id")
-  orgId      String?  @db.Uuid @map("org_id")
-  createdAt  DateTime @default(now()) @map("created_at")
-  lastUsedAt DateTime? @map("last_used_at")
-  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  id          String      @id @default(uuid()) @db.Uuid
+  tokenHash   String      @unique @map("token_hash")
+  label       String?
+  subjectType SubjectType @map("subject_type")
+  subjectId   String      @db.Uuid @map("subject_id")
+  projectId   String?     @db.Uuid @map("project_id")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  lastUsedAt  DateTime?   @map("last_used_at")
+  revokedAt   DateTime?   @map("revoked_at")
+  project     Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   @@map("api_tokens")
+}
+
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  tokenHash  String   @unique @map("token_hash")
+  userId     String   @db.Uuid @map("user_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  expiresAt  DateTime @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model OrgInvite {
+  id               String   @id @default(uuid()) @db.Uuid
+  orgId            String   @db.Uuid @map("org_id")
+  email            String
+  role             OrgRole  @default(MEMBER)
+  tokenHash        String   @unique @map("token_hash")
+  createdAt        DateTime @default(now()) @map("created_at")
+  expiresAt        DateTime? @map("expires_at")
+  acceptedAt       DateTime? @map("accepted_at")
+  acceptedByUserId String?  @db.Uuid @map("accepted_by_user_id")
+  organization     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  acceptedBy       User?    @relation("invite_acceptances", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("org_invites")
 }
 
 model Plan {

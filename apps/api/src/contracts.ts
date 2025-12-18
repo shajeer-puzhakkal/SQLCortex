@@ -22,7 +22,6 @@ export type AnalysisCreateRequest = {
   sql: string;
   explain_json: unknown;
   project_id?: string | null;
-  user_id?: string | null;
 };
 
 export type AnalysisResource = {
@@ -33,6 +32,7 @@ export type AnalysisResource = {
   result: unknown | null;
   project_id: string | null;
   user_id: string | null;
+  org_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -60,6 +60,7 @@ export function mapAnalysisToResource(record: Analysis): AnalysisResource {
     result: record.result,
     project_id: record.projectId ?? null,
     user_id: record.userId ?? null,
+    org_id: record.orgId ?? null,
     created_at: record.createdAt.toISOString(),
     updated_at: record.updatedAt.toISOString(),
   };

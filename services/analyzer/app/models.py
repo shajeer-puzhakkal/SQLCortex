@@ -15,6 +15,7 @@ class AnalysisRequest(BaseModel):
     explain_json: Any
     project_id: Optional[str] = None
     user_id: Optional[str] = None
+    org_id: Optional[str] = None
 
 
 class AnalysisResult(BaseModel):
@@ -24,6 +25,7 @@ class AnalysisResult(BaseModel):
     explain_json: Any
     project_id: Optional[str] = None
     user_id: Optional[str] = None
+    org_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

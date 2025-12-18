@@ -18,7 +18,11 @@ Services:
 - Analyzer: `GET http://localhost:8000/health` → `{ ok: true, service: "analyzer" }`
 
 ## API Surface (v1)
-- `POST /api/v1/analyses` — create analysis job (body: `sql`, `explain_json`, `project_id?`, `user_id?`)
+- `POST /api/v1/auth/signup` — create user + session
+- `POST /api/v1/auth/login` — start session
+- `POST /api/v1/auth/logout` — end session
+- `GET /api/v1/me` — current principal + memberships
+- `POST /api/v1/analyses` — create analysis job (body: `sql`, `explain_json`, `project_id?`)
 - `GET /api/v1/analyses/:id` — fetch analysis by id
 Error contract is standardized: `{ code, message, details? }`.
 

@@ -14,19 +14,44 @@ All services return the same error envelope:
 Valid codes: `UNAUTHORIZED`, `FORBIDDEN`, `INVALID_INPUT`, `INVALID_EXPLAIN_JSON`, `SQL_NOT_READ_ONLY`, `PLAN_LIMIT_EXCEEDED`, `ANALYZER_TIMEOUT`, `ANALYZER_ERROR`.
 
 ## Health Endpoints
-- Web: `GET /api/health` → `{ "ok": true, "service": "web" }`
-- API: `GET /health` → `{ "ok": true, "service": "api" }`
-- Analyzer: `GET /health` → `{ "ok": true, "service": "analyzer" }`
+- Web: `GET /api/health` -> `{ "ok": true, "service": "web" }`
+- API: `GET /health` -> `{ "ok": true, "service": "api" }`
+- Analyzer: `GET /health` -> `{ "ok": true, "service": "analyzer" }`
 
 ## API Service (`apps/api`)
+
+### Auth
+- `POST /api/v1/auth/signup` (body: `email`, `password`, `name?`)
+- `POST /api/v1/auth/login` (body: `email`, `password`)
+- `POST /api/v1/auth/logout`
+
+Session cookie is httpOnly and required for browser auth.
+
+### GET `/api/v1/me`
+Returns current principal and org memberships.
+
+### Organizations
+- `GET /api/v1/orgs`
+- `POST /api/v1/orgs` (body: `name`)
+- `POST /api/v1/orgs/:orgId/invites` (body: `email`, `role?`)
+- `POST /api/v1/invites/accept` (body: `token`)
+
+### Projects
+- `GET /api/v1/projects`
+- `POST /api/v1/projects` (body: `name`, `org_id?`)
+
+### API Tokens
+- `GET /api/v1/tokens`
+- `POST /api/v1/tokens` (body: `scope`, `org_id?`, `project_id?`, `label?`)
+- `POST /api/v1/tokens/:id/revoke`
+Tokens authenticate via `Authorization: Bearer <token>`.
 
 ### POST `/api/v1/analyses`
 - Request body:
   - `sql` (string, required)
   - `explain_json` (object|array, required)
   - `project_id` (uuid, optional)
-  - `user_id` (uuid, optional)
-- Success: `201 { "analysis": AnalysisResource }`
+- Success: `201 { "analysis": AnalysisResource }` (includes `org_id` attribution)
 - Errors: `400 INVALID_INPUT` or `INVALID_EXPLAIN_JSON`
 
 ### GET `/api/v1/analyses/:id`
@@ -36,7 +61,7 @@ Valid codes: `UNAUTHORIZED`, `FORBIDDEN`, `INVALID_INPUT`, `INVALID_EXPLAIN_JSON
 ## Analyzer Service (`services/analyzer`)
 
 ### POST `/analyze`
-- Request: same payload as API create (`sql`, `explain_json`, `project_id?`, `user_id?`)
+- Request: `sql`, `explain_json`, `project_id?`, `user_id?`, `org_id?`
 - Response: `{ "analysis": AnalysisResource }` (structured JSON result)
 
 ### GET `/health`

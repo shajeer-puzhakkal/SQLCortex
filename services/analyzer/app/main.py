@@ -27,6 +27,7 @@ def analyze(payload: AnalysisRequest):
             "explain_json": payload.explain_json,
             "project_id": payload.project_id,
             "user_id": payload.user_id,
+            "org_id": payload.org_id,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
