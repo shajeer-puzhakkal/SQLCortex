@@ -11,7 +11,11 @@ All services return the same error envelope:
 }
 ```
 
-Valid codes: `UNAUTHORIZED`, `FORBIDDEN`, `INVALID_INPUT`, `INVALID_EXPLAIN_JSON`, `SQL_NOT_READ_ONLY`, `PLAN_LIMIT_EXCEEDED`, `ANALYZER_TIMEOUT`, `ANALYZER_ERROR`.
+Valid codes: `UNAUTHORIZED`, `FORBIDDEN`, `INVALID_INPUT`, `INVALID_EXPLAIN_JSON`, `SQL_NOT_READ_ONLY`, `RATE_LIMITED`, `PLAN_LIMIT_EXCEEDED`, `ANALYZER_TIMEOUT`, `ANALYZER_ERROR`.
+
+Additional codes used by Sprint 1 pricing/quota enforcement:
+- `RATE_LIMITED` (HTTP 429)
+- `PLAN_LIMIT_EXCEEDED` (HTTP 402)
 
 ## Health Endpoints
 - Web: `GET /api/health` -> `{ "ok": true, "service": "web" }`

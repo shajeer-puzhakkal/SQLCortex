@@ -83,6 +83,8 @@ Tables and minimum columns required for Sprint 1.
 - `monthly_llm_call_limit` int
 - `created_at` timestamptz default now()
 
+Sprint 1 pricing/quota limits (max projects, retention days, rate limit, etc.) are defined in code in `apps/api/src/plans.ts` and keyed by `plans.code`.
+
 ## subscriptions
 - `id` uuid PK
 - `plan_id` uuid FK -> plans.id (cascade)

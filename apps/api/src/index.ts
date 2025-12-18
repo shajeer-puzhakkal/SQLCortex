@@ -11,6 +11,15 @@ import {
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
+import { ensureDefaultPlans, getPlanContext, suggestedUpgradeForPlan } from "./plans";
+import {
+  checkSqlAndExplainSizeLimits,
+  countOrgMembersAndPendingInvites,
+  countProjectsForSubject,
+  getAnalysesUsedThisMonth,
+  incrementAnalysesThisMonth,
+  makePlanLimitExceededError,
+} from "./quota";
 import {
   attachAuth,
   AuthenticatedRequest,
@@ -25,6 +34,7 @@ import {
   setSessionCookie,
   verifyPassword,
 } from "./auth";
+import { createRateLimitMiddleware } from "./rateLimit";
 
 dotenv.config();
 
@@ -41,6 +51,7 @@ type SubjectType = (typeof SubjectType)[keyof typeof SubjectType];
 app.use(cors({ origin: webOrigin, credentials: true }));
 app.use(express.json());
 app.use(attachAuth(prisma));
+app.use(createRateLimitMiddleware(prisma));
 
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -181,23 +192,102 @@ app.post(
       where: { email: normalizedEmail },
     });
     if (existingUser) {
+      const legacyPasswordMissing = existingUser.passwordHash.trim().length === 0;
+      if (legacyPasswordMissing && process.env.NODE_ENV !== "production") {
+        await ensureDefaultPlans(prisma);
+        const passwordHash = await hashPassword(password);
+
+        const { user: updatedUser, personalProject } = await prisma.$transaction(async (tx) => {
+          const user = await tx.user.update({
+            where: { id: existingUser.id },
+            data: {
+              passwordHash,
+              name: existingUser.name ?? (name?.trim() || null),
+            },
+          });
+
+          const project =
+            (await tx.project.findFirst({
+              where: { ownerUserId: existingUser.id },
+              orderBy: { createdAt: "asc" },
+            })) ??
+            (await tx.project.create({
+              data: { name: "Personal Project", ownerUserId: existingUser.id },
+            }));
+
+          const existingSubscription = await tx.subscription.findFirst({
+            where: { subjectType: SubjectType.USER, userId: existingUser.id },
+            orderBy: { createdAt: "desc" },
+          });
+
+          if (!existingSubscription) {
+            const freePlan = await tx.plan.findUnique({ where: { code: "FREE" } });
+            if (!freePlan) {
+              throw new Error("FREE plan missing");
+            }
+
+            await tx.subscription.create({
+              data: {
+                planId: freePlan.id,
+                subjectType: SubjectType.USER,
+                userId: existingUser.id,
+                orgId: null,
+              },
+            });
+          }
+
+          return { user, personalProject: project };
+        });
+
+        const session = await createSession(prisma, updatedUser.id);
+        setSessionCookie(res, session.rawToken, session.expiresAt);
+
+        return res.status(200).json({
+          user: toUserResource(updatedUser),
+          personal_project: {
+            id: personalProject.id,
+            name: personalProject.name,
+          },
+        });
+      }
+
       return res.status(400).json(makeError("INVALID_INPUT", "Email already in use"));
     }
 
     const passwordHash = await hashPassword(password);
-    const user = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        name: name?.trim() || null,
-        passwordHash,
-      },
-    });
 
-    const personalProject = await prisma.project.create({
-      data: {
-        name: "Personal Project",
-        ownerUserId: user.id,
-      },
+    await ensureDefaultPlans(prisma);
+    const { user, personalProject } = await prisma.$transaction(async (tx) => {
+      const createdUser = await tx.user.create({
+        data: {
+          email: normalizedEmail,
+          name: name?.trim() || null,
+          passwordHash,
+        },
+      });
+
+      const createdProject = await tx.project.create({
+        data: {
+          name: "Personal Project",
+          ownerUserId: createdUser.id,
+        },
+      });
+
+      const freePlan = await tx.plan.findUnique({ where: { code: "FREE" } });
+      if (!freePlan) {
+        throw new Error("FREE plan missing");
+      }
+
+      await tx.subscription.create({
+        data: {
+          planId: freePlan.id,
+          subjectType: SubjectType.USER,
+          userId: createdUser.id,
+          orgId: null,
+        },
+      });
+
+      return { user: createdUser, personalProject: createdProject };
     });
 
     const session = await createSession(prisma, user.id);
@@ -237,8 +327,18 @@ app.post(
       where: { email: normalizedEmail },
     });
 
-    if (!user || !user.passwordHash) {
+    if (!user) {
       return res.status(401).json(makeError("UNAUTHORIZED", "Invalid credentials"));
+    }
+
+    if (user.passwordHash.trim().length === 0) {
+      clearLoginAttempts(rateKey);
+      return res.status(400).json(
+        makeError(
+          "INVALID_INPUT",
+          "This account does not have a password set. Use signup to set a password (dev only)."
+        )
+      );
     }
 
     const passwordValid = await verifyPassword(password, user.passwordHash);
@@ -338,17 +438,38 @@ app.post(
       return res.status(403).json(makeError("FORBIDDEN", "User context required"));
     }
 
+    const userId = auth.userId;
+
     const name = req.body?.name?.trim();
     if (!name) {
       return res.status(400).json(makeError("INVALID_INPUT", "`name` is required"));
     }
 
-    const org = await prisma.organization.create({
-      data: { name },
-    });
+    await ensureDefaultPlans(prisma);
+    const { org, membership } = await prisma.$transaction(async (tx) => {
+      const createdOrg = await tx.organization.create({
+        data: { name },
+      });
 
-    const membership = await prisma.orgMember.create({
-      data: { orgId: org.id, userId: auth.userId, role: OrgRole.OWNER },
+      const createdMembership = await tx.orgMember.create({
+        data: { orgId: createdOrg.id, userId, role: OrgRole.OWNER },
+      });
+
+      const freePlan = await tx.plan.findUnique({ where: { code: "FREE" } });
+      if (!freePlan) {
+        throw new Error("FREE plan missing");
+      }
+
+      await tx.subscription.create({
+        data: {
+          planId: freePlan.id,
+          subjectType: SubjectType.ORG,
+          orgId: createdOrg.id,
+          userId: null,
+        },
+      });
+
+      return { org: createdOrg, membership: createdMembership };
     });
 
     return res.status(201).json({
@@ -385,6 +506,21 @@ app.post(
     const allowed = await requireOrgRole(auth.userId, orgId, [OrgRole.OWNER, OrgRole.ADMIN]);
     if (!allowed) {
       return res.status(403).json(makeError("FORBIDDEN", "Insufficient org role"));
+    }
+
+    const planContext = await getPlanContext(prisma, { subjectType: "ORG", orgId });
+    const counts = await countOrgMembersAndPendingInvites(prisma, orgId);
+    if (counts.total >= planContext.plan.maxMembersPerOrg) {
+      return res
+        .status(402)
+        .json(
+          makePlanLimitExceededError("Organization member quota exceeded for current plan.", {
+            limit: planContext.plan.maxMembersPerOrg,
+            used: counts.total,
+            plan: planContext.planCode,
+            suggested_plan: suggestedUpgradeForPlan(planContext.planCode),
+          })
+        );
     }
 
     const normalizedEmail = normalizeEmail(email);
@@ -559,6 +695,24 @@ app.post(
       }
     }
 
+    const subject = orgId
+      ? ({ subjectType: "ORG", orgId } as const)
+      : ({ subjectType: "USER", userId: auth.userId } as const);
+    const planContext = await getPlanContext(prisma, subject);
+    const usedProjects = await countProjectsForSubject(prisma, subject);
+    if (usedProjects >= planContext.plan.maxProjects) {
+      return res
+        .status(402)
+        .json(
+          makePlanLimitExceededError("Project quota exceeded for current plan.", {
+            limit: planContext.plan.maxProjects,
+            used: usedProjects,
+            plan: planContext.planCode,
+            suggested_plan: suggestedUpgradeForPlan(planContext.planCode),
+          })
+        );
+    }
+
     const project = await prisma.project.create({
       data: {
         name,
@@ -600,8 +754,9 @@ app.get("/api/v1/tokens", requireAuth(prisma), async (req: Request, res: Respons
       where: { userId: auth.userId },
       select: { orgId: true, role: true },
     });
+    const adminRoles: OrgRole[] = [OrgRole.OWNER, OrgRole.ADMIN];
     const adminOrgIds = memberships
-      .filter((membership) => [OrgRole.OWNER, OrgRole.ADMIN].includes(membership.role))
+      .filter((membership) => adminRoles.includes(membership.role))
       .map((membership) => membership.orgId);
 
     tokens = await prisma.apiToken.findMany({
@@ -690,7 +845,7 @@ app.post(
           projectId
         );
         if ("error" in projectAccess) {
-          return res.status(projectAccess.status).json(projectAccess.error);
+          return res.status(projectAccess.status ?? 400).json(projectAccess.error);
         }
       }
     }
@@ -803,9 +958,10 @@ app.post(
     }
 
     let explainJsonParsed: unknown;
+    let explainSerialized: string;
     try {
-      const serialized = JSON.stringify(body.explain_json);
-      explainJsonParsed = JSON.parse(serialized);
+      explainSerialized = JSON.stringify(body.explain_json);
+      explainJsonParsed = JSON.parse(explainSerialized);
     } catch (err) {
       return res
         .status(400)
@@ -820,19 +976,62 @@ app.post(
 
     const projectContext = await resolveProjectContext(auth, body.project_id);
     if ("error" in projectContext) {
-      return res.status(projectContext.status).json(projectContext.error);
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
     }
 
-    const analysis = await prisma.analysis.create({
-      data: {
-        sql: body.sql,
-        explainJson: explainJsonParsed as Prisma.InputJsonValue,
-        projectId: projectContext.projectId ?? null,
-        userId: auth.userId ?? null,
-        orgId: projectContext.orgId ?? null,
-        status: "queued",
-        result: null,
-      },
+    const quotaSubject = projectContext.orgId
+      ? ({ subjectType: "ORG", orgId: projectContext.orgId } as const)
+      : auth.userId
+        ? ({ subjectType: "USER", userId: auth.userId } as const)
+        : auth.orgId
+          ? ({ subjectType: "ORG", orgId: auth.orgId } as const)
+          : null;
+
+    if (!quotaSubject) {
+      return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
+    }
+
+    const planContext = await getPlanContext(prisma, quotaSubject);
+
+    const sizeError = checkSqlAndExplainSizeLimits(
+      planContext.plan,
+      planContext.planCode,
+      body.sql,
+      explainSerialized
+    );
+    if (sizeError) {
+      return res.status(402).json(sizeError);
+    }
+
+    const now = new Date();
+    const usedThisMonth = await getAnalysesUsedThisMonth(prisma, quotaSubject, now);
+    if (usedThisMonth >= planContext.plan.analysesPerMonth) {
+      return res
+        .status(402)
+        .json(
+          makePlanLimitExceededError("Analysis quota exceeded for current period.", {
+            limit: planContext.plan.analysesPerMonth,
+            used: usedThisMonth,
+            plan: planContext.planCode,
+            suggested_plan: suggestedUpgradeForPlan(planContext.planCode),
+          })
+        );
+    }
+
+    const analysis = await prisma.$transaction(async (tx) => {
+      const created = await tx.analysis.create({
+        data: {
+          sql: body.sql,
+          explainJson: explainJsonParsed as Prisma.InputJsonValue,
+          projectId: projectContext.projectId ?? null,
+          userId: auth.userId ?? null,
+          orgId: projectContext.orgId ?? null,
+          status: "queued",
+        },
+      });
+
+      await incrementAnalysesThisMonth(tx, quotaSubject, now);
+      return created;
     });
 
     return res.status(201).json({ analysis: mapAnalysisToResource(analysis) });
@@ -857,6 +1056,19 @@ app.get(
 
     if (!analysis) {
       return res.status(404).json(makeError("INVALID_INPUT", "Analysis not found"));
+    }
+
+    const retentionSubject = analysis.orgId
+      ? ({ subjectType: "ORG", orgId: analysis.orgId } as const)
+      : analysis.userId
+        ? ({ subjectType: "USER", userId: analysis.userId } as const)
+        : null;
+    if (retentionSubject) {
+      const planContext = await getPlanContext(prisma, retentionSubject);
+      const retentionMs = planContext.plan.historyRetentionDays * 24 * 60 * 60 * 1000;
+      if (retentionMs > 0 && analysis.createdAt.getTime() < Date.now() - retentionMs) {
+        return res.status(404).json(makeError("INVALID_INPUT", "Analysis not found"));
+      }
     }
 
     if (analysis.userId && auth.userId === analysis.userId) {
@@ -891,4 +1103,12 @@ app.use(
 );
 
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 4000);
-app.listen(port, () => console.log(`api listening on :${port}`));
+async function start() {
+  await ensureDefaultPlans(prisma);
+  app.listen(port, () => console.log(`api listening on :${port}`));
+}
+
+start().catch((err) => {
+  console.error("Failed to start API", err);
+  process.exitCode = 1;
+});
