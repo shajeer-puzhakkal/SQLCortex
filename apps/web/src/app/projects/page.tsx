@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
@@ -166,7 +167,7 @@ export default function ProjectsPage() {
 
   if (loading) {
     return (
-    <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
+      <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
         <div className="mx-auto flex min-h-screen max-w-5xl items-center justify-center px-6 py-16">
           <p className="text-black/70">Loading projects...</p>
         </div>
@@ -176,7 +177,7 @@ export default function ProjectsPage() {
 
   if (error && !me) {
     return (
-    <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
+      <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
         <div className="mx-auto flex min-h-screen max-w-4xl items-center justify-center px-6 py-16">
           <div className="max-w-md rounded-3xl border border-black/10 bg-white/80 p-8 text-center">
             <p className="text-black/70">{error}</p>
@@ -190,31 +191,61 @@ export default function ProjectsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
-      <div className="mx-auto max-w-6xl px-6 py-12">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-black/50">Projects</p>
-            <h1 className="mt-2 text-3xl font-semibold">
-              {me?.user?.name ?? me?.user?.email ?? "Workspace"}
-            </h1>
+    <div className="relative min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-40 left-1/2 h-[500px] w-[500px] -translate-x-1/2 rounded-full bg-cyan-300/20 blur-3xl" />
+        <div className="absolute top-40 left-10 h-[400px] w-[400px] rounded-full bg-amber-300/20 blur-3xl" />
+      </div>
+
+      <header className="sticky top-0 z-50 border-b border-black/5 bg-white/70 px-6 py-4 backdrop-blur-md transition-all">
+        <div className="mx-auto flex max-w-5xl items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Image
+              src="/SQLCortexLogo.png"
+              alt="SQLCortex"
+              width={32}
+              height={32}
+              className="h-8 w-auto"
+            />
+            <span className="text-lg font-bold tracking-tight text-black">SQLCortex</span>
           </div>
-          <button
-            className="rounded-full border border-black/30 px-4 py-2 text-xs uppercase tracking-[0.3em] text-black transition hover:border-black"
-            onClick={handleLogout}
-          >
-            Logout
-          </button>
+          <div className="flex items-center gap-4">
+            <div className="hidden text-xs text-black/50 sm:block">
+              {me?.user?.email}
+            </div>
+            <button
+              className="rounded-full border border-black/10 bg-white px-4 py-1.5 text-xs font-medium text-black transition hover:border-black/30 hover:bg-black/5"
+              onClick={handleLogout}
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="relative mx-auto max-w-5xl px-6 py-12">
+        <div className="mb-10">
+          <p className="text-xs font-medium uppercase tracking-wider text-black/40">Workspace</p>
+          <h1 className="mt-1 text-2xl font-semibold text-black/90">
+            {me?.user?.name ?? "My Projects"}
+          </h1>
+          <p className="mt-1 text-sm text-black/60">
+            Manage your databases and AI query optimizations.
+          </p>
         </div>
 
-        {error ? <p className="mt-6 text-sm text-rose-600">{error}</p> : null}
+        {error ? (
+          <div className="mb-8 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+            {error}
+          </div>
+        ) : null}
 
-        <div className="mt-10 grid gap-8 lg:grid-cols-[1.4fr_1fr]">
-          <section className="rounded-3xl border border-black/10 bg-white/80 p-6">
+        <div className="grid gap-8 lg:grid-cols-[1.6fr_1fr]">
+          <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold">Active projects</h2>
               {activeProjectId ? (
-                <span className="text-xs uppercase tracking-[0.3em] text-white/60">
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
                   Active
                 </span>
               ) : null}
@@ -226,25 +257,23 @@ export default function ProjectsPage() {
                 projects.map((project) => (
                   <button
                     key={project.id}
-                    className={`flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                      activeProjectId === project.id
-                        ? "border-cyan-600/60 bg-cyan-100"
-                        : "border-black/10 bg-white hover:border-black/30"
-                    }`}
+                    className={`group flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left text-sm transition ${activeProjectId === project.id
+                      ? "border-cyan-600/40 bg-cyan-50/50 shadow-sm shadow-cyan-900/5"
+                      : "border-black/5 bg-white hover:border-black/20 hover:shadow-sm hover:shadow-black/5"
+                      }`}
                     onClick={() => setActiveProjectId(project.id)}
                   >
                     <div>
                       <p className="font-semibold">{project.name}</p>
-                      <p className="text-xs text-black/60">
+                      <p className="mt-0.5 text-xs text-black/60">
                         {project.org_id
                           ? `Org ${project.org_id.slice(0, 8)}`
-                          : "Personal"}
+                          : "Personal"}{" "}
+                        • Not connected
                       </p>
                     </div>
                     {activeProjectId === project.id ? (
-                      <span className="text-xs uppercase tracking-[0.3em] text-cyan-700">
-                        Active
-                      </span>
+                      <div className="h-2 w-2 rounded-full bg-cyan-500 shadow-sm shadow-cyan-500/50" />
                     ) : null}
                   </button>
                 ))
@@ -254,25 +283,30 @@ export default function ProjectsPage() {
               <h3 className="text-sm font-semibold text-black/70">Create project</h3>
               <div className="mt-4 grid gap-3">
                 <input
-                  className="w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-cyan-600"
+                  className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
                   placeholder="Project name"
                   value={projectName}
                   onChange={(event) => setProjectName(event.target.value)}
                 />
-                <select
-                  className="w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-cyan-600"
-                  value={projectOrgId}
-                  onChange={(event) => setProjectOrgId(event.target.value)}
-                >
-                  <option value="personal">Personal</option>
-                  {orgOptions.map((org) => (
-                    <option key={org.org_id} value={org.org_id}>
-                      {org.org_name} ({org.role})
-                    </option>
-                  ))}
-                </select>
+                {orgOptions.length > 0 && (
+                  <select
+                    className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                    value={projectOrgId}
+                    onChange={(event) => setProjectOrgId(event.target.value)}
+                  >
+                    <option value="personal">Personal</option>
+                    {orgOptions.map((org) => (
+                      <option key={org.org_id} value={org.org_id}>
+                        {org.org_name} ({org.role})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <p className="text-xs text-black/50">
+                  Projects contain databases, queries, and AI analysis.
+                </p>
                 <button
-                  className="rounded-full bg-black px-4 py-3 text-xs font-semibold uppercase tracking-[0.3em] text-white transition hover:-translate-y-0.5"
+                  className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
                   onClick={handleCreateProject}
                 >
                   Create project
@@ -282,16 +316,18 @@ export default function ProjectsPage() {
           </section>
 
           <section className="space-y-6">
-            <div className="rounded-3xl border border-black/10 bg-white/80 p-6">
+            <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
               <h2 className="text-lg font-semibold">Organizations</h2>
               <div className="mt-4 space-y-2">
                 {orgOptions.length === 0 ? (
-                  <p className="text-sm text-black/60">No org memberships yet.</p>
+                  <p className="text-sm text-black/60">
+                    Create an organization to collaborate with your team and share projects.
+                  </p>
                 ) : (
                   orgOptions.map((org) => (
                     <div
                       key={org.org_id}
-                      className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm"
+                      className="rounded-xl border border-black/5 bg-white px-3 py-2 text-sm"
                     >
                       <p className="font-semibold">{org.org_name}</p>
                       <p className="text-xs text-black/60">{org.role}</p>
@@ -303,13 +339,13 @@ export default function ProjectsPage() {
                 <h3 className="text-sm font-semibold text-black/70">Create org</h3>
                 <div className="mt-3 flex gap-3">
                   <input
-                    className="flex-1 rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-emerald-600"
+                    className="flex-1 rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
                     placeholder="Org name"
                     value={orgName}
                     onChange={(event) => setOrgName(event.target.value)}
                   />
                   <button
-                    className="rounded-full bg-black px-4 py-3 text-xs font-semibold uppercase tracking-[0.3em] text-white transition hover:-translate-y-0.5"
+                    className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
                     onClick={handleCreateOrg}
                   >
                     Create
@@ -318,55 +354,89 @@ export default function ProjectsPage() {
               </div>
             </div>
 
-            <div className="rounded-3xl border border-black/10 bg-white/80 p-6">
+
+
+            <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
               <h2 className="text-lg font-semibold">Invite members</h2>
-              <p className="mt-2 text-sm text-black/60">
-                Invite teammates and share the token once.
-              </p>
-              <div className="mt-4 grid gap-3">
-                <select
-                  className="w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-emerald-600"
-                  value={inviteOrgId ?? ""}
-                  onChange={(event) => setInviteOrgId(event.target.value || null)}
-                >
-                  <option value="">Choose org</option>
-                  {orgOptions.map((org) => (
-                    <option key={org.org_id} value={org.org_id}>
-                      {org.org_name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-emerald-600"
-                  placeholder="Invite email"
-                  value={inviteEmail}
-                  onChange={(event) => setInviteEmail(event.target.value)}
-                />
-                <select
-                  className="w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black outline-none transition focus:border-emerald-600"
-                  value={inviteRole}
-                  onChange={(event) => setInviteRole(event.target.value)}
-                >
-                  <option value="member">Member</option>
-                  <option value="admin">Admin</option>
-                  <option value="owner">Owner</option>
-                </select>
-                <button
-                  className="rounded-full bg-black px-4 py-3 text-xs font-semibold uppercase tracking-[0.3em] text-white transition hover:-translate-y-0.5"
-                  onClick={handleInvite}
-                >
-                  Create invite
-                </button>
-                {inviteToken ? (
-                  <div className="rounded-2xl border border-emerald-300/60 bg-emerald-100 px-4 py-3 text-xs text-emerald-800">
-                    Invite token: <span className="font-semibold">{inviteToken}</span>
+              {orgOptions.length === 0 ? (
+                <p className="mt-2 text-sm text-black/60">
+                  Create an organization to invite team members.
+                </p>
+              ) : (
+                <>
+                  <p className="mt-2 text-sm text-black/60">
+                    Invite teammates and share the token once.
+                  </p>
+                  <div className="mt-4 grid gap-3">
+                    <select
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      value={inviteOrgId ?? ""}
+                      onChange={(event) => setInviteOrgId(event.target.value || null)}
+                    >
+                      <option value="">Choose org</option>
+                      {orgOptions.map((org) => (
+                        <option key={org.org_id} value={org.org_id}>
+                          {org.org_name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      placeholder="Invite email"
+                      value={inviteEmail}
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                    />
+                    <select
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      value={inviteRole}
+                      onChange={(event) => setInviteRole(event.target.value)}
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                      <option value="owner">Owner</option>
+                    </select>
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                      onClick={handleInvite}
+                    >
+                      Create invite
+                    </button>
+                    {inviteToken ? (
+                      <div className="rounded-xl border border-emerald-300/60 bg-emerald-100 px-3 py-2 text-xs text-emerald-800">
+                        Invite token: <span className="font-semibold select-all">{inviteToken}</span>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
+                </>
+              )}
             </div>
           </section>
         </div>
-      </div>
-    </div>
+
+        <div className="mt-12 border-t border-black/5 pt-8">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-black/40">
+            Next steps
+          </p>
+          <div className="mt-6 grid gap-6 sm:grid-cols-3">
+            <div>
+              <span className="block text-2xl font-bold text-black/10">01</span>
+              <p className="mt-2 text-sm font-medium text-black/80">Create a project</p>
+            </div>
+            <div>
+              <span className="block text-2xl font-bold text-black/10">02</span>
+              <p className="mt-2 text-sm font-medium text-black/80">
+                Connect your database
+              </p>
+            </div>
+            <div>
+              <span className="block text-2xl font-bold text-black/10">03</span>
+              <p className="mt-2 text-sm font-medium text-black/80">
+                Analyze and optimize queries with AI
+              </p>
+            </div>
+          </div>
+        </div>
+      </div >
+    </div >
   );
 }
