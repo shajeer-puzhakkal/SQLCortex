@@ -6,6 +6,7 @@ import {
   AnalysisCreateRequest,
   AnalysisCreateResponse,
   AnalysisGetResponse,
+  AnalysisListResponse,
   ErrorResponse,
   HealthResponse,
   makeError,
@@ -41,6 +42,20 @@ dotenv.config();
 const app = express();
 const prisma = new PrismaClient();
 
+const defaultAnalyzerPort = process.env.ANALYZER_PORT ?? 8000;
+const analyzerBaseUrl =
+  process.env.ANALYZER_BASE_URL ??
+  process.env.ANALYZER_URL ??
+  `http://analyzer:${defaultAnalyzerPort}`;
+const analyzerTimeoutMsEnv = Number(
+  process.env.ANALYZER_TIMEOUT_MS ?? process.env.ANALYZER_TIMEOUT ?? 8000
+);
+const ANALYZER_TIMEOUT_MS =
+  Number.isFinite(analyzerTimeoutMsEnv) && analyzerTimeoutMsEnv > 0
+    ? analyzerTimeoutMsEnv
+    : 8000;
+const ANALYSIS_HISTORY_LIMIT = 50;
+
 const webOrigin = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 const SubjectType = {
   USER: "USER",
@@ -48,10 +63,211 @@ const SubjectType = {
 } as const;
 type SubjectType = (typeof SubjectType)[keyof typeof SubjectType];
 
+type ProjectContext =
+  | {
+      projectId: string | null;
+      orgId: string | null;
+      project?: { id: string; orgId: string | null; ownerUserId: string | null; name: string };
+    }
+  | { error: ErrorResponse; status: number };
+
+type AnalyzerResultPayload = {
+  analysis: {
+    result: Prisma.InputJsonValue | null;
+    status?: string | null;
+  };
+};
+
+type AnalyzerError = {
+  status: number;
+  payload: ErrorResponse;
+};
+
+type AnalysisResultValue = Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
+
+function toJsonResult(value: unknown): AnalysisResultValue {
+  if (value === null || typeof value === "undefined") {
+    return Prisma.JsonNull;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+  } catch {
+    return Prisma.JsonNull;
+  }
+}
+
 app.use(cors({ origin: webOrigin, credentials: true }));
 app.use(express.json());
 app.use(attachAuth(prisma));
 app.use(createRateLimitMiddleware(prisma));
+
+function isReadOnlySql(sql: string): boolean {
+  const withoutLineComments = sql.replace(/--.*?$/gm, "");
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "");
+  const normalized = withoutBlockComments.trim().toLowerCase();
+
+  if (normalized.includes(";") && normalized.indexOf(";") < normalized.length - 1) {
+    return false;
+  }
+
+  if (normalized.startsWith("select")) {
+    return true;
+  }
+
+  if (normalized.startsWith("explain")) {
+    let afterExplain = normalized.slice("explain".length).trim();
+    if (afterExplain.startsWith("(")) {
+      let depth = 0;
+      for (let i = 0; i < afterExplain.length; i += 1) {
+        const ch = afterExplain[i];
+        if (ch === "(") {
+          depth += 1;
+        } else if (ch === ")") {
+          depth -= 1;
+          if (depth === 0) {
+            afterExplain = afterExplain.slice(i + 1).trim();
+            break;
+          }
+        }
+      }
+    }
+    return afterExplain.startsWith("select");
+  }
+
+  return false;
+}
+
+async function callAnalyzer(
+  sql: string,
+  explainJson: Prisma.InputJsonValue,
+  context: { projectId: string | null; userId: string | null; orgId: string | null }
+): Promise<AnalyzerResultPayload> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ANALYZER_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${analyzerBaseUrl}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        sql,
+        explain_json: explainJson,
+        project_id: context.projectId,
+        user_id: context.userId,
+        org_id: context.orgId,
+      }),
+      signal: controller.signal,
+    });
+
+    const payload = (await response.json().catch(() => null)) as
+      | AnalyzerResultPayload
+      | ErrorResponse
+      | null;
+
+    if (!response.ok) {
+      if (payload && typeof (payload as ErrorResponse).code === "string") {
+        throw {
+          status: response.status,
+          payload: payload as ErrorResponse,
+        } satisfies AnalyzerError;
+      }
+      throw {
+        status: 502,
+        payload: makeError("ANALYZER_ERROR", "Analyzer service returned an unexpected response", {
+          status: response.status,
+        }),
+      } satisfies AnalyzerError;
+    }
+
+    if (!payload || typeof payload !== "object" || !("analysis" in payload)) {
+      throw {
+        status: 502,
+        payload: makeError("ANALYZER_ERROR", "Analyzer response malformed"),
+      } satisfies AnalyzerError;
+    }
+
+    return payload as AnalyzerResultPayload;
+  } catch (err) {
+    if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      throw err as AnalyzerError;
+    }
+
+    if ((err as Error)?.name === "AbortError") {
+      throw {
+        status: 504,
+        payload: makeError("ANALYZER_TIMEOUT", "Analysis timed out", {
+          timeout_ms: ANALYZER_TIMEOUT_MS,
+        }),
+      } satisfies AnalyzerError;
+    }
+
+    throw {
+      status: 502,
+      payload: makeError("ANALYZER_ERROR", "Could not reach analyzer", {
+        reason: err instanceof Error ? err.message : "unknown",
+      }),
+    } satisfies AnalyzerError;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function updateAnalysisResult(
+  client: PrismaClient | Prisma.TransactionClient,
+  analysisId: string,
+  status: string,
+  result: AnalysisResultValue
+) {
+  return client.analysis.update({
+    where: { id: analysisId },
+    data: { status, result },
+  });
+}
+
+async function getRetentionCutoffForProject(
+  prismaClient: PrismaClient,
+  project: { orgId: string | null; ownerUserId: string | null }
+) {
+  const subject =
+    project.orgId
+      ? ({ subjectType: "ORG", orgId: project.orgId } as const)
+      : project.ownerUserId
+        ? ({ subjectType: "USER", userId: project.ownerUserId } as const)
+        : null;
+
+  if (!subject) {
+    return null;
+  }
+
+  const planContext = await getPlanContext(prismaClient, subject);
+  if (planContext.plan.historyRetentionDays <= 0) {
+    return null;
+  }
+
+  const cutoffMs = planContext.plan.historyRetentionDays * 24 * 60 * 60 * 1000;
+  return new Date(Date.now() - cutoffMs);
+}
+
+async function listAnalysesByProject(
+  prismaClient: PrismaClient,
+  projectId: string,
+  retentionCutoff: Date | null,
+  limit = ANALYSIS_HISTORY_LIMIT
+) {
+  const clampedLimit = Math.min(Math.max(1, limit), 200);
+  const where: Prisma.AnalysisWhereInput = {
+    projectId,
+    ...(retentionCutoff ? { createdAt: { gte: retentionCutoff } } : {}),
+  };
+
+  return prismaClient.analysis.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: clampedLimit,
+  });
+}
 
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -125,7 +341,7 @@ async function requireOrgRole(
 async function resolveProjectContext(
   auth: NonNullable<AuthenticatedRequest["auth"]>,
   projectId: string | null | undefined
-) {
+): Promise<ProjectContext> {
   let resolvedProjectId = projectId ?? null;
 
   if (auth.tokenProjectId) {
@@ -144,6 +360,7 @@ async function resolveProjectContext(
 
   const project = await prisma.project.findUnique({
     where: { id: resolvedProjectId },
+    select: { id: true, name: true, orgId: true, ownerUserId: true },
   });
   if (!project) {
     return { error: makeError("INVALID_INPUT", "Project not found"), status: 400 };
@@ -153,12 +370,12 @@ async function resolveProjectContext(
     if (!auth.userId || auth.userId !== project.ownerUserId) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
     }
-    return { projectId: project.id, orgId: null };
+    return { projectId: project.id, orgId: null, project };
   }
 
   if (project.orgId) {
     if (auth.orgId && auth.orgId === project.orgId) {
-      return { projectId: project.id, orgId: project.orgId };
+      return { projectId: project.id, orgId: project.orgId, project };
     }
     if (!auth.userId) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
@@ -167,7 +384,7 @@ async function resolveProjectContext(
     if (!membership) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
     }
-    return { projectId: project.id, orgId: project.orgId };
+    return { projectId: project.id, orgId: project.orgId, project };
   }
 
   return { error: makeError("INVALID_INPUT", "Project ownership is invalid"), status: 400 };
@@ -946,6 +1163,12 @@ app.post(
         .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
     }
 
+    if (!isReadOnlySql(body.sql)) {
+      return res
+        .status(400)
+        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or EXPLAIN SELECT are permitted"));
+    }
+
     if (typeof body.explain_json === "undefined") {
       return res
         .status(400)
@@ -1034,7 +1257,76 @@ app.post(
       return created;
     });
 
-    return res.status(201).json({ analysis: mapAnalysisToResource(analysis) });
+    try {
+      const analyzerResponse = await callAnalyzer(body.sql, explainJsonParsed as Prisma.InputJsonValue, {
+        projectId: projectContext.projectId,
+        userId: auth.userId ?? null,
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+      });
+
+      const resultValue = toJsonResult(analyzerResponse.analysis.result);
+      const completed = await updateAnalysisResult(
+        prisma,
+        analysis.id,
+        analyzerResponse.analysis.status ?? "completed",
+        resultValue
+      );
+
+      return res.status(201).json({ analysis: mapAnalysisToResource(completed) });
+    } catch (err) {
+      const analyzerErr = (err as AnalyzerError) ?? null;
+      const payload =
+        analyzerErr?.payload ?? makeError("ANALYZER_ERROR", "Analyzer failed unexpectedly");
+      const status = analyzerErr?.status ?? 502;
+
+      await updateAnalysisResult(prisma, analysis.id, "error", toJsonResult(payload));
+      return res.status(status).json(payload);
+    }
+  }
+);
+
+app.get(
+  "/api/v1/analyses",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, unknown, { project_id?: string; limit?: string }>,
+    res: Response<AnalysisListResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const projectId = typeof req.query.project_id === "string" ? req.query.project_id : null;
+    if (!projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    if (!projectContext.projectId || !projectContext.project) {
+      return res.status(404).json(makeError("INVALID_INPUT", "Project not found"));
+    }
+
+    const limitRaw =
+      typeof req.query.limit === "string" && req.query.limit.trim().length > 0
+        ? Number(req.query.limit)
+        : ANALYSIS_HISTORY_LIMIT;
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : ANALYSIS_HISTORY_LIMIT;
+    const retentionCutoff = await getRetentionCutoffForProject(prisma, projectContext.project);
+
+    const analyses = await listAnalysesByProject(
+      prisma,
+      projectContext.projectId,
+      retentionCutoff,
+      limit
+    );
+
+    return res.json({ analyses: analyses.map(mapAnalysisToResource) });
   }
 );
 

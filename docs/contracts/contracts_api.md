@@ -55,8 +55,16 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `sql` (string, required)
   - `explain_json` (object|array, required)
   - `project_id` (uuid, optional)
+- Validates read-only SQL (only `SELECT` / `EXPLAIN SELECT`), plan quotas, and explain JSON size.
+- Invokes analyzer service, persists result JSONB + status (`queued` → `completed|error`).
 - Success: `201 { "analysis": AnalysisResource }` (includes `org_id` attribution)
-- Errors: `400 INVALID_INPUT` or `INVALID_EXPLAIN_JSON`
+- Errors: `400 INVALID_INPUT` / `INVALID_EXPLAIN_JSON` / `SQL_NOT_READ_ONLY`, `504 ANALYZER_TIMEOUT`, `402 PLAN_LIMIT_EXCEEDED`
+
+### GET `/api/v1/analyses`
+- Query: `project_id` (uuid, required), `limit?` (default 50, max 200)
+- Returns history list for the project respecting plan retention windows.
+- Success: `200 { "analyses": AnalysisResource[] }`
+- Errors: `400 INVALID_INPUT`, `403 FORBIDDEN`
 
 ### GET `/api/v1/analyses/:id`
 - Success: `200 { "analysis": AnalysisResource }`

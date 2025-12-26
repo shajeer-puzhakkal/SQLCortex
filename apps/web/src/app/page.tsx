@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import type { ReactNode } from "react";
 
 function Icon({
@@ -13,7 +14,35 @@ function Icon({
   );
 }
 
-export default function Home() {
+async function getIsSignedIn() {
+  const cookieStore = await cookies();
+  const sessionCookieName = process.env.SESSION_COOKIE_NAME ?? "sc_session";
+  if (!cookieStore.get(sessionCookieName)) {
+    return false;
+  }
+
+  const apiBase =
+    process.env.API_BASE_URL ??
+    process.env.NEXT_PUBLIC_API_BASE_URL ??
+    "http://localhost:4000";
+
+  try {
+    const cookieHeader = cookieStore
+      .getAll()
+      .map(({ name, value }) => `${name}=${value}`)
+      .join("; ");
+    const response = await fetch(`${apiBase}/api/v1/me`, {
+      headers: { Cookie: cookieHeader },
+      cache: "no-store",
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export default async function Home() {
+  const isSignedIn = await getIsSignedIn();
   return (
     <div className="relative min-h-screen bg-[#f8f4ee] text-[#141414]">
       <div className="pointer-events-none absolute inset-0">
@@ -30,12 +59,14 @@ export default function Home() {
             SQLCortex
           </Link>
           <nav className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.25em]">
-            <Link
-              className="rounded-full border border-transparent px-4 py-2 text-black/60 hover:text-black"
-              href="/projects"
-            >
-              Projects
-            </Link>
+            {isSignedIn ? (
+              <Link
+                className="rounded-full border border-transparent px-4 py-2 text-black/60 hover:text-black"
+                href="/projects"
+              >
+                Projects
+              </Link>
+            ) : null}
             <Link
               className="rounded-full border border-black/20 bg-white/50 px-4 py-2 text-black hover:border-black/40"
               href="/login"
@@ -79,9 +110,14 @@ export default function Home() {
                 >
                   Sign in
                 </Link>
-                <Link className="px-2 py-3 text-sm font-semibold text-black/70 hover:text-black" href="/projects">
-                  Open projects →
-                </Link>
+                {isSignedIn ? (
+                  <Link
+                    className="px-2 py-3 text-sm font-semibold text-black/70 hover:text-black"
+                    href="/projects"
+                  >
+                    Open projects
+                  </Link>
+                ) : null}
               </div>
               <div className="mt-10 grid gap-4 sm:grid-cols-3">
                 <div className="rounded-3xl border border-black/10 bg-white/70 p-4 shadow-sm shadow-black/5">
@@ -224,12 +260,14 @@ export default function Home() {
                   Built around a single source of truth for permissions.
                 </h2>
               </div>
-              <Link
-                className="rounded-full border border-black/20 bg-white/70 px-5 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-black hover:border-black/40"
-                href="/projects"
-              >
-                View projects
-              </Link>
+              {isSignedIn ? (
+                <Link
+                  className="rounded-full border border-black/20 bg-white/70 px-5 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-black hover:border-black/40"
+                  href="/projects"
+                >
+                  View projects
+                </Link>
+              ) : null}
             </div>
 
             <div className="mt-8 grid gap-4 md:grid-cols-3">

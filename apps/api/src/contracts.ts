@@ -40,6 +40,7 @@ export type AnalysisResource = {
 
 export type AnalysisCreateResponse = { analysis: AnalysisResource };
 export type AnalysisGetResponse = { analysis: AnalysisResource };
+export type AnalysisListResponse = { analyses: AnalysisResource[] };
 
 export const ERROR_CODES: ErrorCode[] = [
   "UNAUTHORIZED",
