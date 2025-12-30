@@ -1,0 +1,24 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M24 6C14.0589 6 6 14.0589 6 24C6 33.9411 14.0589 42 24 42" stroke="#0ea5e9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 6C33.9411 6 42 14.0589 42 24C42 33.9411 33.9411 42 24 42" stroke="#0ea5e9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 6V42" stroke="#0ea5e9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Left Hemisphere (Grid) -->
+  <path d="M6 24H24" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M10 14H24" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M10 34H24" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M15 6V42" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Right Hemisphere (Circuits) -->
+  <circle cx="34" cy="14" r="2.5" fill="#0ea5e9"/>
+  <path d="M24 14H34" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  
+  <circle cx="38" cy="24" r="2.5" fill="#0ea5e9"/>
+  <path d="M24 24H30L34 24L38 24" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  
+  <circle cx="34" cy="34" r="2.5" fill="#0ea5e9"/>
+  <path d="M24 34H34" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  
+  <path d="M34 14V18" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M38 24V28" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
