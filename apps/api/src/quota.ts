@@ -92,6 +92,23 @@ export async function getAnalysesUsedThisMonth(
   return counter?.analysesCount ?? 0;
 }
 
+export async function getLlmCallsUsedThisMonth(
+  prisma: PrismaClient | Prisma.TransactionClient,
+  subject: PlanSubject,
+  now: Date = new Date()
+) {
+  const { start } = monthWindowUtc(now);
+
+  const counter = await prisma.usageCounter.findFirst({
+    where:
+      subject.subjectType === "ORG"
+        ? { subjectType: "ORG", orgId: subject.orgId, month: start }
+        : { subjectType: "USER", userId: subject.userId, month: start },
+  });
+
+  return counter?.llmCallsCount ?? 0;
+}
+
 export async function incrementAnalysesThisMonth(
   prisma: PrismaClient | Prisma.TransactionClient,
   subject: PlanSubject,
@@ -121,6 +138,39 @@ export async function incrementAnalysesThisMonth(
       month: start,
       analysesCount: 1,
       llmCallsCount: 0,
+    },
+  });
+}
+
+export async function incrementLlmCallsThisMonth(
+  prisma: PrismaClient | Prisma.TransactionClient,
+  subject: PlanSubject,
+  now: Date = new Date()
+) {
+  const { start } = monthWindowUtc(now);
+
+  const existing = await prisma.usageCounter.findFirst({
+    where:
+      subject.subjectType === "ORG"
+        ? { subjectType: "ORG", orgId: subject.orgId, month: start }
+        : { subjectType: "USER", userId: subject.userId, month: start },
+  });
+
+  if (existing) {
+    return prisma.usageCounter.update({
+      where: { id: existing.id },
+      data: { llmCallsCount: { increment: 1 } },
+    });
+  }
+
+  return prisma.usageCounter.create({
+    data: {
+      subjectType: subject.subjectType,
+      userId: subject.subjectType === "USER" ? subject.userId : null,
+      orgId: subject.subjectType === "ORG" ? subject.orgId : null,
+      month: start,
+      analysesCount: 0,
+      llmCallsCount: 1,
     },
   });
 }

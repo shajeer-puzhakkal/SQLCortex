@@ -19,6 +19,7 @@ import {
   countProjectsForSubject,
   getAnalysesUsedThisMonth,
   incrementAnalysesThisMonth,
+  incrementLlmCallsThisMonth,
   makePlanLimitExceededError,
 } from "./quota";
 import {
@@ -36,6 +37,7 @@ import {
   verifyPassword,
 } from "./auth";
 import { createRateLimitMiddleware } from "./rateLimit";
+import { logAnalysisTelemetry } from "./telemetry";
 
 dotenv.config();
 
@@ -141,7 +143,12 @@ function isReadOnlySql(sql: string): boolean {
 async function callAnalyzer(
   sql: string,
   explainJson: Prisma.InputJsonValue,
-  context: { projectId: string | null; userId: string | null; orgId: string | null }
+  context: {
+    projectId: string | null;
+    userId: string | null;
+    orgId: string | null;
+    llmEnabled: boolean;
+  }
 ): Promise<AnalyzerResultPayload> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ANALYZER_TIMEOUT_MS);
@@ -154,6 +161,7 @@ async function callAnalyzer(
       body: JSON.stringify({
         sql,
         explain_json: explainJson,
+        llm_enabled: context.llmEnabled,
         project_id: context.projectId,
         user_id: context.userId,
         org_id: context.orgId,
@@ -1215,6 +1223,7 @@ app.post(
     }
 
     const planContext = await getPlanContext(prisma, quotaSubject);
+    const llmEnabled = planContext.plan.llmEnabled;
 
     const sizeError = checkSqlAndExplainSizeLimits(
       planContext.plan,
@@ -1223,12 +1232,34 @@ app.post(
       explainSerialized
     );
     if (sizeError) {
+      logAnalysisTelemetry({
+        analysisId: null,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        analyzerDurationMs: null,
+        analyzerErrorCode: sizeError.code,
+        quotaDenied: true,
+        rateLimited: false,
+        llmUsed: false,
+      });
       return res.status(402).json(sizeError);
     }
 
     const now = new Date();
     const usedThisMonth = await getAnalysesUsedThisMonth(prisma, quotaSubject, now);
     if (usedThisMonth >= planContext.plan.analysesPerMonth) {
+      logAnalysisTelemetry({
+        analysisId: null,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        analyzerDurationMs: null,
+        analyzerErrorCode: "PLAN_LIMIT_EXCEEDED",
+        quotaDenied: true,
+        rateLimited: false,
+        llmUsed: false,
+      });
       return res
         .status(402)
         .json(
@@ -1257,12 +1288,16 @@ app.post(
       return created;
     });
 
+    let analyzerStartedAt: number | null = null;
     try {
+      analyzerStartedAt = Date.now();
       const analyzerResponse = await callAnalyzer(body.sql, explainJsonParsed as Prisma.InputJsonValue, {
         projectId: projectContext.projectId,
         userId: auth.userId ?? null,
         orgId: projectContext.orgId ?? auth.orgId ?? null,
+        llmEnabled,
       });
+      const analyzerDurationMs = analyzerStartedAt ? Date.now() - analyzerStartedAt : null;
 
       const resultValue = toJsonResult(analyzerResponse.analysis.result);
       const completed = await updateAnalysisResult(
@@ -1272,14 +1307,49 @@ app.post(
         resultValue
       );
 
+      const llmUsed =
+        analyzerResponse.analysis.result &&
+        typeof analyzerResponse.analysis.result === "object" &&
+        "llm_used" in analyzerResponse.analysis.result
+          ? Boolean((analyzerResponse.analysis.result as { llm_used?: unknown }).llm_used)
+          : false;
+
+      if (llmUsed) {
+        await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+      }
+
+      logAnalysisTelemetry({
+        analysisId: analysis.id,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        analyzerDurationMs,
+        analyzerErrorCode: null,
+        quotaDenied: false,
+        rateLimited: false,
+        llmUsed,
+      });
+
       return res.status(201).json({ analysis: mapAnalysisToResource(completed) });
     } catch (err) {
+      const analyzerDurationMs = analyzerStartedAt ? Date.now() - analyzerStartedAt : null;
       const analyzerErr = (err as AnalyzerError) ?? null;
       const payload =
         analyzerErr?.payload ?? makeError("ANALYZER_ERROR", "Analyzer failed unexpectedly");
       const status = analyzerErr?.status ?? 502;
 
       await updateAnalysisResult(prisma, analysis.id, "error", toJsonResult(payload));
+      logAnalysisTelemetry({
+        analysisId: analysis.id,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        analyzerDurationMs,
+        analyzerErrorCode: payload.code ?? "ANALYZER_ERROR",
+        quotaDenied: false,
+        rateLimited: false,
+        llmUsed: false,
+      });
       return res.status(status).json(payload);
     }
   }

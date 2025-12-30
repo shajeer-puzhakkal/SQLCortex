@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { makeError } from "./contracts";
 import { getPlanContext, suggestedUpgradeForPlan } from "./plans";
+import { logAnalysisTelemetry } from "./telemetry";
 import type { AuthenticatedRequest } from "./auth";
 
 type Bucket = {
@@ -93,6 +94,19 @@ export function createRateLimitMiddleware(prisma: PrismaClient) {
         Math.ceil((existing.windowStartMs + WINDOW_MS - nowMs) / 1000)
       );
       res.setHeader("Retry-After", retryAfterSeconds.toString());
+      if (req.path.startsWith("/api/v1/analyses")) {
+        logAnalysisTelemetry({
+          analysisId: null,
+          projectId: null,
+          userId: auth.userId ?? null,
+          orgId: auth.orgId ?? null,
+          analyzerDurationMs: null,
+          analyzerErrorCode: "RATE_LIMITED",
+          quotaDenied: false,
+          rateLimited: true,
+          llmUsed: false,
+        });
+      }
       res.status(429).json(
         makeError("RATE_LIMITED", "Rate limit exceeded for current plan.", {
           limit_per_min: limit,
@@ -108,4 +122,3 @@ export function createRateLimitMiddleware(prisma: PrismaClient) {
     next();
   };
 }
-

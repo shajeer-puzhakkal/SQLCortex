@@ -13,6 +13,7 @@ class ErrorResponse(BaseModel):
 class AnalysisRequest(BaseModel):
     sql: str
     explain_json: Any
+    llm_enabled: Optional[bool] = None
     project_id: Optional[str] = None
     user_id: Optional[str] = None
     org_id: Optional[str] = None
@@ -39,6 +40,8 @@ class RewriteSuggestion(BaseModel):
     title: str
     sql: Optional[str] = None
     rationale: Optional[str] = None
+    notes: List[str] = Field(default_factory=list)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class Confidence(BaseModel):
@@ -51,8 +54,11 @@ class AnalyzerOutput(BaseModel):
     findings: List[Finding] = Field(default_factory=list)
     suggested_indexes: List[IndexSuggestion] = Field(default_factory=list)
     suggested_rewrite: Optional[RewriteSuggestion] = None
+    suggested_rewrite_explanation: Optional[str] = None
+    plain_summary: List[str] = Field(default_factory=list)
     anti_patterns: List[str] = Field(default_factory=list)
     confidence: Confidence = Field(default_factory=lambda: Confidence(overall=0.6))
+    llm_used: bool = False
 
 
 class AnalysisResource(BaseModel):

@@ -129,7 +129,7 @@ async def analyze_endpoint(payload: AnalysisRequest):
     try:
         async with anyio.fail_after(REQUEST_TIMEOUT_SECONDS):
             output = await anyio.to_thread.run_sync(
-                analyze, payload.sql, payload.explain_json
+                analyze, payload.sql, payload.explain_json, bool(payload.llm_enabled)
             )
     except ValueError as exc:
         msg = str(exc)

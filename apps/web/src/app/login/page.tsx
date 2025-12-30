@@ -28,7 +28,7 @@ export default function LoginPage() {
         setError(payload?.message ?? "Login failed");
         return;
       }
-      router.push("/projects");
+      router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {

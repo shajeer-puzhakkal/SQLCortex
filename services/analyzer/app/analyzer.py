@@ -4,7 +4,9 @@ from typing import Any, List, Tuple
 
 from .anti_patterns import detect_anti_patterns
 from .heuristics import evaluate_plan, rank_findings
-from .models import AnalyzerOutput, Confidence
+from .llm import generate_llm_suggestions
+from .llm.guardrails import guard_rewrite
+from .models import AnalyzerOutput, Confidence, RewriteSuggestion
 from .plan_parser import NormalizedNode, parse_explain_json
 
 
@@ -23,7 +25,7 @@ def _infer_missing_data(root: NormalizedNode) -> List[str]:
     return missing
 
 
-def analyze(sql: str, explain_json: Any) -> AnalyzerOutput:
+def analyze(sql: str, explain_json: Any, llm_enabled: bool = False) -> AnalyzerOutput:
     root = parse_explain_json(explain_json)
     findings, suggested_indexes = evaluate_plan(root, sql)
     ranked_findings, primary = rank_findings(findings)
@@ -38,11 +40,50 @@ def analyze(sql: str, explain_json: Any) -> AnalyzerOutput:
 
     confidence = Confidence(overall=confidence_score, missing_data=missing_data)
 
+    suggested_rewrite = None
+    suggested_rewrite_explanation = None
+    plain_summary: List[str] = []
+    llm_used = False
+
+    if llm_enabled:
+        llm_suggestion = generate_llm_suggestions(
+            sql,
+            ranked_findings,
+            suggested_indexes,
+            anti_patterns,
+            primary,
+        )
+        llm_used = llm_suggestion.used
+        plain_summary = llm_suggestion.summary
+        if llm_suggestion.rewrite_sql:
+            guard = guard_rewrite(llm_suggestion.rewrite_sql)
+            if guard.allowed:
+                rationale = "; ".join(llm_suggestion.notes) if llm_suggestion.notes else None
+                suggested_rewrite = RewriteSuggestion(
+                    title="Proposed rewrite",
+                    sql=llm_suggestion.rewrite_sql,
+                    rationale=rationale,
+                    notes=llm_suggestion.notes,
+                    confidence=llm_suggestion.confidence,
+                )
+            else:
+                suggested_rewrite_explanation = guard.reason or "Rewrite blocked by guardrails."
+        else:
+            if llm_suggestion.error:
+                suggested_rewrite_explanation = llm_suggestion.error
+            elif llm_suggestion.notes:
+                suggested_rewrite_explanation = llm_suggestion.notes[0]
+    else:
+        suggested_rewrite_explanation = "LLM disabled for current plan."
+
     return AnalyzerOutput(
         primary_bottleneck=primary,
         findings=ranked_findings,
         suggested_indexes=suggested_indexes,
-        suggested_rewrite=None,
+        suggested_rewrite=suggested_rewrite,
+        suggested_rewrite_explanation=suggested_rewrite_explanation,
+        plain_summary=plain_summary,
         anti_patterns=anti_patterns,
         confidence=confidence,
+        llm_used=llm_used,
     )

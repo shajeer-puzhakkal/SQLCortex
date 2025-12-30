@@ -29,22 +29,13 @@ type MeResponse = {
 
 const ACTIVE_PROJECT_KEY = "sqlcortex.activeProjectId";
 
-export default function ProjectsPage() {
+export default function DashboardPage() {
   const router = useRouter();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-
-  const [orgName, setOrgName] = useState("");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("member");
-  const [inviteOrgId, setInviteOrgId] = useState<string | null>(null);
-  const [inviteToken, setInviteToken] = useState<string | null>(null);
-
-  const [projectName, setProjectName] = useState("");
-  const [projectOrgId, setProjectOrgId] = useState("personal");
   const [profileOpen, setProfileOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -95,7 +86,7 @@ export default function ProjectsPage() {
       ]);
 
       if (meResponse.status === 401) {
-        setError("Please sign in to view projects.");
+        setError("Please sign in to view the dashboard.");
         setLoading(false);
         return;
       }
@@ -105,7 +96,7 @@ export default function ProjectsPage() {
       setMe(mePayload);
       setProjects(projectsPayload.projects ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load projects");
+      setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
       setLoading(false);
     }
@@ -142,72 +133,6 @@ export default function ProjectsPage() {
     router.push("/login");
   };
 
-  const handleCreateOrg = async () => {
-    if (!orgName.trim()) {
-      setError("Org name is required.");
-      return;
-    }
-    const response = await fetch(`${API_BASE}/api/v1/orgs`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: orgName.trim() }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to create org.");
-      return;
-    }
-    setOrgName("");
-    await loadData();
-  };
-
-  const handleInvite = async () => {
-    if (!inviteOrgId) {
-      setError("Choose an org to invite into.");
-      return;
-    }
-    if (!inviteEmail.trim()) {
-      setError("Invite email is required.");
-      return;
-    }
-    const response = await fetch(`${API_BASE}/api/v1/orgs/${inviteOrgId}/invites`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to invite member.");
-      return;
-    }
-    const payload = (await response.json()) as { token?: string };
-    setInviteToken(payload.token ?? null);
-    setInviteEmail("");
-  };
-
-  const handleCreateProject = async () => {
-    if (!projectName.trim()) {
-      setError("Project name is required.");
-      return;
-    }
-    const orgId = projectOrgId === "personal" ? null : projectOrgId;
-    const response = await fetch(`${API_BASE}/api/v1/projects`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: projectName.trim(), org_id: orgId }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to create project.");
-      return;
-    }
-    setProjectName("");
-    await loadData();
-  };
-
   if (error && !me) {
     return (
       <div className="min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
@@ -227,6 +152,26 @@ export default function ProjectsPage() {
   const userName = me?.user?.name ?? userEmail;
   const userInitial = userEmail.slice(0, 1).toUpperCase();
   const primaryRole = (me?.memberships?.[0]?.role ?? "member").toUpperCase();
+  const activeProjectName = primaryProject?.name ?? "No active project";
+  const recentProjects = projects.slice(0, 4);
+
+  const queryCounts = [12, 18, 9, 24, 20, 14, 28];
+  const queryLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const maxQueryCount = Math.max(...queryCounts, 1);
+  const totalQueries = queryCounts.reduce((sum, value) => sum + value, 0);
+
+  const perfScores = [72, 68, 74, 70, 78, 82, 76];
+  const perfMax = Math.max(...perfScores, 1);
+  const perfMin = Math.min(...perfScores);
+  const perfRange = Math.max(perfMax - perfMin, 1);
+  const perfPoints = perfScores
+    .map((value, index) => {
+      const x = (index / (perfScores.length - 1)) * 100;
+      const y = 100 - ((value - perfMin) / perfRange) * 100;
+      return `${x},${y}`;
+    })
+    .join(" ");
+  const avgPerf = Math.round(perfScores.reduce((sum, value) => sum + value, 0) / perfScores.length);
 
   return (
     <div className="relative min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
@@ -276,12 +221,14 @@ export default function ProjectsPage() {
             </p>
             <nav className={`mt-3 ${isSidebarOpen ? "space-y-1.5" : "space-y-2"}`}>
               <Link
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
+                aria-current="page"
+                className={`relative flex items-center rounded-xl border border-white/10 bg-white/10 py-2 text-sm font-semibold text-white shadow-sm shadow-black/30 ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
                 href="/dashboard"
                 title="Dashboard"
               >
+                <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-sky-300" />
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
                   <svg
                     viewBox="0 0 24 24"
@@ -299,14 +246,12 @@ export default function ProjectsPage() {
                 <span className={isSidebarOpen ? "" : "hidden"}>Dashboard</span>
               </Link>
               <Link
-                aria-current="page"
-                className={`relative flex items-center rounded-xl border border-white/10 bg-white/10 py-2 text-sm font-semibold text-white shadow-sm shadow-black/30 ${
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
                 href="/projects"
                 title="Projects"
               >
-                <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-sky-300" />
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
                   <svg
                     viewBox="0 0 24 24"
@@ -508,9 +453,9 @@ export default function ProjectsPage() {
                 <div>
                   <p className="text-[11px] uppercase tracking-[0.2em] text-black/40">Home</p>
                   <div className="flex items-center gap-2 text-sm font-semibold text-black/80">
-                    <span>Projects</span>
+                    <span>Dashboard</span>
                     <span className="text-black/30">/</span>
-                    <span>{me?.user?.name ?? "Workspace"}</span>
+                    <span>Overview</span>
                   </div>
                 </div>
               </div>
@@ -621,16 +566,16 @@ export default function ProjectsPage() {
           <div className="w-full px-6 pb-12 pt-8">
             {loading ? (
               <div className="mb-6 rounded-xl border border-black/10 bg-white/70 px-4 py-2 text-xs text-black/60">
-                Syncing projects...
+                Updating dashboard metrics...
               </div>
             ) : null}
             <div className="mb-10">
-              <p className="text-xs font-medium uppercase tracking-wider text-black/40">Workspace</p>
+              <p className="text-xs font-medium uppercase tracking-wider text-black/40">Dashboard</p>
               <h1 className="mt-1 text-2xl font-semibold text-black/90">
-                {me?.user?.name ?? "My Projects"}
+                Welcome back, {me?.user?.name ?? "there"}
               </h1>
               <p className="mt-1 text-sm text-black/60">
-                Manage your databases and AI query optimizations.
+                Track your projects and org workspaces at a glance.
               </p>
             </div>
 
@@ -640,201 +585,190 @@ export default function ProjectsPage() {
               </div>
             ) : null}
 
-            <div className="grid gap-8 lg:grid-cols-[1.6fr_1fr]">
-              <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold">Active projects</h2>
-                  {activeProjectId ? (
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-                      Active
+            <div className="space-y-8">
+              <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                    Queries (7d)
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-black/90">{totalQueries}</p>
+                  <p className="text-xs text-black/50">Sample data</p>
+                </div>
+                <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                    Perf score
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-black/90">{avgPerf}</p>
+                  <p className="text-xs text-black/50">Avg over 7 days</p>
+                </div>
+                <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                    Projects
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-black/90">{projects.length}</p>
+                  <p className="text-xs text-black/50">Total workspaces</p>
+                </div>
+                <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                    Active
+                  </p>
+                  <p className="mt-2 text-base font-semibold text-black/90">{activeProjectName}</p>
+                  <p className="text-xs text-black/50">Current focus</p>
+                </div>
+              </section>
+
+              <section className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+                <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold">Query counts</h2>
+                    <span className="rounded-full bg-cyan-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-700">
+                      Last 7 days
                     </span>
-                  ) : null}
-                </div>
-                <div className="mt-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-black/50">
-                  Choose a project to open the analysis workspace.
-                </div>
-                <div className="mt-6 space-y-3">
-                  {projects.length === 0 ? (
-                    <p className="text-sm text-black/60">No projects yet.</p>
-                  ) : (
-                    projects.map((project) => (
-                      <button
-                        key={project.id}
-                        className={`group flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left text-sm transition ${
-                          activeProjectId === project.id
-                            ? "border-cyan-600/40 bg-cyan-50/50 shadow-sm shadow-cyan-900/5"
-                            : "border-black/5 bg-white hover:border-black/20 hover:shadow-sm hover:shadow-black/5"
-                        }`}
-                        onClick={() => setActiveProjectId(project.id)}
-                      >
-                        <div>
-                          <p className="font-semibold">{project.name}</p>
-                          <p className="mt-0.5 text-xs text-black/60">
-                            {project.org_id ? `Org ${project.org_id.slice(0, 8)}` : "Personal"} - Not connected
-                          </p>
+                  </div>
+                  <p className="mt-2 text-sm text-black/60">
+                    Daily query volume across your workspace.
+                  </p>
+                  <div className="mt-6 flex items-end gap-3">
+                    {queryCounts.map((count, index) => (
+                      <div key={queryLabels[index]} className="flex flex-1 flex-col items-center gap-2">
+                        <div className="flex h-28 w-full items-end justify-center">
+                          <div
+                            className="w-3 rounded-full bg-cyan-300/70"
+                            style={{ height: `${(count / maxQueryCount) * 100}%` }}
+                          />
                         </div>
-                        {activeProjectId === project.id ? (
-                          <div className="h-2 w-2 rounded-full bg-cyan-500 shadow-sm shadow-cyan-500/50" />
-                        ) : null}
-                      </button>
-                    ))
-                  )}
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                          {queryLabels[index]}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-4 flex items-center justify-between text-xs text-black/50">
+                    <span>{totalQueries} total queries</span>
+                    <span>Sample data</span>
+                  </div>
                 </div>
-                <div className="mt-6 border-t border-black/10 pt-6">
-                  <h3 className="text-sm font-semibold text-black/70">Create project</h3>
-                  <div className="mt-4 grid gap-3">
-                    <input
-                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                      placeholder="Project name"
-                      value={projectName}
-                      onChange={(event) => setProjectName(event.target.value)}
-                    />
-                    {orgOptions.length > 0 && (
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                        value={projectOrgId}
-                        onChange={(event) => setProjectOrgId(event.target.value)}
-                      >
-                        <option value="personal">Personal</option>
-                        {orgOptions.map((org) => (
-                          <option key={org.org_id} value={org.org_id}>
-                            {org.org_name} ({org.role})
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    <p className="text-xs text-black/50">
-                      Projects contain databases, queries, and AI analysis.
-                    </p>
-                    <button
-                      className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
-                      onClick={handleCreateProject}
-                    >
-                      Create project
-                    </button>
+
+                <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold">Performance</h2>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
+                      Avg {avgPerf}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm text-black/60">
+                    Query performance index (higher is better).
+                  </p>
+                  <div className="mt-6 rounded-xl border border-black/5 bg-white px-4 py-4">
+                    <svg viewBox="0 0 100 100" className="h-32 w-full">
+                      <defs>
+                        <linearGradient id="perfLine" x1="0" y1="0" x2="1" y2="0">
+                          <stop offset="0%" stopColor="#22d3ee" />
+                          <stop offset="100%" stopColor="#38bdf8" />
+                        </linearGradient>
+                      </defs>
+                      <polyline
+                        points={perfPoints}
+                        fill="none"
+                        stroke="url(#perfLine)"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={`0,100 ${perfPoints} 100,100`}
+                        fill="rgba(56,189,248,0.12)"
+                        stroke="none"
+                      />
+                    </svg>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-black/60">
+                    <div>
+                      <p className="font-semibold text-black/70">Best</p>
+                      <p>{perfMax}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-black/70">Lowest</p>
+                      <p>{perfMin}</p>
+                    </div>
                   </div>
                 </div>
               </section>
 
-            <section className="space-y-6">
-              <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <h2 className="text-lg font-semibold">Organizations</h2>
-                <div className="mt-4 space-y-2">
-                  {orgOptions.length === 0 ? (
-                    <p className="text-sm text-black/60">
-                      Create an organization to collaborate with your team and share projects.
-                    </p>
-                  ) : (
-                    orgOptions.map((org) => (
-                      <div
-                        key={org.org_id}
-                        className="rounded-xl border border-black/5 bg-white px-3 py-2 text-sm"
-                      >
-                        <p className="font-semibold">{org.org_name}</p>
-                        <p className="text-xs text-black/60">{org.role}</p>
+              <section className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
+                <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold">Recent projects</h2>
+                    <Link className="text-xs font-semibold text-black/60 hover:text-black" href="/projects">
+                      View all
+                    </Link>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {recentProjects.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-black/10 px-3 py-4 text-sm text-black/50">
+                        No projects yet.{" "}
+                        <Link className="font-semibold text-black underline" href="/projects">
+                          Create your first project
+                        </Link>
+                        .
                       </div>
-                    ))
-                  )}
-                </div>
-                <div className="mt-6 border-t border-black/10 pt-6">
-                  <h3 className="text-sm font-semibold text-black/70">Create org</h3>
-                  <div className="mt-3 flex gap-3">
-                    <input
-                      className="flex-1 rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                      placeholder="Org name"
-                      value={orgName}
-                      onChange={(event) => setOrgName(event.target.value)}
-                    />
-                    <button
-                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
-                      onClick={handleCreateOrg}
-                    >
-                      Create
-                    </button>
+                    ) : (
+                      recentProjects.map((project) => (
+                        <div
+                          key={project.id}
+                          className="flex items-center justify-between rounded-xl border border-black/5 bg-white px-3 py-2 text-sm"
+                        >
+                          <div>
+                            <p className="font-semibold text-black/80">{project.name}</p>
+                            <p className="text-xs text-black/50">
+                              {project.org_id ? "Org workspace" : "Personal project"}
+                            </p>
+                          </div>
+                          <Link
+                            className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-semibold text-black/70 hover:border-black/30"
+                            href={`/projects/${project.id}/analyses`}
+                            onClick={() => setActiveProjectId(project.id)}
+                          >
+                            Open
+                          </Link>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
-              </div>
 
-              <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <h2 className="text-lg font-semibold">Invite members</h2>
-                {orgOptions.length === 0 ? (
+                <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
+                  <h2 className="text-lg font-semibold">Quick actions</h2>
                   <p className="mt-2 text-sm text-black/60">
-                    Create an organization to invite team members.
+                    Jump into analysis or set up a new workspace.
                   </p>
-                ) : (
-                  <>
-                    <p className="mt-2 text-sm text-black/60">
-                      Invite teammates and share the token once.
-                    </p>
-                    <div className="mt-4 grid gap-3">
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        value={inviteOrgId ?? ""}
-                        onChange={(event) => setInviteOrgId(event.target.value || null)}
-                      >
-                        <option value="">Choose org</option>
-                        {orgOptions.map((org) => (
-                          <option key={org.org_id} value={org.org_id}>
-                            {org.org_name}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        placeholder="Invite email"
-                        value={inviteEmail}
-                        onChange={(event) => setInviteEmail(event.target.value)}
-                      />
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        value={inviteRole}
-                        onChange={(event) => setInviteRole(event.target.value)}
-                      >
-                        <option value="member">Member</option>
-                        <option value="admin">Admin</option>
-                        <option value="owner">Owner</option>
-                      </select>
-                      <button
-                        className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
-                        onClick={handleInvite}
-                      >
-                        Create invite
-                      </button>
-                      {inviteToken ? (
-                        <div className="rounded-xl border border-emerald-300/60 bg-emerald-100 px-3 py-2 text-xs text-emerald-800">
-                          Invite token: <span className="font-semibold select-all">{inviteToken}</span>
-                        </div>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              </div>
-            </section>
-          </div>
-
-          <div className="mt-12 border-t border-black/5 pt-8">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-black/40">
-              Next steps
-            </p>
-            <div className="mt-6 grid gap-6 sm:grid-cols-3">
-              <div>
-                <span className="block text-2xl font-bold text-black/10">01</span>
-                <p className="mt-2 text-sm font-medium text-black/80">Create a project</p>
-              </div>
-              <div>
-                <span className="block text-2xl font-bold text-black/10">02</span>
-                <p className="mt-2 text-sm font-medium text-black/80">
-                  Connect your database
-                </p>
-              </div>
-              <div>
-                <span className="block text-2xl font-bold text-black/10">03</span>
-                <p className="mt-2 text-sm font-medium text-black/80">
-                  Analyze and optimize queries with AI
-                </p>
-              </div>
+                  <div className="mt-5 grid gap-3">
+                    <Link
+                      className="rounded-full bg-black px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white transition hover:-translate-y-0.5 hover:bg-black/80"
+                      href={primaryProject ? `/projects/${primaryProject.id}/analyses` : "/projects"}
+                    >
+                      {primaryProject ? "Run analysis" : "Create project"}
+                    </Link>
+                    <Link
+                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                      href="/projects"
+                    >
+                      Manage projects
+                    </Link>
+                    <Link
+                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                      href="/projects"
+                    >
+                      Invite teammates
+                    </Link>
+                  </div>
+                  <div className="mt-6 rounded-xl border border-black/5 bg-white px-3 py-3 text-xs text-black/60">
+                    Orgs: <span className="font-semibold text-black/80">{orgOptions.length}</span> /
+                    Role: <span className="font-semibold text-black/80">{primaryRole}</span>
+                  </div>
+                </div>
+              </section>
             </div>
-          </div>
         </div>
         </div>
       </div>
