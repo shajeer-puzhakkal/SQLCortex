@@ -1,0 +1,60 @@
+{
+  "name": "sqlcortex-vscode",
+  "displayName": "SQLCortex",
+  "description": "SQLCortex VS Code extension",
+  "version": "0.0.1",
+  "publisher": "sqlcortex",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:sqlcortex.login",
+    "onCommand:sqlcortex.logout",
+    "onCommand:sqlcortex.selectOrg",
+    "onCommand:sqlcortex.selectProject",
+    "onCommand:sqlcortex.runQuery",
+    "onCommand:sqlcortex.runSelection"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sqlcortex.login",
+        "title": "SQLCortex: Login"
+      },
+      {
+        "command": "sqlcortex.logout",
+        "title": "SQLCortex: Logout"
+      },
+      {
+        "command": "sqlcortex.selectOrg",
+        "title": "SQLCortex: Select Org"
+      },
+      {
+        "command": "sqlcortex.selectProject",
+        "title": "SQLCortex: Select Project"
+      },
+      {
+        "command": "sqlcortex.runQuery",
+        "title": "SQLCortex: Run Query"
+      },
+      {
+        "command": "sqlcortex.runSelection",
+        "title": "SQLCortex: Run Selection"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node ./esbuild.mjs",
+    "watch": "node ./esbuild.mjs --watch",
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5"
+  }
+}

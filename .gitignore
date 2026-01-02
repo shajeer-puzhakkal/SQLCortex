@@ -11,4 +11,4 @@ __pycache__/
 venv/
 .DS_Store
 *.log
-codex_tasks
+codex_tasks/

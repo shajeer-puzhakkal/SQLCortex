@@ -1,0 +1,40 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4a4a4a"/>
+    </marker>
+  </defs>
+
+  <rect x="40" y="40" width="520" height="620" fill="#f5f8fa" stroke="#3a3a3a" stroke-width="2"/>
+  <text x="60" y="70" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="bold" fill="#2d2d2d">VS Code</text>
+
+  <rect x="80" y="120" width="440" height="180" fill="#e2ecff" stroke="#3a3a3a" stroke-width="2"/>
+  <text x="100" y="150" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="bold" fill="#2d2d2d">Extension Host</text>
+  <text x="100" y="178" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">Commands</text>
+  <text x="100" y="200" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">SecretStorage</text>
+  <text x="100" y="222" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">API client</text>
+
+  <rect x="80" y="350" width="440" height="220" fill="#e8f6ee" stroke="#3a3a3a" stroke-width="2"/>
+  <text x="100" y="380" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="bold" fill="#2d2d2d">Webview (Results Panel)</text>
+  <text x="100" y="408" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">postMessage only</text>
+  <text x="100" y="430" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">no backend calls</text>
+
+  <rect x="640" y="140" width="500" height="160" fill="#fff0e0" stroke="#3a3a3a" stroke-width="2"/>
+  <text x="660" y="170" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="bold" fill="#2d2d2d">SQLCortex API (apps/api)</text>
+  <text x="660" y="198" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">Auth, Orgs, Projects</text>
+  <text x="660" y="220" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">Query execution + history</text>
+
+  <rect x="700" y="380" width="380" height="160" fill="#f0f0f0" stroke="#3a3a3a" stroke-width="2"/>
+  <text x="720" y="410" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="bold" fill="#2d2d2d">Databases</text>
+  <text x="720" y="438" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">Metadata DB</text>
+  <text x="720" y="460" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2d2d2d">Read-only SQL target</text>
+
+  <line x1="520" y1="210" x2="640" y2="210" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="530" y="190" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#2d2d2d">HTTPS: /api/v1/me /orgs /projects /query/execute</text>
+
+  <line x1="300" y1="300" x2="300" y2="350" stroke="#4a4a4a" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="320" y="330" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#2d2d2d">postMessage</text>
+
+  <line x1="890" y1="300" x2="890" y2="380" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="910" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#2d2d2d">SQL exec + metadata</text>
+</svg>
