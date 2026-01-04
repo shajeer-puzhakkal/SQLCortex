@@ -877,10 +877,11 @@ export default function ProjectAnalysesPage() {
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>Organizations</span>
               </div>
-              <div
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/tokens"
                 title="API tokens"
               >
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
@@ -898,7 +899,7 @@ export default function ProjectAnalysesPage() {
                   </svg>
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>API tokens</span>
-              </div>
+              </Link>
               <div
                 className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
