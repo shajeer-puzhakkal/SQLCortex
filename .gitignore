@@ -12,3 +12,4 @@ venv/
 .DS_Store
 *.log
 codex_tasks/
+notes.txt

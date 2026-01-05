@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import cors from "cors";
 import dotenv from "dotenv";
 import { OrgRole, Prisma, PrismaClient } from "@prisma/client";
@@ -57,6 +58,21 @@ const ANALYZER_TIMEOUT_MS =
     ? analyzerTimeoutMsEnv
     : 8000;
 const ANALYSIS_HISTORY_LIMIT = 50;
+const queryTimeoutMsEnv = Number(
+  process.env.QUERY_TIMEOUT_MS ?? process.env.QUERY_TIMEOUT ?? 10000
+);
+const QUERY_TIMEOUT_MS =
+  Number.isFinite(queryTimeoutMsEnv) && queryTimeoutMsEnv > 0
+    ? queryTimeoutMsEnv
+    : 10000;
+const QUERY_ROW_LIMIT = Number(process.env.QUERY_ROW_LIMIT ?? 1000) || 1000;
+const queryDatabaseUrl = process.env.QUERY_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
+const queryPrisma =
+  queryDatabaseUrl &&
+  process.env.DATABASE_URL &&
+  queryDatabaseUrl !== process.env.DATABASE_URL
+    ? new PrismaClient({ datasources: { db: { url: queryDatabaseUrl } } })
+    : prisma;
 
 const webOrigin = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 const SubjectType = {
@@ -83,6 +99,22 @@ type AnalyzerResultPayload = {
 type AnalyzerError = {
   status: number;
   payload: ErrorResponse;
+};
+
+type ExecuteQueryRequest = {
+  projectId?: string | null;
+  sql?: string;
+  source?: string;
+  client?: { extensionVersion?: string; vscodeVersion?: string };
+};
+
+type ExecuteQueryResponse = {
+  queryId: string;
+  executionTimeMs: number;
+  rowsReturned: number;
+  columns: Array<{ name: string; type: string }>;
+  rows: Array<Array<unknown>>;
+  error: ErrorResponse | null;
 };
 
 type AnalysisResultValue = Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
@@ -138,6 +170,134 @@ function isReadOnlySql(sql: string): boolean {
   }
 
   return false;
+}
+
+function normalizeSql(sql: string): string {
+  return sql.trim().replace(/;+\s*$/, "");
+}
+
+function stripSqlCommentsAndLiterals(sql: string): string {
+  const withoutLineComments = sql.replace(/--.*?$/gm, "");
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "");
+  const withoutStrings = withoutBlockComments
+    .replace(/'(?:''|[^'])*'/g, "''")
+    .replace(/"(?:\"\"|[^\"])*"/g, "\"\"");
+  return withoutStrings;
+}
+
+function hasProhibitedClauses(sql: string): boolean {
+  const cleaned = stripSqlCommentsAndLiterals(sql).toLowerCase();
+  return (
+    /\binto\b/.test(cleaned) ||
+    /\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/.test(cleaned)
+  );
+}
+
+function applyRowLimit(sql: string): string {
+  const normalized = normalizeSql(sql);
+  if (!normalized.toLowerCase().startsWith("select")) {
+    return normalized;
+  }
+  const cleaned = stripSqlCommentsAndLiterals(normalized).toLowerCase();
+  if (/\blimit\b/.test(cleaned) || /\bfetch\s+first\b/.test(cleaned)) {
+    return normalized;
+  }
+  return `${normalized} LIMIT ${QUERY_ROW_LIMIT}`;
+}
+
+function inferColumnType(value: unknown): string {
+  if (value === null || typeof value === "undefined") {
+    return "unknown";
+  }
+  if (typeof value === "bigint") {
+    return "int8";
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? "int4" : "numeric";
+  }
+  if (typeof value === "boolean") {
+    return "bool";
+  }
+  if (typeof value === "string") {
+    return "text";
+  }
+  if (value instanceof Date) {
+    return "timestamptz";
+  }
+  if (Buffer.isBuffer(value)) {
+    return "bytea";
+  }
+  const tag = (value as { constructor?: { name?: string } }).constructor?.name;
+  if (tag === "Decimal") {
+    return "numeric";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  return "jsonb";
+}
+
+function serializeCell(value: unknown): unknown {
+  if (value === null || typeof value === "undefined") {
+    return null;
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("base64");
+  }
+  const tag = (value as { constructor?: { name?: string } }).constructor?.name;
+  if (tag === "Decimal") {
+    return value.toString();
+  }
+  return value;
+}
+
+function formatQueryError(err: unknown): ErrorResponse {
+  const message =
+    err instanceof Error && err.message ? err.message : "Query failed to execute.";
+  if (message.toLowerCase().includes("statement timeout")) {
+    return makeError("ANALYZER_TIMEOUT", "Query timed out.", { reason: message });
+  }
+  return makeError("INVALID_INPUT", "Query failed to execute.", { reason: message });
+}
+
+async function recordQueryExecution(params: {
+  queryId: string;
+  sql: string;
+  source: string;
+  executionTimeMs: number;
+  rowsReturned: number;
+  projectId: string | null;
+  userId: string | null;
+  orgId: string | null;
+  client?: { extensionVersion?: string; vscodeVersion?: string };
+}): Promise<void> {
+  try {
+    await prisma.$executeRaw`
+      INSERT INTO "query_executions"
+        ("id", "sql", "source", "execution_time_ms", "rows_returned", "project_id", "user_id", "org_id", "client_extension_version", "client_vscode_version")
+      VALUES
+        (
+          ${params.queryId},
+          ${params.sql},
+          ${params.source},
+          ${params.executionTimeMs},
+          ${params.rowsReturned},
+          ${params.projectId},
+          ${params.userId},
+          ${params.orgId},
+          ${params.client?.extensionVersion ?? null},
+          ${params.client?.vscodeVersion ?? null}
+        )
+    `;
+  } catch (err) {
+    console.error("Failed to record query execution", err);
+  }
 }
 
 async function callAnalyzer(
@@ -954,6 +1114,99 @@ app.post(
         owner_user_id: project.ownerUserId ?? null,
       },
     });
+  }
+);
+
+app.post(
+  "/api/v1/query/execute",
+  requireAuth(prisma),
+  async (req: Request<unknown, unknown, ExecuteQueryRequest>, res: Response) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const sql = req.body?.sql;
+    if (!sql || typeof sql !== "string" || sql.trim().length === 0) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
+    }
+
+    if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
+      return res
+        .status(400)
+        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or EXPLAIN SELECT are permitted"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, req.body?.projectId ?? null);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+    if (!projectContext.projectId) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`projectId` is required"));
+    }
+
+    const normalizedSql = normalizeSql(sql);
+    const queryId = randomUUID();
+    const startedAt = Date.now();
+    let columns: Array<{ name: string; type: string }> = [];
+    let rows: Array<Array<unknown>> = [];
+    let error: ErrorResponse | null = null;
+
+    try {
+      const querySql = applyRowLimit(normalizedSql);
+      const rawRows = await queryPrisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+        return tx.$queryRawUnsafe(querySql);
+      });
+
+      if (Array.isArray(rawRows)) {
+        const objectRows = rawRows.filter(
+          (row): row is Record<string, unknown> => Boolean(row) && typeof row === "object"
+        );
+        const sample = objectRows[0] ?? null;
+        const columnNames = sample ? Object.keys(sample) : [];
+        columns = columnNames.map((name) => ({
+          name,
+          type: sample ? inferColumnType(sample[name]) : "unknown",
+        }));
+        rows = objectRows.slice(0, QUERY_ROW_LIMIT).map((row) =>
+          columnNames.map((name) => serializeCell(row[name]))
+        );
+      }
+    } catch (err) {
+      error = formatQueryError(err);
+    }
+
+    const executionTimeMs = Math.max(1, Date.now() - startedAt);
+    const rowsReturned = rows.length;
+    const source = req.body?.source ?? "vscode";
+    const orgId = projectContext.orgId ?? auth.orgId ?? null;
+    await recordQueryExecution({
+      queryId,
+      sql: normalizedSql,
+      source,
+      executionTimeMs,
+      rowsReturned,
+      projectId: projectContext.projectId ?? null,
+      userId: auth.userId ?? null,
+      orgId,
+      ...(req.body?.client ? { client: req.body.client } : {}),
+    });
+
+    const response: ExecuteQueryResponse = {
+      queryId,
+      executionTimeMs,
+      rowsReturned,
+      columns,
+      rows,
+      error,
+    };
+
+    return res.json(response);
   }
 );
 

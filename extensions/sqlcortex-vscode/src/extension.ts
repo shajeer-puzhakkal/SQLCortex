@@ -1,6 +1,26 @@
 import * as vscode from "vscode";
-import { clearCachedSession, setCachedSession, verifyToken } from "./auth/session";
+import { createApiClient, formatApiError } from "./api/client";
+import { executeQuery, listOrgs, listProjects } from "./api/endpoints";
+import type { Org, Project } from "./api/types";
+import {
+  clearCachedSession,
+  requireAuth,
+  setCachedSession,
+  verifyToken,
+  type SessionSnapshot,
+} from "./auth/session";
 import { createTokenStore } from "./auth/tokenStore";
+import {
+  clearActiveProject,
+  clearWorkspaceContext,
+  getWorkspaceContext,
+  setActiveOrg,
+  setActiveProject,
+} from "./state/workspaceState";
+import { createStatusBarItem, updateStatusBar } from "./ui/statusBar";
+import { ResultsPanel } from "./ui/resultsPanel";
+import { extractSql, type ExtractMode } from "./sql/extractor";
+import { validateReadOnlySql } from "./sql/validator";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -12,11 +32,14 @@ const COMMANDS: Array<{ id: string; label: string }> = [
 ];
 
 const API_BASE_URL_KEY = "sqlcortex.apiBaseUrl";
-const ACTIVE_ORG_KEY = "sqlcortex.activeOrgId";
-const ACTIVE_PROJECT_KEY = "sqlcortex.activeProjectId";
 const CONTEXT_IS_AUTHED = "sqlcortex.isAuthed";
+const CONTEXT_HAS_PROJECT = "sqlcortex.hasProject";
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
 const LEGACY_API_BASE_URL = "http://localhost:3000";
+const PERSONAL_ORG_LABEL = "Personal workspace";
+
+type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
+type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("SQLCortex");
@@ -26,11 +49,33 @@ export function activate(context: vscode.ExtensionContext) {
   void migrateApiBaseUrl(context, output);
 
   const tokenStore = createTokenStore(context.secrets);
-  void syncAuthContext(tokenStore);
+  const statusBar = createStatusBarItem();
+  context.subscriptions.push(statusBar);
+  void refreshContext(context, tokenStore, statusBar);
 
   const handlers: Record<string, () => Thenable<unknown>> = {
-    "sqlcortex.login": () => loginFlow(context, tokenStore, output),
-    "sqlcortex.logout": () => logoutFlow(context, tokenStore, output),
+    "sqlcortex.login": async () => {
+      const didLogin = await loginFlow(context, tokenStore, output);
+      await refreshContext(context, tokenStore, statusBar);
+      return didLogin;
+    },
+    "sqlcortex.logout": async () => {
+      const didLogout = await logoutFlow(context, tokenStore, output);
+      await refreshContext(context, tokenStore, statusBar);
+      return didLogout;
+    },
+    "sqlcortex.selectOrg": async () => {
+      await selectOrgFlow(context, tokenStore, output, statusBar);
+    },
+    "sqlcortex.selectProject": async () => {
+      await selectProjectFlow(context, tokenStore, output, statusBar);
+    },
+    "sqlcortex.runQuery": async () => {
+      await runQueryFlow(context, tokenStore, output, statusBar);
+    },
+    "sqlcortex.runSelection": async () => {
+      await runSelectionFlow(context, tokenStore, output, statusBar);
+    },
   };
 
   for (const command of COMMANDS) {
@@ -48,6 +93,24 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
+
+async function refreshContext(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  const token = await tokenStore.getAccessToken();
+  const isAuthed = Boolean(token);
+  await vscode.commands.executeCommand("setContext", CONTEXT_IS_AUTHED, isAuthed);
+
+  const workspaceContext = getWorkspaceContext(context);
+  await vscode.commands.executeCommand(
+    "setContext",
+    CONTEXT_HAS_PROJECT,
+    Boolean(workspaceContext.projectId)
+  );
+  updateStatusBar(statusBar, { isAuthed, ...workspaceContext });
+}
 
 async function loginFlow(
   context: vscode.ExtensionContext,
@@ -143,17 +206,361 @@ async function logoutFlow(
 ): Promise<boolean> {
   await tokenStore.clear();
   clearCachedSession();
-  await context.workspaceState.update(ACTIVE_ORG_KEY, undefined);
-  await context.workspaceState.update(ACTIVE_PROJECT_KEY, undefined);
-  await vscode.commands.executeCommand("setContext", CONTEXT_IS_AUTHED, false);
+  await clearWorkspaceContext(context);
   output.appendLine("SQLCortex: Logged out.");
   vscode.window.showInformationMessage("SQLCortex: Logged out.");
   return true;
 }
 
-async function syncAuthContext(tokenStore: ReturnType<typeof createTokenStore>): Promise<void> {
-  const token = await tokenStore.getAccessToken();
-  await vscode.commands.executeCommand("setContext", CONTEXT_IS_AUTHED, Boolean(token));
+async function resolveAuthContext(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel
+): Promise<{ baseUrl: string; token: string; session: SessionSnapshot } | null> {
+  const baseUrl = await getOrPromptApiBaseUrl(context);
+  if (!baseUrl) {
+    return null;
+  }
+
+  try {
+    const auth = await requireAuth({
+      tokenStore,
+      baseUrl,
+      clientHeader: clientHeader(context),
+      promptLogin: () => loginFlow(context, tokenStore, output),
+    });
+    if (!auth) {
+      return null;
+    }
+    return { baseUrl, token: auth.token, session: auth.session };
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 404) {
+      vscode.window.showErrorMessage(
+        `SQLCortex: API not found at ${baseUrl}. Run Login to update the base URL.`
+      );
+    } else {
+      vscode.window.showErrorMessage(`SQLCortex: ${formatRequestError(err)}`);
+    }
+    output.appendLine(`SQLCortex: Auth check failed: ${formatRequestError(err)}`);
+    return null;
+  }
+}
+
+async function selectOrgFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  let orgs: Org[] = [];
+  try {
+    orgs = await listOrgs(client);
+  } catch (err) {
+    reportRequestError(output, "Failed to load orgs", err);
+    return;
+  }
+
+  const workspaceContext = getWorkspaceContext(context);
+  const orgItems: OrgPickItem[] = [];
+  if (auth.session.user) {
+    orgItems.push({
+      label: PERSONAL_ORG_LABEL,
+      description: "Personal",
+      orgId: null,
+      picked: workspaceContext.orgName === PERSONAL_ORG_LABEL,
+    });
+  }
+
+  for (const org of orgs) {
+    orgItems.push({
+      label: org.name,
+      description: formatOrgRole(org.role) ?? undefined,
+      orgId: org.id,
+      picked: workspaceContext.orgId === org.id,
+    });
+  }
+
+  if (orgItems.length === 0) {
+    vscode.window.showInformationMessage("SQLCortex: No orgs available.");
+    return;
+  }
+
+  const selection = await vscode.window.showQuickPick(orgItems, {
+    placeHolder: "Select SQLCortex org",
+    ignoreFocusOut: true,
+  });
+
+  if (!selection) {
+    return;
+  }
+
+  const previous = getWorkspaceContext(context);
+  await setActiveOrg(context, selection.orgId, selection.label);
+  const orgChanged =
+    previous.orgId !== selection.orgId || previous.orgName !== selection.label;
+  if (orgChanged) {
+    await clearActiveProject(context);
+  }
+  await refreshContext(context, tokenStore, statusBar);
+}
+
+async function selectProjectFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  let workspaceContext = getWorkspaceContext(context);
+  if (!workspaceContext.orgName) {
+    await selectOrgFlow(context, tokenStore, output, statusBar);
+    workspaceContext = getWorkspaceContext(context);
+    if (!workspaceContext.orgName) {
+      return;
+    }
+  }
+
+  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  let projects: Project[] = [];
+  try {
+    projects = await listProjects(client);
+  } catch (err) {
+    reportRequestError(output, "Failed to load projects", err);
+    return;
+  }
+
+  const filtered = projects.filter((project) =>
+    workspaceContext.orgId ? project.org_id === workspaceContext.orgId : project.org_id === null
+  );
+  if (filtered.length === 0) {
+    vscode.window.showInformationMessage(
+      `SQLCortex: No projects available for ${workspaceContext.orgName}.`
+    );
+    return;
+  }
+
+  const projectItems: ProjectPickItem[] = filtered.map((project) => ({
+    label: project.name,
+    description: workspaceContext.orgName ?? "Personal",
+    projectId: project.id,
+    picked: workspaceContext.projectId === project.id,
+  }));
+
+  const selection = await vscode.window.showQuickPick(projectItems, {
+    placeHolder: "Select SQLCortex project",
+    ignoreFocusOut: true,
+  });
+
+  if (!selection) {
+    return;
+  }
+
+  await setActiveProject(context, selection.projectId, selection.label);
+  await refreshContext(context, tokenStore, statusBar);
+}
+
+async function ensureActiveProject(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+) {
+  let workspaceContext = getWorkspaceContext(context);
+  if (!workspaceContext.projectId) {
+    await selectProjectFlow(context, tokenStore, output, statusBar);
+    workspaceContext = getWorkspaceContext(context);
+  }
+  if (!workspaceContext.projectId) {
+    vscode.window.showErrorMessage("SQLCortex: Select a project before running queries.");
+    return null;
+  }
+  return workspaceContext;
+}
+
+async function runQueryFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  await runSqlFlow("smart", context, tokenStore, output, statusBar);
+}
+
+async function runSelectionFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  await runSqlFlow("selection", context, tokenStore, output, statusBar);
+}
+
+async function runSqlFlow(
+  mode: ExtractMode,
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBar
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage("SQLCortex: Open a file to run SQL.");
+    return;
+  }
+
+  const extracted = extractSql(editor, mode);
+  if (!extracted.sql) {
+    const message =
+      extracted.source === "selection"
+        ? "SQLCortex: Select SQL to run."
+        : "SQLCortex: Current file is empty.";
+    vscode.window.showWarningMessage(message);
+    return;
+  }
+
+  const validation = validateReadOnlySql(extracted.sql);
+  if (!validation.ok) {
+    vscode.window.showErrorMessage(`SQLCortex: ${validation.reason}`);
+    return;
+  }
+
+  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  const request = {
+    projectId: workspaceContext.projectId,
+    sql: extracted.sql,
+    source: "vscode" as const,
+    client: {
+      extensionVersion: getExtensionVersion(context),
+      vscodeVersion: vscode.version,
+    },
+  };
+
+  output.show(true);
+  output.appendLine(
+    `SQLCortex: Executing ${extracted.source} query (${extracted.sql.length} chars).`
+  );
+
+  try {
+    const response = await executeQuery(client, request);
+    if (response.error) {
+      const errorMessage = response.error.message ?? "Query failed.";
+      output.appendLine(
+        `SQLCortex: Query error (${response.error.code ?? "UNKNOWN"}): ${errorMessage}`
+      );
+      vscode.window.showErrorMessage(`SQLCortex: ${errorMessage}`);
+      ResultsPanel.show(context).update({
+        kind: "error",
+        error: { message: errorMessage, code: response.error.code ?? undefined },
+      });
+      return;
+    }
+
+    output.appendLine(
+      `SQLCortex: Query complete. ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
+    );
+    vscode.window.showInformationMessage(
+      `SQLCortex: Returned ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
+    );
+    ResultsPanel.show(context).update({
+      kind: "success",
+      data: {
+        queryId: response.queryId,
+        executionTimeMs: response.executionTimeMs,
+        rowsReturned: response.rowsReturned,
+        columns: response.columns,
+        rows: response.rows,
+      },
+    });
+  } catch (err) {
+    ResultsPanel.show(context).update({
+      kind: "error",
+      error: { message: formatRequestError(err) },
+    });
+    reportRequestError(output, "Query failed", err);
+  }
+}
+
+function createAuthorizedClient(
+  context: vscode.ExtensionContext,
+  auth: { baseUrl: string; token: string },
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+) {
+  return createApiClient({
+    baseUrl: auth.baseUrl,
+    token: auth.token,
+    clientHeader: clientHeader(context),
+    onUnauthorized: () => handleUnauthorized(context, tokenStore, output, statusBar),
+  });
+}
+
+async function handleUnauthorized(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem
+): Promise<void> {
+  await tokenStore.clear();
+  clearCachedSession();
+  await refreshContext(context, tokenStore, statusBar);
+  output.appendLine("SQLCortex: Session expired. Please log in again.");
+  const choice = await vscode.window.showErrorMessage(
+    "SQLCortex: Session expired. Please log in again.",
+    "Login"
+  );
+  if (choice === "Login") {
+    await loginFlow(context, tokenStore, output);
+    await refreshContext(context, tokenStore, statusBar);
+  }
+}
+
+function formatOrgRole(role: string | null | undefined): string | null {
+  if (!role) {
+    return null;
+  }
+  const normalized = role.toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function formatRequestError(err: unknown): string {
+  return formatApiError(err);
+}
+
+function reportRequestError(output: vscode.OutputChannel, label: string, err: unknown): void {
+  const message = formatRequestError(err);
+  output.appendLine(`SQLCortex: ${label}: ${message}`);
+  const status = (err as { status?: number }).status;
+  if (status === 401) {
+    return;
+  }
+  vscode.window.showErrorMessage(`SQLCortex: ${message}`);
 }
 
 async function getOrPromptApiBaseUrl(
@@ -208,14 +615,14 @@ function validateBaseUrl(value: string): string | undefined {
 }
 
 function clientHeader(context: vscode.ExtensionContext): string {
-  const version = context.extension.packageJSON?.version;
-  const normalized = typeof version === "string" ? version : "0.0.0";
-  return `vscode/${normalized}`;
+  return `vscode/${getExtensionVersion(context)}`;
 }
 
 function formatError(err: unknown): string {
-  if (err instanceof Error && err.message) {
-    return err.message;
-  }
-  return "Authentication failed.";
+  return formatApiError(err);
+}
+
+function getExtensionVersion(context: vscode.ExtensionContext): string {
+  const version = context.extension.packageJSON?.version;
+  return typeof version === "string" ? version : "0.0.0";
 }

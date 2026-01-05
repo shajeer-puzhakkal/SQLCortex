@@ -97,6 +97,25 @@ model Analysis {
   @@map("analyses")
 }
 
+model QueryExecution {
+  id                     String   @id @default(uuid()) @db.Uuid
+  projectId              String?  @db.Uuid @map("project_id")
+  userId                 String?  @db.Uuid @map("user_id")
+  orgId                  String?  @db.Uuid @map("org_id")
+  sql                    String
+  source                 String
+  clientExtensionVersion String?  @map("client_extension_version")
+  clientVscodeVersion    String?  @map("client_vscode_version")
+  executionTimeMs        Int      @map("execution_time_ms")
+  rowsReturned           Int      @map("rows_returned")
+  createdAt              DateTime @default(now()) @map("created_at")
+  project                Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user                   User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization           Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  @@map("query_executions")
+}
+
 model ApiToken {
   id          String      @id @default(uuid()) @db.Uuid
   tokenHash   String      @unique @map("token_hash")
