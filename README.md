@@ -29,6 +29,9 @@ Error contract is standardized: `{ code, message, details? }`.
 ## Database
 Postgres with tables: users, organizations, org_members, projects, analyses (jsonb result), api_tokens, plans, subscriptions, usage_counters. See `docs/contracts/contracts_db_schema.md` for details.
 
+## Query Execution (read-only)
+The API executes SQL via the connection in `QUERY_DATABASE_URL` (if set) or `DATABASE_URL` (fallback). For safety, point `QUERY_DATABASE_URL` at a read-only Postgres user so writes are blocked even if a query slips past validation.
+
 ## Contracts
 Shared contracts live in:
 - TypeScript: `apps/api/src/contracts.ts`

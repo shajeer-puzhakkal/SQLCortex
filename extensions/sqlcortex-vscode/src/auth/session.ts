@@ -1,3 +1,4 @@
+import { createApiClient } from "../api/client";
 import { TokenStore } from "./tokenStore";
 
 export type UserSummary = { id: string; email: string; name: string | null };
@@ -14,11 +15,6 @@ type MeResponse = {
   user?: UserSummary | null;
   org?: OrgSummary | null;
   memberships?: Array<{ org_id: string; org_name: string; role: string }>;
-};
-
-type ApiErrorResponse = {
-  code?: string;
-  message?: string;
 };
 
 let cachedSession: SessionSnapshot | null = null;
@@ -45,30 +41,11 @@ export async function verifyToken(
   token: string,
   clientHeader: string
 ): Promise<SessionSnapshot> {
-  const response = await fetch(`${baseUrl}/api/v1/me`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "X-SQLCortex-Client": clientHeader,
-      Accept: "application/json",
-    },
-  });
-
-  const payload = await readJson<MeResponse | ApiErrorResponse>(response);
-  if (!response.ok) {
-    const message =
-      typeof (payload as ApiErrorResponse | null)?.message === "string"
-        ? (payload as ApiErrorResponse).message
-        : `Authentication failed (HTTP ${response.status})`;
-    const error = new Error(message);
-    (error as { status?: number }).status = response.status;
-    throw error;
-  }
+  const client = createApiClient({ baseUrl, token, clientHeader });
+  const payload = await client.get<MeResponse>("/api/v1/me");
 
   if (!payload || typeof payload !== "object") {
-    const error = new Error("Authentication response malformed");
-    (error as { status?: number }).status = response.status;
-    throw error;
+    throw new Error("Authentication response malformed");
   }
 
   const session: SessionSnapshot = {
@@ -124,17 +101,5 @@ export async function requireAuth(options: {
       return { token: refreshedToken, session };
     }
     throw err;
-  }
-}
-
-async function readJson<T>(response: Response): Promise<T | null> {
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
   }
 }
