@@ -9,7 +9,8 @@ export type ErrorCode =
   | "RATE_LIMITED"
   | "PLAN_LIMIT_EXCEEDED"
   | "ANALYZER_TIMEOUT"
-  | "ANALYZER_ERROR";
+  | "ANALYZER_ERROR"
+  | "SCHEMA_FETCH_FAILED";
 
 export type ErrorResponse = {
   code: ErrorCode;
@@ -52,6 +53,7 @@ export const ERROR_CODES: ErrorCode[] = [
   "PLAN_LIMIT_EXCEEDED",
   "ANALYZER_TIMEOUT",
   "ANALYZER_ERROR",
+  "SCHEMA_FETCH_FAILED",
 ];
 
 export function mapAnalysisToResource(record: Analysis): AnalysisResource {

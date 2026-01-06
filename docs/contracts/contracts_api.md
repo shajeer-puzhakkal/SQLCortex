@@ -70,6 +70,16 @@ Tokens authenticate via `Authorization: Bearer <token>`.
 - Success: `200 { "analysis": AnalysisResource }`
 - Errors: `404 INVALID_INPUT` when not found
 
+### POST `/api/v1/query/execute`
+- Request body:
+  - `projectId` (uuid, required)
+  - `sql` (string, required)
+  - `source` (string, required, use `vscode`)
+  - `client` (object, required: `extensionVersion`, `vscodeVersion`)
+- Executes a read-only query with server-side timeout and row limit.
+- Success: `200 { "queryId", "executionTimeMs", "rowsReturned", "columns", "rows", "error" }`
+- Errors: `400 INVALID_INPUT` / `SQL_NOT_READ_ONLY`, `504 ANALYZER_TIMEOUT`
+
 ## Analyzer Service (`services/analyzer`)
 
 ### POST `/analyze`

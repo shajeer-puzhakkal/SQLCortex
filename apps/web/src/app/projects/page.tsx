@@ -681,6 +681,16 @@ export default function ProjectsPage() {
                     ))
                   )}
                 </div>
+                {primaryProject ? (
+                  <div className="mt-4">
+                    <Link
+                      className="inline-flex items-center rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black shadow-sm shadow-black/5 transition hover:border-black/30 hover:bg-black/5"
+                      href={`/projects/${primaryProject.id}/connections`}
+                    >
+                      Manage connections
+                    </Link>
+                  </div>
+                ) : null}
                 <div className="mt-6 border-t border-black/10 pt-6">
                   <h3 className="text-sm font-semibold text-black/70">Create project</h3>
                   <div className="mt-4 grid gap-3">
