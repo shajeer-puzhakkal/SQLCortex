@@ -1,7 +1,12 @@
 import * as vscode from "vscode";
 import { createApiClient, formatApiError } from "./api/client";
-import { executeQuery, listOrgs, listProjects } from "./api/endpoints";
-import type { Org, Project } from "./api/types";
+import {
+  executeQuery,
+  listConnections,
+  listOrgs,
+  listProjects,
+} from "./api/endpoints";
+import type { ConnectionResource, Org, Project } from "./api/types";
 import {
   clearCachedSession,
   requireAuth,
@@ -12,13 +17,17 @@ import {
 import { createTokenStore } from "./auth/tokenStore";
 import {
   clearActiveProject,
+  clearActiveConnection,
   clearWorkspaceContext,
   getWorkspaceContext,
   setActiveOrg,
+  setActiveConnection,
   setActiveProject,
 } from "./state/workspaceState";
 import { createStatusBarItem, updateStatusBar } from "./ui/statusBar";
 import { ResultsPanel } from "./ui/resultsPanel";
+import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
+import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { validateReadOnlySql } from "./sql/validator";
 
@@ -27,6 +36,11 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.logout", label: "Logout" },
   { id: "sqlcortex.selectOrg", label: "Select Org" },
   { id: "sqlcortex.selectProject", label: "Select Project" },
+  { id: "sqlcortex.selectConnection", label: "Select Connection" },
+  { id: "sqlcortex.refreshExplorer", label: "Refresh Explorer" },
+  { id: "sqlcortex.searchTable", label: "Search Table" },
+  { id: "sqlcortex.copyTableName", label: "Copy Table Name" },
+  { id: "sqlcortex.copyColumnName", label: "Copy Column Name" },
   { id: "sqlcortex.runQuery", label: "Run Query" },
   { id: "sqlcortex.runSelection", label: "Run Selection" },
 ];
@@ -40,6 +54,13 @@ const PERSONAL_ORG_LABEL = "Personal workspace";
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
+type ConnectionPickItem = vscode.QuickPickItem & { connectionId: string };
+type SchemaPickItem = vscode.QuickPickItem & { schemaName: string };
+type TablePickItem = vscode.QuickPickItem & {
+  schemaName: string;
+  tableName: string;
+  tableType: "table" | "view";
+};
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("SQLCortex");
@@ -53,22 +74,69 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(statusBar);
   void refreshContext(context, tokenStore, statusBar);
 
-  const handlers: Record<string, () => Thenable<unknown>> = {
+  const dbExplorerProvider = new DbExplorerProvider({
+    context,
+    tokenStore,
+    output,
+    resolveAuthContext: () => resolveAuthContext(context, tokenStore, output),
+    createAuthorizedClient: (auth) =>
+      createAuthorizedClient(context, auth, tokenStore, output, statusBar),
+  });
+  const dbExplorerView = vscode.window.createTreeView("sqlcortex.databaseExplorer", {
+    treeDataProvider: dbExplorerProvider,
+    showCollapseAll: true,
+  });
+  dbExplorerProvider.attachView(dbExplorerView);
+  context.subscriptions.push(dbExplorerView);
+
+  const handlers: Record<string, (...args: unknown[]) => Thenable<unknown>> = {
     "sqlcortex.login": async () => {
       const didLogin = await loginFlow(context, tokenStore, output);
       await refreshContext(context, tokenStore, statusBar);
+      dbExplorerProvider.refresh();
       return didLogin;
     },
     "sqlcortex.logout": async () => {
-      const didLogout = await logoutFlow(context, tokenStore, output);
+      const didLogout = await logoutFlow(context, tokenStore, output, dbExplorerProvider);
       await refreshContext(context, tokenStore, statusBar);
       return didLogout;
     },
     "sqlcortex.selectOrg": async () => {
-      await selectOrgFlow(context, tokenStore, output, statusBar);
+      await selectOrgFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
     },
     "sqlcortex.selectProject": async () => {
-      await selectProjectFlow(context, tokenStore, output, statusBar);
+      await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    },
+    "sqlcortex.selectConnection": async () => {
+      await selectConnectionFlow(
+        context,
+        tokenStore,
+        output,
+        statusBar,
+        dbExplorerProvider
+      );
+    },
+    "sqlcortex.refreshExplorer": async () => {
+      dbExplorerProvider.clearCache();
+      dbExplorerProvider.refresh();
+    },
+    "sqlcortex.searchTable": async (...args) => {
+      await searchTableFlow(
+        context,
+        tokenStore,
+        output,
+        statusBar,
+        dbExplorerProvider,
+        args[0]
+      );
+    },
+    "sqlcortex.copyTableName": async (...args) => {
+      const node = args[0];
+      await copyTableNameFlow(node);
+    },
+    "sqlcortex.copyColumnName": async (...args) => {
+      const node = args[0];
+      await copyColumnNameFlow(node);
     },
     "sqlcortex.runQuery": async () => {
       await runQueryFlow(context, tokenStore, output, statusBar);
@@ -202,11 +270,14 @@ async function migrateApiBaseUrl(
 async function logoutFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
-  output: vscode.OutputChannel
+  output: vscode.OutputChannel,
+  dbExplorerProvider?: DbExplorerProvider
 ): Promise<boolean> {
   await tokenStore.clear();
   clearCachedSession();
   await clearWorkspaceContext(context);
+  dbExplorerProvider?.clearCache();
+  dbExplorerProvider?.refresh();
   output.appendLine("SQLCortex: Logged out.");
   vscode.window.showInformationMessage("SQLCortex: Logged out.");
   return true;
@@ -251,7 +322,8 @@ async function selectOrgFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBar: vscode.StatusBarItem,
+  dbExplorerProvider?: DbExplorerProvider
 ): Promise<void> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
@@ -307,6 +379,8 @@ async function selectOrgFlow(
     previous.orgId !== selection.orgId || previous.orgName !== selection.label;
   if (orgChanged) {
     await clearActiveProject(context);
+    dbExplorerProvider?.clearCache();
+    dbExplorerProvider?.refresh();
   }
   await refreshContext(context, tokenStore, statusBar);
 }
@@ -315,7 +389,8 @@ async function selectProjectFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBar: vscode.StatusBarItem,
+  dbExplorerProvider?: DbExplorerProvider
 ): Promise<void> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
@@ -324,7 +399,7 @@ async function selectProjectFlow(
 
   let workspaceContext = getWorkspaceContext(context);
   if (!workspaceContext.orgName) {
-    await selectOrgFlow(context, tokenStore, output, statusBar);
+    await selectOrgFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
     workspaceContext = getWorkspaceContext(context);
     if (!workspaceContext.orgName) {
       return;
@@ -366,8 +441,210 @@ async function selectProjectFlow(
     return;
   }
 
+  const previous = getWorkspaceContext(context);
   await setActiveProject(context, selection.projectId, selection.label);
+  if (previous.projectId !== selection.projectId) {
+    await clearActiveConnection(context);
+    dbExplorerProvider?.clearCache();
+    dbExplorerProvider?.refresh();
+  }
   await refreshContext(context, tokenStore, statusBar);
+}
+
+async function selectConnectionFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem,
+  dbExplorerProvider: DbExplorerProvider
+): Promise<void> {
+  let workspaceContext = getWorkspaceContext(context);
+  if (!workspaceContext.projectId) {
+    await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    workspaceContext = getWorkspaceContext(context);
+    if (!workspaceContext.projectId) {
+      return;
+    }
+  }
+
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  let connections: ConnectionResource[] = [];
+  try {
+    connections = await listConnections(client, workspaceContext.projectId);
+  } catch (err) {
+    reportRequestError(output, "Failed to load connections", err);
+    return;
+  }
+
+  if (connections.length === 0) {
+    vscode.window.showInformationMessage("SQLCortex: No connections available.");
+    return;
+  }
+
+  const items: ConnectionPickItem[] = connections.map((connection) => {
+    const descriptionParts = [connection.type, connection.database].filter(Boolean);
+    const description =
+      descriptionParts.length > 0 ? descriptionParts.join(" / ") : undefined;
+    const detail =
+      connection.host || connection.port
+        ? `${connection.host ?? ""}${connection.port ? `:${connection.port}` : ""}`
+        : undefined;
+    return {
+      label: connection.name,
+      description,
+      detail,
+      connectionId: connection.id,
+      picked: workspaceContext.connectionId === connection.id,
+    };
+  });
+
+  const selection = await vscode.window.showQuickPick(items, {
+    placeHolder: "Select SQLCortex connection",
+    ignoreFocusOut: true,
+  });
+
+  if (!selection) {
+    return;
+  }
+
+  const previous = getWorkspaceContext(context);
+  await setActiveConnection(context, selection.connectionId);
+  if (previous.connectionId !== selection.connectionId) {
+    dbExplorerProvider.clearCache();
+  }
+  dbExplorerProvider.refresh();
+}
+
+async function searchTableFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem,
+  dbExplorerProvider: DbExplorerProvider,
+  node?: unknown
+): Promise<void> {
+  let workspaceContext = getWorkspaceContext(context);
+  if (!workspaceContext.projectId) {
+    await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    workspaceContext = getWorkspaceContext(context);
+    if (!workspaceContext.projectId) {
+      return;
+    }
+  }
+
+  if (!workspaceContext.connectionId) {
+    await selectConnectionFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    workspaceContext = getWorkspaceContext(context);
+    if (!workspaceContext.connectionId) {
+      return;
+    }
+  }
+
+  let schemaName: string | null = null;
+  if (node instanceof SchemaNode) {
+    schemaName = node.schemaName;
+  } else if (node instanceof TableNode) {
+    schemaName = node.schemaName;
+  } else if (node instanceof ColumnNode) {
+    schemaName = node.schemaName;
+  }
+
+  if (!schemaName) {
+    const schemas = await dbExplorerProvider.getSchemasForSearch();
+    if (!schemas) {
+      return;
+    }
+    if (schemas.length === 0) {
+      vscode.window.showInformationMessage("SQLCortex: No schemas available.");
+      return;
+    }
+    const schemaItems: SchemaPickItem[] = schemas.map((schema) => ({
+      label: schema.name,
+      schemaName: schema.name,
+    }));
+    const schemaSelection = await vscode.window.showQuickPick(schemaItems, {
+      placeHolder: "Select a schema to search",
+      ignoreFocusOut: true,
+    });
+    if (!schemaSelection) {
+      return;
+    }
+    schemaName = schemaSelection.schemaName;
+  }
+
+  const tables = await dbExplorerProvider.getTablesForSearch(schemaName);
+  if (!tables) {
+    return;
+  }
+  if (tables.length === 0) {
+    vscode.window.showInformationMessage("SQLCortex: No tables found.");
+    return;
+  }
+
+  const tableItems: TablePickItem[] = tables.map((table) => ({
+    label: table.name,
+    description: table.type === "view" ? "view" : "table",
+    schemaName,
+    tableName: table.name,
+    tableType: table.type,
+  }));
+
+  const tableSelection = await vscode.window.showQuickPick(tableItems, {
+    placeHolder: "Select a table",
+    ignoreFocusOut: true,
+  });
+
+  if (!tableSelection) {
+    return;
+  }
+
+  const fullName = `${tableSelection.schemaName}.${tableSelection.tableName}`;
+  const revealed = await dbExplorerProvider.revealTable(
+    tableSelection.schemaName,
+    tableSelection.tableName
+  );
+  if (!revealed) {
+    await vscode.env.clipboard.writeText(fullName);
+    vscode.window.showInformationMessage(`SQLCortex: Copied ${fullName}`);
+  } else {
+    vscode.window.showInformationMessage(`SQLCortex: Revealed ${fullName}`);
+  }
+}
+
+async function copyTableNameFlow(node?: unknown): Promise<void> {
+  let schemaName: string | null = null;
+  let tableName: string | null = null;
+
+  if (node instanceof TableNode) {
+    schemaName = node.schemaName;
+    tableName = node.table.name;
+  } else if (node instanceof ColumnNode) {
+    schemaName = node.schemaName;
+    tableName = node.tableName;
+  }
+
+  if (!schemaName || !tableName) {
+    vscode.window.showInformationMessage("SQLCortex: Select a table to copy.");
+    return;
+  }
+
+  const fullName = `${schemaName}.${tableName}`;
+  await vscode.env.clipboard.writeText(fullName);
+  vscode.window.showInformationMessage(`SQLCortex: Copied ${fullName}`);
+}
+
+async function copyColumnNameFlow(node?: unknown): Promise<void> {
+  if (!(node instanceof ColumnNode)) {
+    vscode.window.showInformationMessage("SQLCortex: Select a column to copy.");
+    return;
+  }
+  await vscode.env.clipboard.writeText(node.column.name);
+  vscode.window.showInformationMessage(`SQLCortex: Copied ${node.column.name}`);
 }
 
 async function ensureActiveProject(

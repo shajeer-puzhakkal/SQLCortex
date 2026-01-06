@@ -4,12 +4,14 @@ const ACTIVE_ORG_ID_KEY = "sqlcortex.activeOrgId";
 const ACTIVE_ORG_NAME_KEY = "sqlcortex.activeOrgName";
 const ACTIVE_PROJECT_ID_KEY = "sqlcortex.activeProjectId";
 const ACTIVE_PROJECT_NAME_KEY = "sqlcortex.activeProjectName";
+const ACTIVE_CONNECTION_ID_KEY = "sqlcortex.activeConnectionId";
 
 export type WorkspaceContext = {
   orgId: string | null;
   orgName: string | null;
   projectId: string | null;
   projectName: string | null;
+  connectionId: string | null;
 };
 
 export function getWorkspaceContext(context: vscode.ExtensionContext): WorkspaceContext {
@@ -18,6 +20,7 @@ export function getWorkspaceContext(context: vscode.ExtensionContext): Workspace
     orgName: context.workspaceState.get<string | null>(ACTIVE_ORG_NAME_KEY, null),
     projectId: context.workspaceState.get<string | null>(ACTIVE_PROJECT_ID_KEY, null),
     projectName: context.workspaceState.get<string | null>(ACTIVE_PROJECT_NAME_KEY, null),
+    connectionId: context.workspaceState.get<string | null>(ACTIVE_CONNECTION_ID_KEY, null),
   };
 }
 
@@ -39,9 +42,21 @@ export async function setActiveProject(
   await context.workspaceState.update(ACTIVE_PROJECT_NAME_KEY, projectName);
 }
 
+export async function setActiveConnection(
+  context: vscode.ExtensionContext,
+  connectionId: string | null
+): Promise<void> {
+  await context.workspaceState.update(ACTIVE_CONNECTION_ID_KEY, connectionId);
+}
+
+export async function clearActiveConnection(context: vscode.ExtensionContext): Promise<void> {
+  await context.workspaceState.update(ACTIVE_CONNECTION_ID_KEY, undefined);
+}
+
 export async function clearActiveProject(context: vscode.ExtensionContext): Promise<void> {
   await context.workspaceState.update(ACTIVE_PROJECT_ID_KEY, undefined);
   await context.workspaceState.update(ACTIVE_PROJECT_NAME_KEY, undefined);
+  await context.workspaceState.update(ACTIVE_CONNECTION_ID_KEY, undefined);
 }
 
 export async function clearWorkspaceContext(context: vscode.ExtensionContext): Promise<void> {
@@ -49,4 +64,5 @@ export async function clearWorkspaceContext(context: vscode.ExtensionContext): P
   await context.workspaceState.update(ACTIVE_ORG_NAME_KEY, undefined);
   await context.workspaceState.update(ACTIVE_PROJECT_ID_KEY, undefined);
   await context.workspaceState.update(ACTIVE_PROJECT_NAME_KEY, undefined);
+  await context.workspaceState.update(ACTIVE_CONNECTION_ID_KEY, undefined);
 }

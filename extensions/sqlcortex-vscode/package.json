@@ -15,8 +15,14 @@
     "onCommand:sqlcortex.logout",
     "onCommand:sqlcortex.selectOrg",
     "onCommand:sqlcortex.selectProject",
+    "onCommand:sqlcortex.selectConnection",
+    "onCommand:sqlcortex.refreshExplorer",
+    "onCommand:sqlcortex.searchTable",
+    "onCommand:sqlcortex.copyTableName",
+    "onCommand:sqlcortex.copyColumnName",
     "onCommand:sqlcortex.runQuery",
-    "onCommand:sqlcortex.runSelection"
+    "onCommand:sqlcortex.runSelection",
+    "onView:sqlcortex.databaseExplorer"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -38,6 +44,26 @@
         "title": "SQLCortex: Select Project"
       },
       {
+        "command": "sqlcortex.selectConnection",
+        "title": "SQLCortex: Select Connection"
+      },
+      {
+        "command": "sqlcortex.refreshExplorer",
+        "title": "SQLCortex: Refresh Database Explorer"
+      },
+      {
+        "command": "sqlcortex.searchTable",
+        "title": "SQLCortex: Search Table"
+      },
+      {
+        "command": "sqlcortex.copyTableName",
+        "title": "SQLCortex: Copy Table Name"
+      },
+      {
+        "command": "sqlcortex.copyColumnName",
+        "title": "SQLCortex: Copy Column Name"
+      },
+      {
         "command": "sqlcortex.runQuery",
         "title": "SQLCortex: Run Query"
       },
@@ -45,7 +71,60 @@
         "command": "sqlcortex.runSelection",
         "title": "SQLCortex: Run Selection"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sqlcortex",
+          "title": "SQLCortex",
+          "icon": "resources/sqlcortex.svg"
+        }
+      ]
+    },
+    "views": {
+      "sqlcortex": [
+        {
+          "id": "sqlcortex.databaseExplorer",
+          "name": "Database Explorer"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "sqlcortex.refreshExplorer",
+          "when": "view == sqlcortex.databaseExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "sqlcortex.searchTable",
+          "when": "view == sqlcortex.databaseExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "sqlcortex.selectConnection",
+          "when": "view == sqlcortex.databaseExplorer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sqlcortex.copyTableName",
+          "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",
+          "group": "inline"
+        },
+        {
+          "command": "sqlcortex.copyTableName",
+          "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.column",
+          "group": "inline"
+        },
+        {
+          "command": "sqlcortex.copyColumnName",
+          "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.column",
+          "group": "inline"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "node ./esbuild.mjs",

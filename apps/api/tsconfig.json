@@ -11,6 +11,10 @@
     "target": "esnext",
     "moduleResolution": "Node",
     "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@prisma/client": ["node_modules/.prisma/client"]
+    },
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     // For nodejs:

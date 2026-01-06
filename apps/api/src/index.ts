@@ -1,5 +1,5 @@
 import express, { NextFunction, Request, Response } from "express";
-import { randomUUID } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "crypto";
 import cors from "cors";
 import dotenv from "dotenv";
 import { OrgRole, Prisma, PrismaClient } from "@prisma/client";
@@ -73,6 +73,43 @@ const queryPrisma =
   queryDatabaseUrl !== process.env.DATABASE_URL
     ? new PrismaClient({ datasources: { db: { url: queryDatabaseUrl } } })
     : prisma;
+const schemaCacheTtlSecondsEnv = Number(
+  process.env.SCHEMA_CACHE_TTL_SECONDS ?? process.env.SCHEMA_CACHE_TTL ?? 60
+);
+const SCHEMA_CACHE_TTL_SECONDS = Number.isFinite(schemaCacheTtlSecondsEnv)
+  ? Math.min(Math.max(schemaCacheTtlSecondsEnv, 30), 120)
+  : 60;
+const SCHEMA_CACHE_TTL_MS = SCHEMA_CACHE_TTL_SECONDS * 1000;
+const schemaQueryTimeoutMsEnv = Number(
+  process.env.SCHEMA_QUERY_TIMEOUT_MS ??
+    process.env.SCHEMA_INTROSPECTION_TIMEOUT_MS ??
+    5000
+);
+const SCHEMA_QUERY_TIMEOUT_MS =
+  Number.isFinite(schemaQueryTimeoutMsEnv) && schemaQueryTimeoutMsEnv > 0
+    ? schemaQueryTimeoutMsEnv
+    : 5000;
+const schemaRateLimitPerMinEnv = Number(
+  process.env.SCHEMA_RATE_LIMIT_PER_MIN ?? process.env.SCHEMA_RATE_LIMIT ?? 60
+);
+const SCHEMA_RATE_LIMIT_PER_MIN =
+  Number.isFinite(schemaRateLimitPerMinEnv) && schemaRateLimitPerMinEnv > 0
+    ? schemaRateLimitPerMinEnv
+    : 60;
+const schemaCacheMaxEntriesEnv = Number(process.env.SCHEMA_CACHE_MAX_ENTRIES ?? 5000);
+const SCHEMA_CACHE_MAX_ENTRIES =
+  Number.isFinite(schemaCacheMaxEntriesEnv) && schemaCacheMaxEntriesEnv > 0
+    ? schemaCacheMaxEntriesEnv
+    : 5000;
+
+const CONNECTION_ENCRYPTION_ALGO = "aes-256-gcm";
+const CONNECTION_ENCRYPTION_VERSION = 1;
+const CONNECTION_ENCRYPTION_IV_BYTES = 12;
+const CONNECTION_TYPE_POSTGRES = "postgres";
+const ALLOWED_SSL_MODES = ["require", "disable", "prefer", "verify-ca", "verify-full"] as const;
+type SslMode = (typeof ALLOWED_SSL_MODES)[number];
+const DEFAULT_SSL_MODE: SslMode = "require";
+let cachedConnectionEncryptionKey: Buffer | null = null;
 
 const webOrigin = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 const SubjectType = {
@@ -117,6 +154,52 @@ type ExecuteQueryResponse = {
   error: ErrorResponse | null;
 };
 
+type ConnectionCredentials = {
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
+  password?: string;
+  url?: string;
+};
+
+type EncryptedCredentialsPayload = {
+  v: number;
+  alg: string;
+  iv: string;
+  tag: string;
+  data: string;
+};
+
+type ConnectionResource = {
+  id: string;
+  project_id: string;
+  type: string;
+  name: string;
+  ssl_mode: string;
+  host: string | null;
+  port: number | null;
+  database: string | null;
+  username: string | null;
+  uses_url: boolean;
+  has_password: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type SchemaCacheEntry<T> = {
+  expiresAt: number;
+  payload: T;
+};
+
+type SchemaTableResource = { name: string; type: "table" | "view" };
+type SchemaColumnResource = {
+  name: string;
+  type: string;
+  nullable: boolean;
+  default: string | null;
+};
+
 type AnalysisResultValue = Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
 
 function toJsonResult(value: unknown): AnalysisResultValue {
@@ -131,45 +214,513 @@ function toJsonResult(value: unknown): AnalysisResultValue {
   }
 }
 
+function decodeEncryptionKey(raw: string): Buffer | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const base64Key = Buffer.from(trimmed, "base64");
+  if (base64Key.length === 32) {
+    return base64Key;
+  }
+  const hexKey = Buffer.from(trimmed, "hex");
+  if (hexKey.length === 32) {
+    return hexKey;
+  }
+  return null;
+}
+
+function getConnectionEncryptionKey(): Buffer {
+  if (cachedConnectionEncryptionKey) {
+    return cachedConnectionEncryptionKey;
+  }
+  const rawKey = process.env.DB_CONNECTIONS_ENCRYPTION_KEY ?? "";
+  const decoded = decodeEncryptionKey(rawKey);
+  if (!decoded) {
+    throw new Error("DB_CONNECTIONS_ENCRYPTION_KEY must be a 32-byte base64 or hex string");
+  }
+  cachedConnectionEncryptionKey = decoded;
+  return decoded;
+}
+
+function encryptCredentials(credentials: ConnectionCredentials): Prisma.InputJsonValue {
+  const key = getConnectionEncryptionKey();
+  const iv = randomBytes(CONNECTION_ENCRYPTION_IV_BYTES);
+  const cipher = createCipheriv(CONNECTION_ENCRYPTION_ALGO, key, iv);
+  const plaintext = JSON.stringify(credentials);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    v: CONNECTION_ENCRYPTION_VERSION,
+    alg: CONNECTION_ENCRYPTION_ALGO,
+    iv: iv.toString("base64"),
+    tag: tag.toString("base64"),
+    data: encrypted.toString("base64"),
+  };
+}
+
+function decryptCredentials(payload: Prisma.JsonValue): ConnectionCredentials {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Encrypted credentials payload is invalid");
+  }
+  const record = payload as Record<string, unknown>;
+  const version = typeof record.v === "number" ? record.v : null;
+  const alg = typeof record.alg === "string" ? record.alg : null;
+  const iv = typeof record.iv === "string" ? record.iv : null;
+  const tag = typeof record.tag === "string" ? record.tag : null;
+  const data = typeof record.data === "string" ? record.data : null;
+
+  if (version !== CONNECTION_ENCRYPTION_VERSION || alg !== CONNECTION_ENCRYPTION_ALGO) {
+    throw new Error("Encrypted credentials payload is unsupported");
+  }
+  if (!iv || !tag || !data) {
+    throw new Error("Encrypted credentials payload is incomplete");
+  }
+
+  const ivBuffer = Buffer.from(iv, "base64");
+  const tagBuffer = Buffer.from(tag, "base64");
+  const dataBuffer = Buffer.from(data, "base64");
+  if (
+    ivBuffer.length !== CONNECTION_ENCRYPTION_IV_BYTES ||
+    tagBuffer.length === 0 ||
+    dataBuffer.length === 0
+  ) {
+    throw new Error("Encrypted credentials payload is malformed");
+  }
+
+  const key = getConnectionEncryptionKey();
+  const decipher = createDecipheriv(CONNECTION_ENCRYPTION_ALGO, key, ivBuffer);
+  decipher.setAuthTag(tagBuffer);
+  const decrypted = Buffer.concat([decipher.update(dataBuffer), decipher.final()]);
+  const parsed = JSON.parse(decrypted.toString("utf8"));
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Decrypted credentials payload is invalid");
+  }
+  return parsed as ConnectionCredentials;
+}
+
+function normalizeSslMode(value?: string | null): SslMode | null {
+  if (!value) {
+    return DEFAULT_SSL_MODE;
+  }
+  const normalized = value.trim().toLowerCase();
+  return ALLOWED_SSL_MODES.includes(normalized as SslMode)
+    ? (normalized as SslMode)
+    : null;
+}
+
+function maskValue(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.length <= 2) {
+    return "*".repeat(trimmed.length);
+  }
+  const prefix = trimmed.slice(0, 2);
+  const suffix = trimmed.slice(-2);
+  return `${prefix}${"*".repeat(Math.min(6, trimmed.length - 2))}${suffix}`;
+}
+
+function extractConnectionDisplay(credentials: ConnectionCredentials): {
+  host: string | null;
+  port: number | null;
+  database: string | null;
+  username: string | null;
+  usesUrl: boolean;
+  hasPassword: boolean;
+} {
+  if (credentials.url) {
+    try {
+      const parsed = new URL(credentials.url);
+      const database = parsed.pathname?.replace(/^\//, "") || null;
+      const username = parsed.username || null;
+      const password = parsed.password || null;
+      const port = parsed.port ? Number(parsed.port) : null;
+      return {
+        host: parsed.hostname || null,
+        port: Number.isFinite(port) ? port : null,
+        database,
+        username,
+        usesUrl: true,
+        hasPassword: Boolean(password),
+      };
+    } catch {
+      return {
+        host: null,
+        port: null,
+        database: null,
+        username: null,
+        usesUrl: true,
+        hasPassword: false,
+      };
+    }
+  }
+
+  return {
+    host: credentials.host ?? null,
+    port: typeof credentials.port === "number" ? credentials.port : null,
+    database: credentials.database ?? null,
+    username: credentials.username ?? null,
+    usesUrl: false,
+    hasPassword: Boolean(credentials.password),
+  };
+}
+
+function mapConnectionResource(record: {
+  id: string;
+  projectId: string;
+  type: string;
+  name: string;
+  sslMode: string;
+  createdAt: Date;
+  updatedAt: Date;
+}, credentials: ConnectionCredentials): ConnectionResource {
+  const display = extractConnectionDisplay(credentials);
+  return {
+    id: record.id,
+    project_id: record.projectId,
+    type: record.type,
+    name: record.name,
+    ssl_mode: record.sslMode,
+    host: maskValue(display.host),
+    port: display.port ?? null,
+    database: maskValue(display.database),
+    username: maskValue(display.username),
+    uses_url: display.usesUrl,
+    has_password: display.hasPassword,
+    created_at: record.createdAt.toISOString(),
+    updated_at: record.updatedAt.toISOString(),
+  };
+}
+
+function applySslModeToUrl(rawUrl: string, sslMode: SslMode): string {
+  const parsed = new URL(rawUrl);
+  parsed.searchParams.set("sslmode", sslMode);
+  if (!parsed.searchParams.has("connect_timeout")) {
+    parsed.searchParams.set("connect_timeout", "5");
+  }
+  return parsed.toString();
+}
+
+function buildConnectionString(
+  credentials: ConnectionCredentials,
+  sslMode: SslMode
+): string {
+  const baseUrl = credentials.url
+    ? credentials.url
+    : (() => {
+        const url = new URL("postgresql://");
+        if (!credentials.host) {
+          throw new Error("Host is required");
+        }
+        url.hostname = credentials.host;
+        if (credentials.port) {
+          url.port = String(credentials.port);
+        }
+        if (credentials.database) {
+          url.pathname = `/${credentials.database}`;
+        }
+        if (credentials.username) {
+          url.username = credentials.username;
+        }
+        if (credentials.password) {
+          url.password = credentials.password;
+        }
+        return url.toString();
+      })();
+
+  return applySslModeToUrl(baseUrl, sslMode);
+}
+
+function sanitizeConnectionError(message: string): string {
+  return message.replace(/postgres(?:ql)?:\/\/[^@\s]+@/gi, "postgresql://***@");
+}
+
+async function testPostgresConnection(connectionString: string): Promise<void> {
+  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
+  try {
+    await client.$connect();
+    await client.$queryRaw`SELECT 1`;
+  } finally {
+    await client.$disconnect();
+  }
+}
+
+const schemaCache = new Map<string, SchemaCacheEntry<unknown>>();
+const schemaRateBuckets = new Map<
+  string,
+  { windowStartMs: number; count: number; lastSeenMs: number }
+>();
+const SCHEMA_RATE_WINDOW_MS = 60_000;
+const SCHEMA_RATE_BUCKET_TTL_MS = 10 * 60_000;
+
+function cleanupSchemaRateBuckets(nowMs: number) {
+  if (schemaRateBuckets.size <= 20_000) {
+    return;
+  }
+
+  for (const [key, bucket] of schemaRateBuckets.entries()) {
+    if (nowMs - bucket.lastSeenMs > SCHEMA_RATE_BUCKET_TTL_MS) {
+      schemaRateBuckets.delete(key);
+    }
+  }
+}
+
+function checkSchemaRateLimit(params: {
+  auth: NonNullable<AuthenticatedRequest["auth"]>;
+  projectId: string;
+  connectionId: string;
+}): { limited: boolean; retryAfterSeconds?: number } {
+  const subjectKey =
+    params.auth.tokenId
+      ? `token:${params.auth.tokenId}`
+      : params.auth.userId
+        ? `user:${params.auth.userId}`
+        : params.auth.orgId
+          ? `org:${params.auth.orgId}`
+          : null;
+  if (!subjectKey) {
+    return { limited: false };
+  }
+
+  const key = `schema:${subjectKey}:${params.projectId}:${params.connectionId}`;
+  const nowMs = Date.now();
+  cleanupSchemaRateBuckets(nowMs);
+
+  const existing = schemaRateBuckets.get(key);
+  if (!existing || nowMs - existing.windowStartMs >= SCHEMA_RATE_WINDOW_MS) {
+    schemaRateBuckets.set(key, { windowStartMs: nowMs, count: 1, lastSeenMs: nowMs });
+    return { limited: false };
+  }
+
+  existing.lastSeenMs = nowMs;
+  if (existing.count + 1 > SCHEMA_RATE_LIMIT_PER_MIN) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((existing.windowStartMs + SCHEMA_RATE_WINDOW_MS - nowMs) / 1000)
+    );
+    return { limited: true, retryAfterSeconds };
+  }
+
+  existing.count += 1;
+  return { limited: false };
+}
+
+function schemaCacheKey(connectionId: string, path: string, parts: string[] = []): string {
+  return `schema:${connectionId}:${path}:${parts.join(":")}`;
+}
+
+function cleanupSchemaCache(nowMs: number) {
+  for (const [key, entry] of schemaCache.entries()) {
+    if (entry.expiresAt <= nowMs) {
+      schemaCache.delete(key);
+    }
+  }
+
+  if (schemaCache.size <= SCHEMA_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  const overflow = schemaCache.size - SCHEMA_CACHE_MAX_ENTRIES;
+  let removed = 0;
+  for (const key of schemaCache.keys()) {
+    schemaCache.delete(key);
+    removed += 1;
+    if (removed >= overflow) {
+      break;
+    }
+  }
+}
+
+function readSchemaCache<T>(key: string): T | null {
+  const entry = schemaCache.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    schemaCache.delete(key);
+    return null;
+  }
+  return entry.payload as T;
+}
+
+function writeSchemaCache<T>(key: string, payload: T): void {
+  const nowMs = Date.now();
+  cleanupSchemaCache(nowMs);
+  schemaCache.set(key, { expiresAt: nowMs + SCHEMA_CACHE_TTL_MS, payload });
+}
+
+function clearSchemaCache(connectionId: string): void {
+  const prefix = `schema:${connectionId}:`;
+  for (const key of schemaCache.keys()) {
+    if (key.startsWith(prefix)) {
+      schemaCache.delete(key);
+    }
+  }
+}
+
+function isTruthyParam(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+async function runSchemaQuery<T>(
+  connectionString: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
+  try {
+    await client.$connect();
+    return await client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SCHEMA_QUERY_TIMEOUT_MS}`);
+      await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
+      return fn(tx);
+    });
+  } finally {
+    await client.$disconnect();
+  }
+}
+
+async function resolveProjectConnection(
+  auth: NonNullable<AuthenticatedRequest["auth"]>,
+  projectId: string,
+  connectionId: string
+): Promise<
+  | { error: ErrorResponse; status: number }
+  | {
+      projectId: string;
+      orgId: string | null;
+      connection: {
+        id: string;
+        projectId: string;
+        type: string;
+        sslMode: string;
+      };
+      connectionString: string;
+    }
+> {
+  const projectContext = await resolveProjectContext(auth, projectId);
+  if ("error" in projectContext) {
+    return { error: projectContext.error, status: projectContext.status };
+  }
+
+  if (!projectContext.projectId) {
+    return { error: makeError("INVALID_INPUT", "Project not found"), status: 400 };
+  }
+
+  const connection = await prisma.projectDbConnection.findUnique({
+    where: { id: connectionId },
+    select: { id: true, projectId: true, type: true, sslMode: true, encryptedCredentials: true },
+  });
+  if (!connection || connection.projectId !== projectContext.projectId) {
+    return { error: makeError("INVALID_INPUT", "Connection not found"), status: 404 };
+  }
+
+  if (connection.type !== CONNECTION_TYPE_POSTGRES) {
+    return {
+      error: makeError("INVALID_INPUT", "Only postgres connections are supported"),
+      status: 400,
+    };
+  }
+
+  let credentials: ConnectionCredentials;
+  try {
+    credentials = decryptCredentials(connection.encryptedCredentials);
+  } catch (err) {
+    console.error("Failed to decrypt connection credentials", err);
+    return { error: makeError("ANALYZER_ERROR", "Failed to decrypt connection"), status: 500 };
+  }
+
+  const sslMode = normalizeSslMode(connection.sslMode) ?? DEFAULT_SSL_MODE;
+  let connectionString: string;
+  try {
+    connectionString = buildConnectionString(credentials, sslMode);
+  } catch (err) {
+    return {
+      error: makeError("INVALID_INPUT", "Connection credentials are incomplete"),
+      status: 400,
+    };
+  }
+
+  return {
+    projectId: projectContext.projectId,
+    orgId: projectContext.orgId,
+    connection,
+    connectionString,
+  };
+}
+
+function handleSchemaRateLimit(
+  res: Response,
+  rateLimit: { limited: boolean; retryAfterSeconds?: number }
+): boolean {
+  if (!rateLimit.limited) {
+    return false;
+  }
+  if (rateLimit.retryAfterSeconds) {
+    res.setHeader("Retry-After", rateLimit.retryAfterSeconds.toString());
+  }
+  res.status(429).json(
+    makeError("RATE_LIMITED", "Schema introspection rate limit exceeded.", {
+      retry_after_seconds: rateLimit.retryAfterSeconds ?? null,
+    })
+  );
+  return true;
+}
+
 app.use(cors({ origin: webOrigin, credentials: true }));
 app.use(express.json());
 app.use(attachAuth(prisma));
 app.use(createRateLimitMiddleware(prisma));
 
-function isReadOnlySql(sql: string): boolean {
-  const withoutLineComments = sql.replace(/--.*?$/gm, "");
-  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "");
-  const normalized = withoutBlockComments.trim().toLowerCase();
+const ALLOWED_QUERY_START_KEYWORDS = ["select", "with", "explain"] as const;
+const BLOCKED_QUERY_KEYWORDS = [
+  "insert",
+  "update",
+  "delete",
+  "drop",
+  "alter",
+  "create",
+  "truncate",
+  "grant",
+  "revoke",
+  "copy",
+  "call",
+  "do",
+] as const;
 
-  if (normalized.includes(";") && normalized.indexOf(";") < normalized.length - 1) {
+function isReadOnlySql(sql: string): boolean {
+  const cleaned = stripSqlCommentsAndLiterals(sql);
+  const normalized = cleaned.trim();
+  if (!normalized) {
     return false;
   }
 
-  if (normalized.startsWith("select")) {
-    return true;
+  const withoutTrailingSemicolons = normalized.replace(/;+\s*$/, "");
+  if (withoutTrailingSemicolons.includes(";")) {
+    return false;
   }
 
-  if (normalized.startsWith("explain")) {
-    let afterExplain = normalized.slice("explain".length).trim();
-    if (afterExplain.startsWith("(")) {
-      let depth = 0;
-      for (let i = 0; i < afterExplain.length; i += 1) {
-        const ch = afterExplain[i];
-        if (ch === "(") {
-          depth += 1;
-        } else if (ch === ")") {
-          depth -= 1;
-          if (depth === 0) {
-            afterExplain = afterExplain.slice(i + 1).trim();
-            break;
-          }
-        }
-      }
-    }
-    return afterExplain.startsWith("select");
+  if (matchBlockedKeyword(withoutTrailingSemicolons)) {
+    return false;
   }
 
-  return false;
+  const firstKeyword = extractFirstKeyword(withoutTrailingSemicolons);
+  if (!firstKeyword) {
+    return false;
+  }
+
+  const normalizedKeyword = firstKeyword.toLowerCase();
+  return ALLOWED_QUERY_START_KEYWORDS.includes(
+    normalizedKeyword as (typeof ALLOWED_QUERY_START_KEYWORDS)[number]
+  );
 }
 
 function normalizeSql(sql: string): string {
@@ -177,12 +728,23 @@ function normalizeSql(sql: string): string {
 }
 
 function stripSqlCommentsAndLiterals(sql: string): string {
-  const withoutLineComments = sql.replace(/--.*?$/gm, "");
-  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "");
+  const withoutLineComments = sql.replace(/--.*?$/gm, " ");
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, " ");
   const withoutStrings = withoutBlockComments
     .replace(/'(?:''|[^'])*'/g, "''")
     .replace(/"(?:\"\"|[^\"])*"/g, "\"\"");
   return withoutStrings;
+}
+
+function extractFirstKeyword(sql: string): string | null {
+  const match = sql.match(/\b([a-zA-Z]+)\b/);
+  return match?.[1] ?? null;
+}
+
+function matchBlockedKeyword(sql: string): string | null {
+  const pattern = new RegExp(`\\b(${BLOCKED_QUERY_KEYWORDS.join("|")})\\b`, "i");
+  const match = sql.match(pattern);
+  return match?.[1] ?? null;
 }
 
 function hasProhibitedClauses(sql: string): boolean {
@@ -195,10 +757,18 @@ function hasProhibitedClauses(sql: string): boolean {
 
 function applyRowLimit(sql: string): string {
   const normalized = normalizeSql(sql);
-  if (!normalized.toLowerCase().startsWith("select")) {
+  const cleaned = stripSqlCommentsAndLiterals(normalized).toLowerCase();
+  const firstKeyword = extractFirstKeyword(cleaned);
+  if (!firstKeyword) {
     return normalized;
   }
-  const cleaned = stripSqlCommentsAndLiterals(normalized).toLowerCase();
+  const normalizedKeyword = firstKeyword.toLowerCase();
+  if (normalizedKeyword === "explain") {
+    return normalized;
+  }
+  if (normalizedKeyword !== "select" && normalizedKeyword !== "with") {
+    return normalized;
+  }
   if (/\blimit\b/.test(cleaned) || /\bfetch\s+first\b/.test(cleaned)) {
     return normalized;
   }
@@ -1117,6 +1687,652 @@ app.post(
   }
 );
 
+app.get(
+  "/api/v1/projects/:projectId/connections",
+  requireAuth(prisma),
+  async (req: Request<{ projectId: string }>, res: Response) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, req.params.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    if (!projectContext.projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Project not found"));
+    }
+
+    const records = await prisma.projectDbConnection.findMany({
+      where: { projectId: projectContext.projectId },
+      orderBy: { createdAt: "desc" },
+    });
+
+    try {
+      const connections = records.map((record) =>
+        mapConnectionResource(record, decryptCredentials(record.encryptedCredentials))
+      );
+      return res.json({ connections });
+    } catch (err) {
+      console.error("Failed to decrypt connections", err);
+      return res
+        .status(500)
+        .json(makeError("ANALYZER_ERROR", "Failed to load connections"));
+    }
+  }
+);
+
+app.post(
+  "/api/v1/projects/:projectId/connections",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string },
+      unknown,
+      {
+        name?: string;
+        type?: string;
+        host?: string;
+        port?: number | string;
+        database?: string;
+        username?: string;
+        password?: string;
+        connection_url?: string;
+        ssl_mode?: string;
+      }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, req.params.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    if (!projectContext.projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Project not found"));
+    }
+
+    const name = req.body?.name?.trim();
+    if (!name) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`name` is required"));
+    }
+
+    const type = req.body?.type?.trim().toLowerCase() ?? CONNECTION_TYPE_POSTGRES;
+    if (type !== CONNECTION_TYPE_POSTGRES) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Only postgres connections are supported"));
+    }
+
+    const sslMode = normalizeSslMode(req.body?.ssl_mode);
+    if (!sslMode) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Invalid ssl_mode"));
+    }
+
+    const connectionUrl = req.body?.connection_url?.trim() || null;
+    const host = req.body?.host?.trim() || null;
+    const database = req.body?.database?.trim() || null;
+    const username = req.body?.username?.trim() || null;
+    const password = req.body?.password ? req.body.password : null;
+    const portRaw = req.body?.port;
+    let port = 5432;
+
+    if (connectionUrl && host) {
+      return res.status(400).json(
+        makeError("INVALID_INPUT", "Provide either connection_url or host fields, not both")
+      );
+    }
+
+    if (!connectionUrl && !host) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Either connection_url or host is required"));
+    }
+
+    if (connectionUrl) {
+      try {
+        const parsed = new URL(connectionUrl);
+        if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+          return res
+            .status(400)
+            .json(makeError("INVALID_INPUT", "connection_url must be postgres:// or postgresql://"));
+        }
+      } catch {
+        return res
+          .status(400)
+          .json(makeError("INVALID_INPUT", "connection_url must be a valid URL"));
+      }
+    } else {
+      if (!database) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`database` is required"));
+      }
+      if (!username) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`username` is required"));
+      }
+      if (typeof portRaw !== "undefined" && portRaw !== null && String(portRaw).trim()) {
+        const parsedPort = Number(portRaw);
+        if (!Number.isFinite(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
+          return res.status(400).json(makeError("INVALID_INPUT", "Invalid port"));
+        }
+        port = parsedPort;
+      }
+    }
+
+    let credentials: ConnectionCredentials;
+    if (connectionUrl) {
+      credentials = { url: connectionUrl };
+    } else {
+      if (!host) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`host` is required"));
+      }
+      if (!database) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`database` is required"));
+      }
+      if (!username) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`username` is required"));
+      }
+      credentials = {
+        host,
+        port,
+        database,
+        username,
+        ...(password ? { password } : {}),
+      };
+    }
+
+    let encryptedCredentials: Prisma.InputJsonValue;
+    try {
+      encryptedCredentials = encryptCredentials(credentials);
+    } catch (err) {
+      console.error("Failed to encrypt connection credentials", err);
+      return res
+        .status(500)
+        .json(makeError("ANALYZER_ERROR", "Server encryption key is not configured"));
+    }
+
+    const created = await prisma.projectDbConnection.create({
+      data: {
+        projectId: projectContext.projectId,
+        type,
+        name,
+        encryptedCredentials,
+        sslMode,
+      },
+    });
+
+    return res.status(201).json({
+      connection: mapConnectionResource(created, credentials),
+    });
+  }
+);
+
+app.post(
+  "/api/v1/connections/:connectionId/test",
+  requireAuth(prisma),
+  async (req: Request<{ connectionId: string }>, res: Response) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const connection = await prisma.projectDbConnection.findUnique({
+      where: { id: req.params.connectionId },
+    });
+    if (!connection) {
+      return res.status(404).json(makeError("INVALID_INPUT", "Connection not found"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, connection.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    let credentials: ConnectionCredentials;
+    try {
+      credentials = decryptCredentials(connection.encryptedCredentials);
+    } catch (err) {
+      console.error("Failed to decrypt connection credentials", err);
+      return res
+        .status(500)
+        .json(makeError("ANALYZER_ERROR", "Failed to decrypt connection"));
+    }
+
+    const sslMode =
+      normalizeSslMode(connection.sslMode) ?? DEFAULT_SSL_MODE;
+
+    let connectionString: string;
+    try {
+      connectionString = buildConnectionString(credentials, sslMode);
+    } catch (err) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Connection credentials are incomplete"));
+    }
+
+    try {
+      await testPostgresConnection(connectionString);
+      clearSchemaCache(connection.id);
+      return res.json({ ok: true });
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message ? err.message : "Connection test failed";
+      return res.status(400).json(
+        makeError("INVALID_INPUT", "Connection test failed", {
+          reason: sanitizeConnectionError(message),
+        })
+      );
+    }
+  }
+);
+
+app.get(
+  "/api/v1/projects/:projectId/connections/:connectionId/schema/schemas",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string; connectionId: string },
+      unknown,
+      unknown,
+      { includeSystem?: string }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      req.params.projectId,
+      req.params.connectionId
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const rateLimit = checkSchemaRateLimit({
+      auth,
+      projectId: connectionContext.projectId,
+      connectionId: connectionContext.connection.id,
+    });
+    if (handleSchemaRateLimit(res, rateLimit)) {
+      return;
+    }
+
+    const includeSystem = isTruthyParam(req.query.includeSystem);
+    const cacheKey = schemaCacheKey(connectionContext.connection.id, "schemas", [
+      includeSystem ? "system" : "user",
+    ]);
+    const cached = readSchemaCache<{ schemas: Array<{ name: string }> }>(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    try {
+      const schemas = await runSchemaQuery(connectionContext.connectionString, async (tx) => {
+        if (includeSystem) {
+          return tx.$queryRaw<{ name: string }[]>`
+            SELECT n.nspname AS name
+            FROM pg_namespace n
+            WHERE n.nspname NOT LIKE 'pg_temp_%'
+              AND n.nspname NOT LIKE 'pg_toast_temp_%'
+            ORDER BY n.nspname
+          `;
+        }
+        return tx.$queryRaw<{ name: string }[]>`
+          SELECT n.nspname AS name
+          FROM pg_namespace n
+          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+            AND n.nspname NOT LIKE 'pg_temp_%'
+            AND n.nspname NOT LIKE 'pg_toast_temp_%'
+          ORDER BY n.nspname
+        `;
+      });
+
+      const response = { schemas: schemas.map((row) => ({ name: row.name })) };
+      writeSchemaCache(cacheKey, response);
+      return res.json(response);
+    } catch (err) {
+      console.error("Failed to fetch schemas", err);
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch schemas. Check connection or permissions."
+          )
+        );
+    }
+  }
+);
+
+app.get(
+  "/api/v1/projects/:projectId/connections/:connectionId/schema/tables",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string; connectionId: string },
+      unknown,
+      unknown,
+      { schema?: string }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const schemaName =
+      typeof req.query.schema === "string" ? req.query.schema.trim() : "";
+    if (!schemaName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`schema` is required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      req.params.projectId,
+      req.params.connectionId
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const rateLimit = checkSchemaRateLimit({
+      auth,
+      projectId: connectionContext.projectId,
+      connectionId: connectionContext.connection.id,
+    });
+    if (handleSchemaRateLimit(res, rateLimit)) {
+      return;
+    }
+
+    const cacheKey = schemaCacheKey(connectionContext.connection.id, "tables", [schemaName]);
+    const cached = readSchemaCache<{
+      schema: string;
+      tables: SchemaTableResource[];
+    }>(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    try {
+      const tables = await runSchemaQuery(connectionContext.connectionString, async (tx) => {
+        return tx.$queryRaw<SchemaTableResource[]>`
+          SELECT
+            c.relname AS name,
+            CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END AS type
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = ${schemaName}
+            AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+          ORDER BY c.relname
+        `;
+      });
+
+      const response = { schema: schemaName, tables };
+      writeSchemaCache(cacheKey, response);
+      return res.json(response);
+    } catch (err) {
+      console.error("Failed to fetch tables", err);
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch tables. Check connection or permissions."
+          )
+        );
+    }
+  }
+);
+
+app.get(
+  "/api/v1/projects/:projectId/connections/:connectionId/schema/columns",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string; connectionId: string },
+      unknown,
+      unknown,
+      { schema?: string; table?: string }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const schemaName =
+      typeof req.query.schema === "string" ? req.query.schema.trim() : "";
+    const tableName =
+      typeof req.query.table === "string" ? req.query.table.trim() : "";
+    if (!schemaName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`schema` is required"));
+    }
+    if (!tableName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`table` is required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      req.params.projectId,
+      req.params.connectionId
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const rateLimit = checkSchemaRateLimit({
+      auth,
+      projectId: connectionContext.projectId,
+      connectionId: connectionContext.connection.id,
+    });
+    if (handleSchemaRateLimit(res, rateLimit)) {
+      return;
+    }
+
+    const cacheKey = schemaCacheKey(connectionContext.connection.id, "columns", [
+      schemaName,
+      tableName,
+    ]);
+    const cached = readSchemaCache<{
+      schema: string;
+      table: string;
+      columns: SchemaColumnResource[];
+    }>(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    try {
+      const columns = await runSchemaQuery(connectionContext.connectionString, async (tx) => {
+        return tx.$queryRaw<SchemaColumnResource[]>`
+          SELECT
+            column_name AS name,
+            udt_name AS type,
+            is_nullable = 'YES' AS nullable,
+            column_default AS "default"
+          FROM information_schema.columns
+          WHERE table_schema = ${schemaName}
+            AND table_name = ${tableName}
+          ORDER BY ordinal_position
+        `;
+      });
+
+      const response = { schema: schemaName, table: tableName, columns };
+      writeSchemaCache(cacheKey, response);
+      return res.json(response);
+    } catch (err) {
+      console.error("Failed to fetch columns", err);
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch columns. Check connection or permissions."
+          )
+        );
+    }
+  }
+);
+
+app.get(
+  "/api/v1/projects/:projectId/connections/:connectionId/schema/table-meta",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string; connectionId: string },
+      unknown,
+      unknown,
+      { schema?: string; table?: string }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const schemaName =
+      typeof req.query.schema === "string" ? req.query.schema.trim() : "";
+    const tableName =
+      typeof req.query.table === "string" ? req.query.table.trim() : "";
+    if (!schemaName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`schema` is required"));
+    }
+    if (!tableName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`table` is required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      req.params.projectId,
+      req.params.connectionId
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const rateLimit = checkSchemaRateLimit({
+      auth,
+      projectId: connectionContext.projectId,
+      connectionId: connectionContext.connection.id,
+    });
+    if (handleSchemaRateLimit(res, rateLimit)) {
+      return;
+    }
+
+    const cacheKey = schemaCacheKey(connectionContext.connection.id, "table-meta", [
+      schemaName,
+      tableName,
+    ]);
+    const cached = readSchemaCache<{
+      schema: string;
+      table: string;
+      primaryKey: string[];
+      indexes: Array<{ name: string; columns: string[]; unique: boolean }>;
+    }>(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    try {
+      const response = await runSchemaQuery(connectionContext.connectionString, async (tx) => {
+        const primaryKeyRows = await tx.$queryRaw<{ name: string }[]>`
+          SELECT a.attname AS name
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          WHERE i.indisprimary
+            AND n.nspname = ${schemaName}
+            AND c.relname = ${tableName}
+          ORDER BY array_position(i.indkey::int2[], a.attnum)
+        `;
+
+        const indexRows = await tx.$queryRaw<
+          Array<{ name: string; unique: boolean; columns: string[] }>
+        >`
+          SELECT
+            idx.relname AS name,
+            i.indisunique AS unique,
+            array_agg(a.attname ORDER BY array_position(i.indkey::int2[], a.attnum)) AS columns
+          FROM pg_index i
+          JOIN pg_class tbl ON tbl.oid = i.indrelid
+          JOIN pg_namespace n ON n.oid = tbl.relnamespace
+          JOIN pg_class idx ON idx.oid = i.indexrelid
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          WHERE n.nspname = ${schemaName}
+            AND tbl.relname = ${tableName}
+            AND NOT i.indisprimary
+          GROUP BY idx.relname, i.indisunique
+          ORDER BY idx.relname
+        `;
+
+        return {
+          schema: schemaName,
+          table: tableName,
+          primaryKey: primaryKeyRows.map((row) => row.name),
+          indexes: indexRows.map((row) => ({
+            name: row.name,
+            columns: row.columns ?? [],
+            unique: Boolean(row.unique),
+          })),
+        };
+      });
+
+      writeSchemaCache(cacheKey, response);
+      return res.json(response);
+    } catch (err) {
+      console.error("Failed to fetch table metadata", err);
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch table metadata. Check connection or permissions."
+          )
+        );
+    }
+  }
+);
+
+app.delete(
+  "/api/v1/connections/:connectionId",
+  requireAuth(prisma),
+  async (req: Request<{ connectionId: string }>, res: Response) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const connection = await prisma.projectDbConnection.findUnique({
+      where: { id: req.params.connectionId },
+    });
+    if (!connection) {
+      return res.status(404).json(makeError("INVALID_INPUT", "Connection not found"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, connection.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    await prisma.projectDbConnection.delete({ where: { id: connection.id } });
+    return res.json({ ok: true });
+  }
+);
+
 app.post(
   "/api/v1/query/execute",
   requireAuth(prisma),
@@ -1136,7 +2352,12 @@ app.post(
     if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
       return res
         .status(400)
-        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or EXPLAIN SELECT are permitted"));
+        .json(
+          makeError(
+            "SQL_NOT_READ_ONLY",
+            "Only SELECT, WITH, or EXPLAIN statements are permitted"
+          )
+        );
     }
 
     const projectContext = await resolveProjectContext(auth, req.body?.projectId ?? null);
@@ -1424,10 +2645,15 @@ app.post(
         .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
     }
 
-    if (!isReadOnlySql(body.sql)) {
+    if (!isReadOnlySql(body.sql) || hasProhibitedClauses(body.sql)) {
       return res
         .status(400)
-        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or EXPLAIN SELECT are permitted"));
+        .json(
+          makeError(
+            "SQL_NOT_READ_ONLY",
+            "Only SELECT, WITH, or EXPLAIN statements are permitted"
+          )
+        );
     }
 
     if (typeof body.explain_json === "undefined") {
