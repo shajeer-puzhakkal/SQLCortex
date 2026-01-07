@@ -7,7 +7,7 @@ Services:
 - `docker-compose.yml`: local runtime with Postgres, API, Web, Analyzer
 
 ## Quick Start
-1) Copy env: `cp .env.example .env` and adjust if needed.
+1) Configure env: edit `.env` directly and adjust if needed.
 2) Install API deps + Prisma client (once): `cd apps/api && npm install && npm run prisma:generate`.
 3) Start stack: from repo root run `docker compose up --build`.
 4) Apply DB schema (first run): `docker compose run --rm api npx prisma migrate deploy`.

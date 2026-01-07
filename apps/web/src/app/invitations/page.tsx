@@ -28,41 +28,21 @@ type MeResponse = {
   memberships: Membership[];
 };
 
-type TokenRecord = {
-  id: string;
-  label: string | null;
-  subject_type: "USER" | "ORG";
-  subject_id: string;
-  project_id: string | null;
-  created_at: string;
-  last_used_at: string | null;
-  revoked_at: string | null;
-};
-
-export default function TokensPage() {
+export default function InvitationsPage() {
   const router = useRouter();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [tokens, setTokens] = useState<TokenRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("member");
+  const [inviteOrgId, setInviteOrgId] = useState<string | null>(null);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sidebarReady, setSidebarReady] = useState(false);
-
-  const [tokenLabel, setTokenLabel] = useState("");
-  const [tokenScope, setTokenScope] = useState<"user" | "org">("user");
-  const [tokenOrgId, setTokenOrgId] = useState("");
-  const [tokenProjectId, setTokenProjectId] = useState("");
-  const [createdToken, setCreatedToken] = useState<{ token: string; tokenId: string } | null>(
-    null
-  );
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
-  const [isCreating, setIsCreating] = useState(false);
-  const [revokingId, setRevokingId] = useState<string | null>(null);
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
 
   const orgOptions = useMemo(() => me?.memberships ?? [], [me]);
   const activeProject = useMemo(
@@ -70,21 +50,6 @@ export default function TokensPage() {
     [projects, activeProjectId]
   );
   const primaryProject = activeProject ?? projects[0] ?? null;
-
-  const projectLookup = useMemo(() => {
-    const map = new Map<string, Project>();
-    for (const project of projects) {
-      map.set(project.id, project);
-    }
-    return map;
-  }, [projects]);
-
-  const projectOptions = useMemo(() => {
-    if (tokenScope === "org") {
-      return projects.filter((project) => project.org_id === tokenOrgId);
-    }
-    return projects;
-  }, [projects, tokenScope, tokenOrgId]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -114,24 +79,35 @@ export default function TokensPage() {
     }
   }, [activeProjectId]);
 
-  useEffect(() => {
-    if (tokenScope === "user") {
-      setTokenOrgId("");
+  const loadData = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [meResponse, projectsResponse] = await Promise.all([
+        fetch(`${API_BASE}/api/v1/me`, { credentials: "include" }),
+        fetch(`${API_BASE}/api/v1/projects`, { credentials: "include" }),
+      ]);
+
+      if (meResponse.status === 401) {
+        setError("Please sign in to manage invitations.");
+        setLoading(false);
+        return;
+      }
+
+      const mePayload = (await meResponse.json()) as MeResponse;
+      const projectsPayload = (await projectsResponse.json()) as { projects: Project[] };
+      setMe(mePayload);
+      setProjects(projectsPayload.projects ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load invitations");
+    } finally {
+      setLoading(false);
     }
-    setTokenProjectId("");
-  }, [tokenScope]);
+  };
 
   useEffect(() => {
-    if (tokenScope === "org" && !tokenOrgId && orgOptions.length > 0) {
-      setTokenOrgId(orgOptions[0].org_id);
-    }
-  }, [tokenScope, tokenOrgId, orgOptions]);
-
-  useEffect(() => {
-    if (tokenProjectId && !projectOptions.find((project) => project.id === tokenProjectId)) {
-      setTokenProjectId("");
-    }
-  }, [projectOptions, tokenProjectId]);
+    loadData();
+  }, []);
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -152,57 +128,6 @@ export default function TokensPage() {
     };
   }, []);
 
-  useEffect(() => {
-    setCopyStatus("idle");
-  }, [createdToken]);
-
-  const loadData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [meResponse, tokensResponse, projectsResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/v1/me`, { credentials: "include" }),
-        fetch(`${API_BASE}/api/v1/tokens`, { credentials: "include" }),
-        fetch(`${API_BASE}/api/v1/projects`, { credentials: "include" }),
-      ]);
-
-      if (meResponse.status === 401) {
-        setError("Please sign in to manage API tokens.");
-        setLoading(false);
-        return;
-      }
-
-      const mePayload = (await meResponse.json()) as MeResponse;
-      const tokensPayload = tokensResponse.ok
-        ? ((await tokensResponse.json()) as { tokens: TokenRecord[] })
-        : { tokens: [] };
-      const projectsPayload = projectsResponse.ok
-        ? ((await projectsResponse.json()) as { projects: Project[] })
-        : { projects: [] };
-
-      if (!tokensResponse.ok) {
-        const payload = await tokensResponse.json().catch(() => null);
-        setError(payload?.message ?? "Failed to load API tokens.");
-      }
-      if (!projectsResponse.ok) {
-        const payload = await projectsResponse.json().catch(() => null);
-        setError(payload?.message ?? "Failed to load projects.");
-      }
-
-      setMe(mePayload);
-      setTokens(tokensPayload.tokens ?? []);
-      setProjects(projectsPayload.projects ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load API tokens");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const handleLogout = async () => {
     await fetch(`${API_BASE}/api/v1/auth/logout`, {
       method: "POST",
@@ -211,100 +136,29 @@ export default function TokensPage() {
     router.push("/login");
   };
 
-  const handleCreateToken = async () => {
-    if (tokenScope === "org" && !tokenOrgId) {
-      setError("Select an org for org-scoped tokens.");
+  const handleInvite = async () => {
+    if (!inviteOrgId) {
+      setError("Choose an org to invite into.");
       return;
     }
-    setError(null);
-    setIsCreating(true);
-
-    const payload: {
-      scope: string;
-      label?: string;
-      org_id?: string;
-      project_id?: string;
-    } = {
-      scope: tokenScope,
-    };
-
-    if (tokenLabel.trim()) {
-      payload.label = tokenLabel.trim();
-    }
-    if (tokenScope === "org" && tokenOrgId) {
-      payload.org_id = tokenOrgId;
-    }
-    if (tokenProjectId) {
-      payload.project_id = tokenProjectId;
-    }
-
-    try {
-      const response = await fetch(`${API_BASE}/api/v1/tokens`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errorPayload = await response.json().catch(() => null);
-        setError(errorPayload?.message ?? "Failed to create token.");
-        return;
-      }
-
-      const responsePayload = (await response.json()) as {
-        token?: string;
-        token_id?: string;
-      };
-      if (responsePayload.token) {
-        setCreatedToken({
-          token: responsePayload.token,
-          tokenId: responsePayload.token_id ?? "",
-        });
-      }
-      setTokenLabel("");
-      setTokenProjectId("");
-      await loadData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create token.");
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  const handleRevokeToken = async (tokenId: string) => {
-    const confirmed = window.confirm("Revoke this API token? This cannot be undone.");
-    if (!confirmed) {
+    if (!inviteEmail.trim()) {
+      setError("Invite email is required.");
       return;
     }
-    setRevokingId(tokenId);
-    setError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/v1/tokens/${tokenId}/revoke`, {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        setError(payload?.message ?? "Failed to revoke token.");
-        return;
-      }
-      await loadData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to revoke token.");
-    } finally {
-      setRevokingId(null);
+    const response = await fetch(`${API_BASE}/api/v1/orgs/${inviteOrgId}/invites`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      setError(payload?.message ?? "Failed to invite member.");
+      return;
     }
-  };
-
-  const handleCopyToken = async () => {
-    if (!createdToken) return;
-    try {
-      await navigator.clipboard.writeText(createdToken.token);
-      setCopyStatus("copied");
-    } catch {
-      setCopyStatus("failed");
-    }
+    const payload = (await response.json()) as { token?: string };
+    setInviteToken(payload.token ?? null);
+    setInviteEmail("");
   };
 
   if (error && !me) {
@@ -490,14 +344,12 @@ export default function TokensPage() {
                 <span className={isSidebarOpen ? "" : "hidden"}>Organizations</span>
               </Link>
               <Link
-                aria-current="page"
-                className={`relative flex items-center rounded-xl border border-white/10 bg-white/10 py-2 text-sm font-semibold text-white shadow-sm shadow-black/30 ${
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
                 href="/tokens"
                 title="API tokens"
               >
-                <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-sky-300" />
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
                   <svg
                     viewBox="0 0 24 24"
@@ -515,12 +367,14 @@ export default function TokensPage() {
                 <span className={isSidebarOpen ? "" : "hidden"}>API tokens</span>
               </Link>
               <Link
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
+                aria-current="page"
+                className={`relative flex items-center rounded-xl border border-white/10 bg-white/10 py-2 text-sm font-semibold text-white shadow-sm shadow-black/30 ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
                 href="/invitations"
                 title="Invitations"
               >
+                <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-sky-300" />
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
                   <svg
                     viewBox="0 0 24 24"
@@ -607,11 +461,11 @@ export default function TokensPage() {
                   </svg>
                 </button>
                 <div>
-                  <p className="text-[11px] uppercase tracking-[0.2em] text-black/40">Home</p>
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-black/40">Workspace</p>
                   <div className="flex items-center gap-2 text-sm font-semibold text-black/80">
-                    <span>Security</span>
+                    <span>Invitations</span>
                     <span className="text-black/30">/</span>
-                    <span>API tokens</span>
+                    <span>{me?.user?.name ?? "Invite"}</span>
                   </div>
                 </div>
               </div>
@@ -722,23 +576,15 @@ export default function TokensPage() {
           <div className="w-full px-6 pb-12 pt-8">
             {loading ? (
               <div className="mb-6 rounded-xl border border-black/10 bg-white/70 px-4 py-2 text-xs text-black/60">
-                Syncing tokens...
+                Syncing invitations...
               </div>
             ) : null}
-            <div className="mb-10 flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wider text-black/40">Security</p>
-                <h1 className="mt-1 text-2xl font-semibold text-black/90">API tokens</h1>
-                <p className="mt-1 text-sm text-black/60">
-                  Create tokens for VS Code, CLI, or external automations.
-                </p>
-              </div>
-              <button
-                className="mt-1 rounded-full bg-black px-5 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
-                onClick={() => setIsCreateOpen(true)}
-              >
-                Create token
-              </button>
+            <div className="mb-10">
+              <p className="text-xs font-medium uppercase tracking-wider text-black/40">Workspace</p>
+              <h1 className="mt-1 text-2xl font-semibold text-black/90">Invitations</h1>
+              <p className="mt-1 text-sm text-black/60">
+                Invite teammates and share the token once.
+              </p>
             </div>
 
             {error ? (
@@ -747,229 +593,67 @@ export default function TokensPage() {
               </div>
             ) : null}
 
-            <div className="grid gap-8">
-              <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold">Active tokens</h2>
-                  <span className="rounded-full bg-cyan-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-700">
-                    {tokens.filter((token) => !token.revoked_at).length} live
-                  </span>
+            <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
+              <h2 className="text-lg font-semibold">Invite members</h2>
+              {orgOptions.length === 0 ? (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+                  You need an organization before inviting teammates.{" "}
+                  <Link className="font-semibold underline" href="/organizations">
+                    Create one here
+                  </Link>
+                  .
                 </div>
-                <p className="mt-2 text-sm text-black/60">
-                  Tokens are shown without secrets. Copy the raw token when created.
-                </p>
-                <div className="mt-6 space-y-3">
-                  {tokens.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-black/10 px-3 py-4 text-sm text-black/50">
-                      No tokens yet. Create one to connect VS Code.
-                    </div>
-                  ) : (
-                    tokens.map((token) => {
-                      const projectLabel = token.project_id
-                        ? projectLookup.get(token.project_id)?.name ??
-                          `${token.project_id.slice(0, 8)}...`
-                        : "All projects";
-                      const scopeLabel = token.subject_type === "ORG" ? "Org" : "User";
-                      const createdAt = formatTimestamp(token.created_at);
-                      const lastUsed = token.last_used_at ? formatTimestamp(token.last_used_at) : "Never";
-                      return (
-                        <div
-                          key={token.id}
-                          className="rounded-xl border border-black/5 bg-white px-4 py-3 text-sm shadow-sm shadow-black/5"
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className="font-semibold text-black/80">
-                                {token.label?.trim() || "Untitled token"}
-                              </p>
-                              <p className="text-xs text-black/50">
-                                {scopeLabel} token • {projectLabel}
-                              </p>
-                            </div>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                token.revoked_at
-                                  ? "bg-rose-100 text-rose-700"
-                                  : "bg-emerald-100 text-emerald-700"
-                              }`}
-                            >
-                              {token.revoked_at ? "Revoked" : "Active"}
-                            </span>
-                          </div>
-                          <div className="mt-4 grid gap-3 text-xs text-black/50 sm:grid-cols-2">
-                            <div>
-                              <p className="font-semibold text-black/60">Created</p>
-                              <p>{createdAt}</p>
-                            </div>
-                            <div>
-                              <p className="font-semibold text-black/60">Last used</p>
-                              <p>{lastUsed}</p>
-                            </div>
-                            <div>
-                              <p className="font-semibold text-black/60">Token ID</p>
-                              <p>{token.id.slice(0, 12)}...</p>
-                            </div>
-                          </div>
-                          <div className="mt-4 flex flex-wrap items-center gap-2">
-                            <button
-                              className="rounded-full border border-black/10 bg-white px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-60"
-                              onClick={() => handleRevokeToken(token.id)}
-                              disabled={Boolean(token.revoked_at) || revokingId === token.id}
-                            >
-                              {token.revoked_at ? "Revoked" : revokingId === token.id ? "Revoking" : "Revoke"}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </section>
-
-              <section className="rounded-2xl border border-black/5 bg-white/60 p-5 text-xs text-black/60 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
-                  Token usage
-                </p>
-                <p className="mt-2">
-                  Use tokens with <span className="font-semibold text-black/80">Authorization: Bearer</span>.
-                </p>
-                <div className="mt-3 rounded-xl border border-black/10 bg-white px-3 py-2 font-mono text-[11px] text-black/70">
-                  Authorization: Bearer &lt;token&gt;
-                </div>
-              </section>
-            </div>
+              ) : (
+                <>
+                  <p className="mt-2 text-sm text-black/60">
+                    Choose an org, set a role, and share the invite token once.
+                  </p>
+                  <div className="mt-4 grid gap-3">
+                    <select
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      value={inviteOrgId ?? ""}
+                      onChange={(event) => setInviteOrgId(event.target.value || null)}
+                    >
+                      <option value="">Choose org</option>
+                      {orgOptions.map((org) => (
+                        <option key={org.org_id} value={org.org_id}>
+                          {org.org_name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      placeholder="Invite email"
+                      value={inviteEmail}
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                    />
+                    <select
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
+                      value={inviteRole}
+                      onChange={(event) => setInviteRole(event.target.value)}
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                      <option value="owner">Owner</option>
+                    </select>
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                      onClick={handleInvite}
+                    >
+                      Create invite
+                    </button>
+                    {inviteToken ? (
+                      <div className="rounded-xl border border-emerald-300/60 bg-emerald-100 px-3 py-2 text-xs text-emerald-800">
+                        Invite token: <span className="font-semibold select-all">{inviteToken}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              )}
+            </section>
           </div>
-
-          {isCreateOpen ? (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
-              onClick={() => setIsCreateOpen(false)}
-            >
-              <div
-                className="w-full max-w-xl overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <div className="flex items-start justify-between border-b border-black/10 px-6 py-4">
-                  <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
-                      Security
-                    </p>
-                    <h2 className="mt-1 text-lg font-semibold text-black/90">Create token</h2>
-                  </div>
-                  <button
-                    className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
-                    onClick={() => setIsCreateOpen(false)}
-                  >
-                    Close
-                  </button>
-                </div>
-                <div className="max-h-[70vh] space-y-6 overflow-y-auto px-6 py-5">
-                  <div>
-                    <p className="text-sm text-black/60">
-                      Tokens are shown once. Copy and store them securely.
-                    </p>
-                    <div className="mt-4 grid gap-3">
-                      <input
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                        placeholder="Label (optional)"
-                        value={tokenLabel}
-                        onChange={(event) => setTokenLabel(event.target.value)}
-                      />
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                        value={tokenScope}
-                        onChange={(event) => setTokenScope(event.target.value as "user" | "org")}
-                      >
-                        <option value="user">User scope</option>
-                        <option value="org">Org scope</option>
-                      </select>
-                      {tokenScope === "org" ? (
-                        orgOptions.length > 0 ? (
-                          <select
-                            className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                            value={tokenOrgId}
-                            onChange={(event) => setTokenOrgId(event.target.value)}
-                          >
-                            {orgOptions.map((org) => (
-                              <option key={org.org_id} value={org.org_id}>
-                                {org.org_name} ({org.role})
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                            You are not part of any orgs yet.
-                          </div>
-                        )
-                      ) : null}
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                        value={tokenProjectId}
-                        onChange={(event) => setTokenProjectId(event.target.value)}
-                        disabled={tokenScope === "org" && !tokenOrgId}
-                      >
-                        <option value="">All projects</option>
-                        {projectOptions.map((project) => (
-                          <option key={project.id} value={project.id}>
-                            {project.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="rounded-full bg-black px-5 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80 disabled:cursor-not-allowed disabled:opacity-60"
-                        onClick={handleCreateToken}
-                        disabled={isCreating || (tokenScope === "org" && orgOptions.length === 0)}
-                      >
-                        {isCreating ? "Creating..." : "Create token"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {createdToken ? (
-                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 shadow-sm shadow-emerald-900/5">
-                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">
-                        New token
-                      </p>
-                      <p className="mt-2 text-sm text-emerald-800">
-                        Copy this token now. It will not be shown again.
-                      </p>
-                      <div className="mt-3 rounded-xl border border-emerald-200 bg-white px-3 py-2 text-xs text-emerald-900">
-                        <span className="select-all font-semibold">{createdToken.token}</span>
-                      </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <button
-                          className="rounded-full border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100"
-                          onClick={handleCopyToken}
-                        >
-                          {copyStatus === "copied"
-                            ? "Copied"
-                            : copyStatus === "failed"
-                            ? "Copy failed"
-                            : "Copy token"}
-                        </button>
-                        <button
-                          className="rounded-full border border-emerald-300 bg-transparent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-800 transition hover:bg-emerald-100"
-                          onClick={() => setCreatedToken(null)}
-                        >
-                          Dismiss
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          ) : null}
         </div>
       </div>
     </div>
   );
-}
-
-function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Unknown";
-  }
-  return date.toLocaleString();
 }
