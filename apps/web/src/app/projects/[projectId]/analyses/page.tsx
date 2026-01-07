@@ -855,10 +855,11 @@ export default function ProjectAnalysesPage() {
                   <span className={isSidebarOpen ? "" : "hidden"}>Analyses</span>
                 </div>
               )}
-              <div
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/organizations"
                 title="Organizations"
               >
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
@@ -876,7 +877,7 @@ export default function ProjectAnalysesPage() {
                   </svg>
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>Organizations</span>
-              </div>
+              </Link>
               <Link
                 className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
@@ -900,10 +901,11 @@ export default function ProjectAnalysesPage() {
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>API tokens</span>
               </Link>
-              <div
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/invitations"
                 title="Invitations"
               >
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
@@ -920,7 +922,7 @@ export default function ProjectAnalysesPage() {
                   </svg>
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>Invitations</span>
-              </div>
+              </Link>
             </nav>
           </div>
 

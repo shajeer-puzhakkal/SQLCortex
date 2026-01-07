@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const SIDEBAR_STATE_KEY = "sqlcortex.sidebarOpen";
@@ -37,18 +38,13 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
 
-  const [orgName, setOrgName] = useState("");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("member");
-  const [inviteOrgId, setInviteOrgId] = useState<string | null>(null);
-  const [inviteToken, setInviteToken] = useState<string | null>(null);
-
   const [projectName, setProjectName] = useState("");
   const [projectOrgId, setProjectOrgId] = useState("personal");
   const [profileOpen, setProfileOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sidebarReady, setSidebarReady] = useState(false);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
 
   const orgOptions = useMemo(() => me?.memberships ?? [], [me]);
   const activeProject = useMemo(
@@ -105,7 +101,9 @@ export default function ProjectsPage() {
       setMe(mePayload);
       setProjects(projectsPayload.projects ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load projects");
+      const message = err instanceof Error ? err.message : "Failed to load projects";
+      setError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -142,56 +140,12 @@ export default function ProjectsPage() {
     router.push("/login");
   };
 
-  const handleCreateOrg = async () => {
-    if (!orgName.trim()) {
-      setError("Org name is required.");
-      return;
-    }
-    const response = await fetch(`${API_BASE}/api/v1/orgs`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: orgName.trim() }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to create org.");
-      return;
-    }
-    setOrgName("");
-    await loadData();
-  };
-
-  const handleInvite = async () => {
-    if (!inviteOrgId) {
-      setError("Choose an org to invite into.");
-      return;
-    }
-    if (!inviteEmail.trim()) {
-      setError("Invite email is required.");
-      return;
-    }
-    const response = await fetch(`${API_BASE}/api/v1/orgs/${inviteOrgId}/invites`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to invite member.");
-      return;
-    }
-    const payload = (await response.json()) as { token?: string };
-    setInviteToken(payload.token ?? null);
-    setInviteEmail("");
-  };
-
   const handleCreateProject = async () => {
     if (!projectName.trim()) {
-      setError("Project name is required.");
+      toast.error("Project name is required.");
       return;
     }
+    setError(null);
     const orgId = projectOrgId === "personal" ? null : projectOrgId;
     const response = await fetch(`${API_BASE}/api/v1/projects`, {
       method: "POST",
@@ -201,10 +155,12 @@ export default function ProjectsPage() {
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
-      setError(payload?.message ?? "Failed to create project.");
+      toast.error(payload?.message ?? "Failed to create project.");
       return;
     }
     setProjectName("");
+    setIsCreateOpen(false);
+    toast.success("Project created.");
     await loadData();
   };
 
@@ -370,10 +326,11 @@ export default function ProjectsPage() {
                   <span className={isSidebarOpen ? "" : "hidden"}>Analyses</span>
                 </div>
               )}
-              <div
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/organizations"
                 title="Organizations"
               >
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
@@ -391,7 +348,7 @@ export default function ProjectsPage() {
                   </svg>
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>Organizations</span>
-              </div>
+              </Link>
               <Link
                 className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
@@ -415,10 +372,11 @@ export default function ProjectsPage() {
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>API tokens</span>
               </Link>
-              <div
-                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/40 ${
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/invitations"
                 title="Invitations"
               >
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
@@ -435,7 +393,7 @@ export default function ProjectsPage() {
                   </svg>
                 </span>
                 <span className={isSidebarOpen ? "" : "hidden"}>Invitations</span>
-              </div>
+              </Link>
             </nav>
           </div>
 
@@ -625,23 +583,25 @@ export default function ProjectsPage() {
                 Syncing projects...
               </div>
             ) : null}
-            <div className="mb-10">
-              <p className="text-xs font-medium uppercase tracking-wider text-black/40">Workspace</p>
-              <h1 className="mt-1 text-2xl font-semibold text-black/90">
-                {me?.user?.name ?? "My Projects"}
-              </h1>
-              <p className="mt-1 text-sm text-black/60">
-                Manage your databases and AI query optimizations.
-              </p>
+            <div className="mb-10 flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wider text-black/40">Workspace</p>
+                <h1 className="mt-1 text-2xl font-semibold text-black/90">
+                  {me?.user?.name ?? "My Projects"}
+                </h1>
+                <p className="mt-1 text-sm text-black/60">
+                  Manage your databases and AI query optimizations.
+                </p>
+              </div>
+              <button
+                className="rounded-full bg-black px-5 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
+                onClick={() => setIsCreateOpen(true)}
+              >
+                Create project
+              </button>
             </div>
 
-            {error ? (
-              <div className="mb-8 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
-                {error}
-              </div>
-            ) : null}
-
-            <div className="grid gap-8 lg:grid-cols-[1.6fr_1fr]">
+            <div className="grid gap-8">
               <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-semibold">Active projects</h2>
@@ -654,14 +614,14 @@ export default function ProjectsPage() {
                 <div className="mt-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-black/50">
                   Choose a project to open the analysis workspace.
                 </div>
-                <div className="mt-6 space-y-3">
+                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   {projects.length === 0 ? (
                     <p className="text-sm text-black/60">No projects yet.</p>
                   ) : (
                     projects.map((project) => (
                       <button
                         key={project.id}
-                        className={`group flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left text-sm transition ${
+                        className={`group flex w-full flex-col items-start justify-between gap-3 rounded-xl border px-4 py-3 text-left text-sm transition ${
                           activeProjectId === project.id
                             ? "border-cyan-600/40 bg-cyan-50/50 shadow-sm shadow-cyan-900/5"
                             : "border-black/5 bg-white hover:border-black/20 hover:shadow-sm hover:shadow-black/5"
@@ -674,9 +634,14 @@ export default function ProjectsPage() {
                             {project.org_id ? `Org ${project.org_id.slice(0, 8)}` : "Personal"} - Not connected
                           </p>
                         </div>
-                        {activeProjectId === project.id ? (
-                          <div className="h-2 w-2 rounded-full bg-cyan-500 shadow-sm shadow-cyan-500/50" />
-                        ) : null}
+                        <div className="flex w-full items-center justify-between text-xs text-black/50">
+                          <span>{activeProjectId === project.id ? "Active" : "Select"}</span>
+                          {activeProjectId === project.id ? (
+                            <div className="h-2 w-2 rounded-full bg-cyan-500 shadow-sm shadow-cyan-500/50" />
+                          ) : (
+                            <div className="h-2 w-2 rounded-full bg-black/10" />
+                          )}
+                        </div>
                       </button>
                     ))
                   )}
@@ -691,164 +656,78 @@ export default function ProjectsPage() {
                     </Link>
                   </div>
                 ) : null}
-                <div className="mt-6 border-t border-black/10 pt-6">
-                  <h3 className="text-sm font-semibold text-black/70">Create project</h3>
-                  <div className="mt-4 grid gap-3">
-                    <input
-                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                      placeholder="Project name"
-                      value={projectName}
-                      onChange={(event) => setProjectName(event.target.value)}
-                    />
-                    {orgOptions.length > 0 && (
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
-                        value={projectOrgId}
-                        onChange={(event) => setProjectOrgId(event.target.value)}
-                      >
-                        <option value="personal">Personal</option>
-                        {orgOptions.map((org) => (
-                          <option key={org.org_id} value={org.org_id}>
-                            {org.org_name} ({org.role})
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    <p className="text-xs text-black/50">
-                      Projects contain databases, queries, and AI analysis.
-                    </p>
-                    <button
-                      className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
-                      onClick={handleCreateProject}
-                    >
-                      Create project
-                    </button>
-                  </div>
-                </div>
               </section>
 
-            <section className="space-y-6">
-              <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <h2 className="text-lg font-semibold">Organizations</h2>
-                <div className="mt-4 space-y-2">
-                  {orgOptions.length === 0 ? (
-                    <p className="text-sm text-black/60">
-                      Create an organization to collaborate with your team and share projects.
-                    </p>
-                  ) : (
-                    orgOptions.map((org) => (
-                      <div
-                        key={org.org_id}
-                        className="rounded-xl border border-black/5 bg-white px-3 py-2 text-sm"
-                      >
-                        <p className="font-semibold">{org.org_name}</p>
-                        <p className="text-xs text-black/60">{org.role}</p>
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="mt-6 border-t border-black/10 pt-6">
-                  <h3 className="text-sm font-semibold text-black/70">Create org</h3>
-                  <div className="mt-3 flex gap-3">
-                    <input
-                      className="flex-1 rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                      placeholder="Org name"
-                      value={orgName}
-                      onChange={(event) => setOrgName(event.target.value)}
-                    />
-                    <button
-                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
-                      onClick={handleCreateOrg}
-                    >
-                      Create
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <h2 className="text-lg font-semibold">Invite members</h2>
-                {orgOptions.length === 0 ? (
-                  <p className="mt-2 text-sm text-black/60">
-                    Create an organization to invite team members.
-                  </p>
-                ) : (
-                  <>
-                    <p className="mt-2 text-sm text-black/60">
-                      Invite teammates and share the token once.
-                    </p>
-                    <div className="mt-4 grid gap-3">
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        value={inviteOrgId ?? ""}
-                        onChange={(event) => setInviteOrgId(event.target.value || null)}
-                      >
-                        <option value="">Choose org</option>
-                        {orgOptions.map((org) => (
-                          <option key={org.org_id} value={org.org_id}>
-                            {org.org_name}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        placeholder="Invite email"
-                        value={inviteEmail}
-                        onChange={(event) => setInviteEmail(event.target.value)}
-                      />
-                      <select
-                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-emerald-600 focus:shadow-sm focus:shadow-emerald-900/5"
-                        value={inviteRole}
-                        onChange={(event) => setInviteRole(event.target.value)}
-                      >
-                        <option value="member">Member</option>
-                        <option value="admin">Admin</option>
-                        <option value="owner">Owner</option>
-                      </select>
-                      <button
-                        className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
-                        onClick={handleInvite}
-                      >
-                        Create invite
-                      </button>
-                      {inviteToken ? (
-                        <div className="rounded-xl border border-emerald-300/60 bg-emerald-100 px-3 py-2 text-xs text-emerald-800">
-                          Invite token: <span className="font-semibold select-all">{inviteToken}</span>
-                        </div>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              </div>
-            </section>
           </div>
 
-          <div className="mt-12 border-t border-black/5 pt-8">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-black/40">
-              Next steps
-            </p>
-            <div className="mt-6 grid gap-6 sm:grid-cols-3">
+        </div>
+        </div>
+      </div>
+      {isCreateOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
+          onClick={() => setIsCreateOpen(false)}
+        >
+          <div
+            className="w-full max-w-xl overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-black/10 px-6 py-4">
               <div>
-                <span className="block text-2xl font-bold text-black/10">01</span>
-                <p className="mt-2 text-sm font-medium text-black/80">Create a project</p>
-              </div>
-              <div>
-                <span className="block text-2xl font-bold text-black/10">02</span>
-                <p className="mt-2 text-sm font-medium text-black/80">
-                  Connect your database
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                  Workspace
                 </p>
+                <h2 className="mt-1 text-lg font-semibold text-black/90">Create project</h2>
               </div>
-              <div>
-                <span className="block text-2xl font-bold text-black/10">03</span>
-                <p className="mt-2 text-sm font-medium text-black/80">
-                  Analyze and optimize queries with AI
-                </p>
+              <button
+                className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
+                onClick={() => setIsCreateOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              <input
+                className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                placeholder="Project name"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+              {orgOptions.length > 0 && (
+                <select
+                  className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                  value={projectOrgId}
+                  onChange={(event) => setProjectOrgId(event.target.value)}
+                >
+                  <option value="personal">Personal</option>
+                  {orgOptions.map((org) => (
+                    <option key={org.org_id} value={org.org_id}>
+                      {org.org_name} ({org.role})
+                    </option>
+                  ))}
+                </select>
+              )}
+              <p className="text-xs text-black/50">
+                Projects contain databases, queries, and AI analysis.
+              </p>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => setIsCreateOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80"
+                  onClick={handleCreateProject}
+                >
+                  Create project
+                </button>
               </div>
             </div>
           </div>
         </div>
-        </div>
-      </div>
+      ) : null}
     </div>
   );
 }
