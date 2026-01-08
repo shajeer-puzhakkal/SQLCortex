@@ -1,7 +1,13 @@
 import * as vscode from "vscode";
 import type { ApiClient } from "../../api/client";
 import { formatApiError } from "../../api/client";
-import { listColumns, listConnections, listSchemas, listTables } from "../../api/endpoints";
+import {
+  executeQuery,
+  listColumns,
+  listConnections,
+  listSchemas,
+  listTables,
+} from "../../api/endpoints";
 import type {
   SchemaColumnResource,
   SchemaResource,
@@ -14,9 +20,13 @@ import {
   ColumnNode,
   ColumnsRootNode,
   ConnectionNode,
+  ConstraintNode,
+  ConstraintsRootNode,
   ErrorNode,
+  InfoNode,
   type DbExplorerNode,
   SchemaNode,
+  SchemaSectionNode,
   SchemasRootNode,
   TableNode,
 } from "./nodes";
@@ -75,17 +85,29 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       case "schemasRoot":
         return this.loadSchemas(element);
       case "schema":
-        return this.loadTables(element);
+        return [
+          new SchemaSectionNode(element.connectionId, element.schemaName, "tables", element),
+          new SchemaSectionNode(element.connectionId, element.schemaName, "views", element),
+          new SchemaSectionNode(element.connectionId, element.schemaName, "functions", element),
+        ];
+      case "schemaSection":
+        return this.loadSchemaSection(element);
       case "table":
-        return [new ColumnsRootNode(element.connectionId, element.schemaName, element.table.name, element)];
+        return this.getTableChildren(element);
       case "columnsRoot":
         return this.loadColumns(element);
+      case "constraintsRoot":
+        return this.loadConstraints(element);
       default:
         return [];
     }
   }
 
-  async revealTable(schemaName: string, tableName: string): Promise<boolean> {
+  async revealTable(
+    schemaName: string,
+    tableName: string,
+    tableType: "table" | "view" = "table"
+  ): Promise<boolean> {
     if (!this.treeView) {
       return false;
     }
@@ -99,7 +121,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       id: workspace.connectionId,
       project_id: workspace.projectId ?? "",
       type: "postgres",
-      name: "Connection",
+      name: workspace.connectionName ?? "Connection",
       ssl_mode: "unknown",
       host: null,
       port: null,
@@ -113,11 +135,17 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
 
     const schemasRoot = new SchemasRootNode(workspace.connectionId, connectionNode);
     const schemaNode = new SchemaNode(workspace.connectionId, schemaName, schemasRoot);
+    const sectionNode = new SchemaSectionNode(
+      workspace.connectionId,
+      schemaName,
+      tableType === "view" ? "views" : "tables",
+      schemaNode
+    );
     const tableNode = new TableNode(
       workspace.connectionId,
       schemaName,
-      { name: tableName, type: "table" },
-      schemaNode
+      { name: tableName, type: tableType },
+      sectionNode
     );
 
     try {
@@ -219,7 +247,19 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     }
   }
 
-  private async loadTables(element: SchemaNode): Promise<DbExplorerNode[]> {
+  private async loadSchemaSection(element: SchemaSectionNode): Promise<DbExplorerNode[]> {
+    if (element.sectionType === "functions") {
+      return this.loadFunctions(element);
+    }
+
+    const tableType = element.sectionType === "views" ? "view" : "table";
+    return this.loadTablesByType(element, tableType);
+  }
+
+  private async loadTablesByType(
+    element: SchemaSectionNode,
+    tableType: "table" | "view"
+  ): Promise<DbExplorerNode[]> {
     const workspace = getWorkspaceContext(this.deps.context);
     if (!workspace.projectId) {
       return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
@@ -231,20 +271,39 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     }
 
     const client = this.deps.createAuthorizedClient(auth);
+    const label = tableType === "view" ? "views" : "tables";
     try {
-      const tables = await this.withProgress("Loading tables...", () =>
+      const tables = await this.withProgress(`Loading ${label}...`, () =>
         this.fetchTables(client, workspace.projectId, element.connectionId, element.schemaName)
       );
-      if (tables.length === 0) {
-        return [new ErrorNode("No tables or views found.", "sqlcortex.refreshExplorer", element)];
+      const filtered = tables.filter((table) => table.type === tableType);
+      if (filtered.length === 0) {
+        return [new InfoNode(`No ${label} found.`, element)];
       }
-      return tables.map(
+      return filtered.map(
         (table) => new TableNode(element.connectionId, element.schemaName, table, element)
       );
     } catch (err) {
-      this.logError("Failed to load tables", err);
-      return [new ErrorNode("Failed to load. Click to retry.", "sqlcortex.refreshExplorer", element)];
+      const errorLabel = tableType === "view" ? "Failed to load views" : "Failed to load tables";
+      this.logError(errorLabel, err);
+      return [
+        new ErrorNode("Failed to load. Click to retry.", "sqlcortex.refreshExplorer", element),
+      ];
     }
+  }
+
+  private async loadFunctions(element: SchemaSectionNode): Promise<DbExplorerNode[]> {
+    const workspace = getWorkspaceContext(this.deps.context);
+    if (!workspace.projectId) {
+      return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
+    }
+
+    const auth = await this.deps.resolveAuthContext();
+    if (!auth) {
+      return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
+    }
+
+    return [new InfoNode("Functions not available yet.", element)];
   }
 
   private async loadColumns(element: ColumnsRootNode): Promise<DbExplorerNode[]> {
@@ -288,6 +347,66 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     }
   }
 
+  private getTableChildren(element: TableNode): DbExplorerNode[] {
+    const nodes: DbExplorerNode[] = [
+      new ColumnsRootNode(
+        element.connectionId,
+        element.schemaName,
+        element.table.name,
+        element
+      ),
+    ];
+
+    if (element.table.type !== "view") {
+      nodes.push(
+        new ConstraintsRootNode(
+          element.connectionId,
+          element.schemaName,
+          element.table.name,
+          element
+        )
+      );
+    }
+
+    return nodes;
+  }
+
+  private async loadConstraints(element: ConstraintsRootNode): Promise<DbExplorerNode[]> {
+    const workspace = getWorkspaceContext(this.deps.context);
+    if (!workspace.projectId) {
+      return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
+    }
+
+    const auth = await this.deps.resolveAuthContext();
+    if (!auth) {
+      return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
+    }
+
+    const client = this.deps.createAuthorizedClient(auth);
+    try {
+      const constraints = await this.withProgress("Loading constraints...", () =>
+        this.fetchConstraints(
+          client,
+          workspace.projectId,
+          element.connectionId,
+          element.schemaName,
+          element.tableName
+        )
+      );
+
+      if (constraints.length === 0) {
+        return [new InfoNode("No constraints found.", element)];
+      }
+
+      return constraints.map((constraint) => new ConstraintNode(constraint, element));
+    } catch (err) {
+      this.logError("Failed to load constraints", err);
+      return [
+        new ErrorNode("Failed to load. Click to retry.", "sqlcortex.refreshExplorer", element),
+      ];
+    }
+  }
+
   private async fetchSchemas(
     client: ApiClient,
     projectId: string,
@@ -325,6 +444,49 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     );
   }
 
+  private async fetchConstraints(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ): Promise<
+    Array<{
+      name: string;
+      type: string;
+      summary?: string;
+      tooltip?: string;
+      icon?: string;
+    }>
+  > {
+    const cacheKey = this.cacheKey(connectionId, "constraints", {
+      schema: schemaName,
+      table: tableName,
+    });
+
+    return this.fetchWithCache(cacheKey, async () => {
+      const sql = this.buildConstraintsQuery(schemaName, tableName);
+      const response = await executeQuery(client, {
+        projectId,
+        connectionId,
+        sql,
+        source: "vscode",
+        client: {
+          extensionVersion: this.getExtensionVersion(),
+          vscodeVersion: vscode.version,
+        },
+      });
+
+      if (response.error) {
+        const reason = this.extractErrorReason(response.error.details);
+        const message = response.error.message ?? "Failed to load constraints.";
+        throw new Error(reason ? `${message} (${reason})` : message);
+      }
+
+      return this.parseConstraintRows(response.columns, response.rows);
+    });
+  }
+
   private cacheKey(
     connectionId: string,
     endpoint: string,
@@ -337,6 +499,162 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
           .join("&")
       : "";
     return `${connectionId}:${endpoint}:${normalizedParams}`;
+  }
+
+  private buildConstraintsQuery(schemaName: string, tableName: string): string {
+    const schemaLiteral = this.escapeSqlLiteral(schemaName);
+    const tableLiteral = this.escapeSqlLiteral(tableName);
+    return `
+      SELECT
+        tc.constraint_name,
+        tc.constraint_type,
+        kcu.column_name,
+        ccu.table_schema AS foreign_table_schema,
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name
+      FROM information_schema.table_constraints tc
+      LEFT JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+        AND tc.table_name = kcu.table_name
+      LEFT JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      WHERE tc.table_schema = '${schemaLiteral}'
+        AND tc.table_name = '${tableLiteral}'
+      ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position;
+    `.trim();
+  }
+
+  private parseConstraintRows(
+    columns: Array<{ name: string }>,
+    rows: Array<Array<unknown>>
+  ): Array<{ name: string; type: string; summary?: string; tooltip?: string; icon?: string }> {
+    const indexByName = new Map<string, number>();
+    columns.forEach((col, index) => {
+      indexByName.set(col.name, index);
+    });
+
+    const nameIndex = indexByName.get("constraint_name");
+    const typeIndex = indexByName.get("constraint_type");
+    const columnIndex = indexByName.get("column_name");
+    const foreignSchemaIndex = indexByName.get("foreign_table_schema");
+    const foreignTableIndex = indexByName.get("foreign_table_name");
+    const foreignColumnIndex = indexByName.get("foreign_column_name");
+
+    if (nameIndex === undefined || typeIndex === undefined) {
+      return [];
+    }
+
+    const constraints = new Map<
+      string,
+      {
+        name: string;
+        type: string;
+        columns: string[];
+        foreignTable?: string;
+        foreignColumns: string[];
+      }
+    >();
+    const order: string[] = [];
+
+    for (const row of rows) {
+      const name = this.asString(row[nameIndex]);
+      if (!name) {
+        continue;
+      }
+      const type = this.asString(row[typeIndex]) ?? "CONSTRAINT";
+      let entry = constraints.get(name);
+      if (!entry) {
+        entry = { name, type, columns: [], foreignColumns: [] };
+        constraints.set(name, entry);
+        order.push(name);
+      }
+
+      const columnName = columnIndex !== undefined ? this.asString(row[columnIndex]) : null;
+      if (columnName) {
+        this.pushUnique(entry.columns, columnName);
+      }
+
+      const foreignSchema =
+        foreignSchemaIndex !== undefined ? this.asString(row[foreignSchemaIndex]) : null;
+      const foreignTable =
+        foreignTableIndex !== undefined ? this.asString(row[foreignTableIndex]) : null;
+      if (foreignSchema && foreignTable) {
+        entry.foreignTable = `${foreignSchema}.${foreignTable}`;
+      }
+
+      const foreignColumn =
+        foreignColumnIndex !== undefined ? this.asString(row[foreignColumnIndex]) : null;
+      if (foreignColumn) {
+        this.pushUnique(entry.foreignColumns, foreignColumn);
+      }
+    }
+
+    return order
+      .map((name) => constraints.get(name))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .map((entry) => {
+        const summaryParts = [entry.type];
+        if (entry.columns.length > 0) {
+          summaryParts.push(`(${entry.columns.join(", ")})`);
+        }
+        if (entry.type === "FOREIGN KEY" && entry.foreignTable) {
+          const foreignColumns =
+            entry.foreignColumns.length > 0 ? `(${entry.foreignColumns.join(", ")})` : "";
+          summaryParts.push(`→ ${entry.foreignTable}${foreignColumns}`);
+        }
+
+        const summary = summaryParts.join(" ");
+        return {
+          name: entry.name,
+          type: entry.type,
+          summary,
+          tooltip: summary,
+          icon: this.iconForConstraint(entry.type),
+        };
+      });
+  }
+
+  private iconForConstraint(type: string): string {
+    switch (type.toUpperCase()) {
+      case "PRIMARY KEY":
+      case "UNIQUE":
+        return "key";
+      case "FOREIGN KEY":
+        return "link";
+      case "CHECK":
+        return "symbol-constant";
+      default:
+        return "symbol-misc";
+    }
+  }
+
+  private asString(value: unknown): string | null {
+    return typeof value === "string" && value.trim() ? value : null;
+  }
+
+  private pushUnique(list: string[], value: string): void {
+    if (!list.includes(value)) {
+      list.push(value);
+    }
+  }
+
+  private escapeSqlLiteral(value: string): string {
+    return value.replace(/'/g, "''");
+  }
+
+  private getExtensionVersion(): string {
+    const version = this.deps.context.extension?.packageJSON?.version;
+    return typeof version === "string" ? version : "0.0.0";
+  }
+
+  private extractErrorReason(details?: Record<string, unknown>): string | null {
+    if (!details) {
+      return null;
+    }
+    const reason = details.reason;
+    return typeof reason === "string" && reason.trim() ? reason.trim() : null;
   }
 
   private getCachedValue<T>(key: string): T | null {

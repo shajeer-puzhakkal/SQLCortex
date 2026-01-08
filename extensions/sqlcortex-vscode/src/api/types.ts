@@ -51,6 +51,7 @@ export type SchemaColumnResource = {
 
 export type ExecuteQueryRequest = {
   projectId: string;
+  connectionId?: string | null;
   sql: string;
   source: "vscode";
   client: {
