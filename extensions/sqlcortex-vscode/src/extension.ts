@@ -24,10 +24,13 @@ import {
   setActiveConnection,
   setActiveProject,
 } from "./state/workspaceState";
-import { createStatusBarItem, updateStatusBar } from "./ui/statusBar";
+import { createStatusBarItems, updateStatusBar, type StatusBarItems } from "./ui/statusBar";
 import { ResultsPanel } from "./ui/resultsPanel";
+import { ChatViewProvider } from "./ui/chatView";
 import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
+import { SidebarProvider } from "./ui/tree/sidebarProvider";
+import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { validateReadOnlySql } from "./sql/validator";
 
@@ -41,6 +44,7 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.searchTable", label: "Search Table" },
   { id: "sqlcortex.copyTableName", label: "Copy Table Name" },
   { id: "sqlcortex.copyColumnName", label: "Copy Column Name" },
+  { id: "sqlcortex.runTableQuery", label: "Run Table Query" },
   { id: "sqlcortex.runQuery", label: "Run Query" },
   { id: "sqlcortex.runSelection", label: "Run Selection" },
 ];
@@ -69,10 +73,24 @@ export function activate(context: vscode.ExtensionContext) {
 
   void migrateApiBaseUrl(context, output);
 
+  ResultsPanel.register(context);
+
   const tokenStore = createTokenStore(context.secrets);
-  const statusBar = createStatusBarItem();
-  context.subscriptions.push(statusBar);
-  void refreshContext(context, tokenStore, statusBar);
+  const statusBars = createStatusBarItems();
+  context.subscriptions.push(
+    statusBars.workspace,
+    statusBars.connection,
+    statusBars.runQuery
+  );
+
+  const sidebarProvider = new SidebarProvider({ context, tokenStore });
+  const sidebarView = vscode.window.createTreeView("sqlcortex.overview", {
+    treeDataProvider: sidebarProvider,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(sidebarView);
+
+  void refreshContext(context, tokenStore, statusBars, sidebarProvider);
 
   const dbExplorerProvider = new DbExplorerProvider({
     context,
@@ -80,7 +98,7 @@ export function activate(context: vscode.ExtensionContext) {
     output,
     resolveAuthContext: () => resolveAuthContext(context, tokenStore, output),
     createAuthorizedClient: (auth) =>
-      createAuthorizedClient(context, auth, tokenStore, output, statusBar),
+      createAuthorizedClient(context, auth, tokenStore, output, statusBars, sidebarProvider),
   });
   const dbExplorerView = vscode.window.createTreeView("sqlcortex.databaseExplorer", {
     treeDataProvider: dbExplorerProvider,
@@ -89,31 +107,77 @@ export function activate(context: vscode.ExtensionContext) {
   dbExplorerProvider.attachView(dbExplorerView);
   context.subscriptions.push(dbExplorerView);
 
+  const chatViewProvider = new ChatViewProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      "sqlcortex.chatView",
+      chatViewProvider,
+      { retainContextWhenHidden: true }
+    )
+  );
+
+  const sqlCompletionProvider = new SqlCompletionProvider({
+    context,
+    output,
+    resolveAuthContext: () => resolveAuthContextSilently(context, tokenStore),
+    createClient: (auth) =>
+      createApiClient({
+        baseUrl: auth.baseUrl,
+        token: auth.token,
+        clientHeader: clientHeader(context),
+      }),
+  });
+  const completionDisposable = vscode.languages.registerCompletionItemProvider(
+    [
+      { language: "sql", scheme: "file" },
+      { language: "sql", scheme: "untitled" },
+      { language: "plaintext", scheme: "untitled" },
+    ],
+    sqlCompletionProvider,
+    "."
+  );
+  context.subscriptions.push(completionDisposable);
+
   const handlers: Record<string, (...args: unknown[]) => Thenable<unknown>> = {
     "sqlcortex.login": async () => {
       const didLogin = await loginFlow(context, tokenStore, output);
-      await refreshContext(context, tokenStore, statusBar);
+      await refreshContext(context, tokenStore, statusBars, sidebarProvider);
       dbExplorerProvider.refresh();
       return didLogin;
     },
     "sqlcortex.logout": async () => {
       const didLogout = await logoutFlow(context, tokenStore, output, dbExplorerProvider);
-      await refreshContext(context, tokenStore, statusBar);
+      await refreshContext(context, tokenStore, statusBars, sidebarProvider);
       return didLogout;
     },
     "sqlcortex.selectOrg": async () => {
-      await selectOrgFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+      await selectOrgFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        dbExplorerProvider,
+        sidebarProvider
+      );
     },
     "sqlcortex.selectProject": async () => {
-      await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+      await selectProjectFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        dbExplorerProvider,
+        sidebarProvider
+      );
     },
     "sqlcortex.selectConnection": async () => {
       await selectConnectionFlow(
         context,
         tokenStore,
         output,
-        statusBar,
-        dbExplorerProvider
+        statusBars,
+        dbExplorerProvider,
+        sidebarProvider
       );
     },
     "sqlcortex.refreshExplorer": async () => {
@@ -125,8 +189,9 @@ export function activate(context: vscode.ExtensionContext) {
         context,
         tokenStore,
         output,
-        statusBar,
+        statusBars,
         dbExplorerProvider,
+        sidebarProvider,
         args[0]
       );
     },
@@ -138,11 +203,21 @@ export function activate(context: vscode.ExtensionContext) {
       const node = args[0];
       await copyColumnNameFlow(node);
     },
+    "sqlcortex.runTableQuery": async (...args) => {
+      await runTableQueryFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider,
+        args[0]
+      );
+    },
     "sqlcortex.runQuery": async () => {
-      await runQueryFlow(context, tokenStore, output, statusBar);
+      await runQueryFlow(context, tokenStore, output, statusBars, sidebarProvider);
     },
     "sqlcortex.runSelection": async () => {
-      await runSelectionFlow(context, tokenStore, output, statusBar);
+      await runSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider);
     },
   };
 
@@ -165,7 +240,8 @@ export function deactivate() {}
 async function refreshContext(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   const token = await tokenStore.getAccessToken();
   const isAuthed = Boolean(token);
@@ -177,7 +253,8 @@ async function refreshContext(
     CONTEXT_HAS_PROJECT,
     Boolean(workspaceContext.projectId)
   );
-  updateStatusBar(statusBar, { isAuthed, ...workspaceContext });
+  updateStatusBar(statusBars, { isAuthed, ...workspaceContext });
+  sidebarProvider?.refresh();
 }
 
 async function loginFlow(
@@ -318,19 +395,42 @@ async function resolveAuthContext(
   }
 }
 
+async function resolveAuthContextSilently(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>
+): Promise<{ baseUrl: string; token: string } | null> {
+  const token = await tokenStore.getAccessToken();
+  if (!token) {
+    return null;
+  }
+  const baseUrl = context.globalState.get<string>(API_BASE_URL_KEY);
+  if (!baseUrl) {
+    return null;
+  }
+  return { baseUrl, token };
+}
+
 async function selectOrgFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem,
-  dbExplorerProvider?: DbExplorerProvider
+  statusBars: StatusBarItems,
+  dbExplorerProvider?: DbExplorerProvider,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
     return;
   }
 
-  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
   let orgs: Org[] = [];
   try {
     orgs = await listOrgs(client);
@@ -382,15 +482,16 @@ async function selectOrgFlow(
     dbExplorerProvider?.clearCache();
     dbExplorerProvider?.refresh();
   }
-  await refreshContext(context, tokenStore, statusBar);
+  await refreshContext(context, tokenStore, statusBars, sidebarProvider);
 }
 
 async function selectProjectFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem,
-  dbExplorerProvider?: DbExplorerProvider
+  statusBars: StatusBarItems,
+  dbExplorerProvider?: DbExplorerProvider,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
@@ -399,14 +500,28 @@ async function selectProjectFlow(
 
   let workspaceContext = getWorkspaceContext(context);
   if (!workspaceContext.orgName) {
-    await selectOrgFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    await selectOrgFlow(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      dbExplorerProvider,
+      sidebarProvider
+    );
     workspaceContext = getWorkspaceContext(context);
     if (!workspaceContext.orgName) {
       return;
     }
   }
 
-  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
   let projects: Project[] = [];
   try {
     projects = await listProjects(client);
@@ -448,19 +563,27 @@ async function selectProjectFlow(
     dbExplorerProvider?.clearCache();
     dbExplorerProvider?.refresh();
   }
-  await refreshContext(context, tokenStore, statusBar);
+  await refreshContext(context, tokenStore, statusBars, sidebarProvider);
 }
 
 async function selectConnectionFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem,
-  dbExplorerProvider: DbExplorerProvider
+  statusBars: StatusBarItems,
+  dbExplorerProvider: DbExplorerProvider,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   let workspaceContext = getWorkspaceContext(context);
   if (!workspaceContext.projectId) {
-    await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    await selectProjectFlow(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      dbExplorerProvider,
+      sidebarProvider
+    );
     workspaceContext = getWorkspaceContext(context);
     if (!workspaceContext.projectId) {
       return;
@@ -472,7 +595,14 @@ async function selectConnectionFlow(
     return;
   }
 
-  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
   let connections: ConnectionResource[] = [];
   try {
     connections = await listConnections(client, workspaceContext.projectId);
@@ -513,24 +643,33 @@ async function selectConnectionFlow(
   }
 
   const previous = getWorkspaceContext(context);
-  await setActiveConnection(context, selection.connectionId);
+  await setActiveConnection(context, selection.connectionId, selection.label);
   if (previous.connectionId !== selection.connectionId) {
     dbExplorerProvider.clearCache();
   }
   dbExplorerProvider.refresh();
+  await refreshContext(context, tokenStore, statusBars, sidebarProvider);
 }
 
 async function searchTableFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem,
+  statusBars: StatusBarItems,
   dbExplorerProvider: DbExplorerProvider,
+  sidebarProvider?: SidebarProvider,
   node?: unknown
 ): Promise<void> {
   let workspaceContext = getWorkspaceContext(context);
   if (!workspaceContext.projectId) {
-    await selectProjectFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    await selectProjectFlow(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      dbExplorerProvider,
+      sidebarProvider
+    );
     workspaceContext = getWorkspaceContext(context);
     if (!workspaceContext.projectId) {
       return;
@@ -538,7 +677,14 @@ async function searchTableFlow(
   }
 
   if (!workspaceContext.connectionId) {
-    await selectConnectionFlow(context, tokenStore, output, statusBar, dbExplorerProvider);
+    await selectConnectionFlow(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      dbExplorerProvider,
+      sidebarProvider
+    );
     workspaceContext = getWorkspaceContext(context);
     if (!workspaceContext.connectionId) {
       return;
@@ -582,7 +728,7 @@ async function searchTableFlow(
     return;
   }
   if (tables.length === 0) {
-    vscode.window.showInformationMessage("SQLCortex: No tables found.");
+    vscode.window.showInformationMessage("SQLCortex: No tables or views found.");
     return;
   }
 
@@ -595,7 +741,7 @@ async function searchTableFlow(
   }));
 
   const tableSelection = await vscode.window.showQuickPick(tableItems, {
-    placeHolder: "Select a table",
+    placeHolder: "Select a table or view",
     ignoreFocusOut: true,
   });
 
@@ -606,7 +752,8 @@ async function searchTableFlow(
   const fullName = `${tableSelection.schemaName}.${tableSelection.tableName}`;
   const revealed = await dbExplorerProvider.revealTable(
     tableSelection.schemaName,
-    tableSelection.tableName
+    tableSelection.tableName,
+    tableSelection.tableType
   );
   if (!revealed) {
     await vscode.env.clipboard.writeText(fullName);
@@ -647,15 +794,55 @@ async function copyColumnNameFlow(node?: unknown): Promise<void> {
   vscode.window.showInformationMessage(`SQLCortex: Copied ${node.column.name}`);
 }
 
+async function runTableQueryFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  node?: unknown
+): Promise<void> {
+  if (!(node instanceof TableNode)) {
+    vscode.window.showInformationMessage("SQLCortex: Select a table to run.");
+    return;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "SQLCortex: Select a connection before running queries."
+    );
+    return;
+  }
+
+  const sql = buildTableSelectSql(node.schemaName, node.table.name);
+  const document = await vscode.workspace.openTextDocument({
+    language: "sql",
+    content: sql,
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  await runQueryFlow(context, tokenStore, output, statusBars, sidebarProvider);
+}
+
 async function ensureActiveProject(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ) {
   let workspaceContext = getWorkspaceContext(context);
   if (!workspaceContext.projectId) {
-    await selectProjectFlow(context, tokenStore, output, statusBar);
+    await selectProjectFlow(context, tokenStore, output, statusBars, undefined, sidebarProvider);
     workspaceContext = getWorkspaceContext(context);
   }
   if (!workspaceContext.projectId) {
@@ -669,18 +856,20 @@ async function runQueryFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
-  await runSqlFlow("smart", context, tokenStore, output, statusBar);
+  await runSqlFlow("smart", context, tokenStore, output, statusBars, sidebarProvider);
 }
 
 async function runSelectionFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
-  await runSqlFlow("selection", context, tokenStore, output, statusBar);
+  await runSqlFlow("selection", context, tokenStore, output, statusBars, sidebarProvider);
 }
 
 async function runSqlFlow(
@@ -688,7 +877,8 @@ async function runSqlFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
@@ -699,9 +889,16 @@ async function runSqlFlow(
     context,
     tokenStore,
     output,
-    statusBar
+    statusBars,
+    sidebarProvider
   );
   if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "SQLCortex: Select a connection before running queries."
+    );
     return;
   }
 
@@ -727,9 +924,17 @@ async function runSqlFlow(
     return;
   }
 
-  const client = createAuthorizedClient(context, auth, tokenStore, output, statusBar);
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
   const request = {
     projectId: workspaceContext.projectId,
+    connectionId: workspaceContext.connectionId ?? undefined,
     sql: extracted.sql,
     source: "vscode" as const,
     client: {
@@ -747,13 +952,15 @@ async function runSqlFlow(
     const response = await executeQuery(client, request);
     if (response.error) {
       const errorMessage = response.error.message ?? "Query failed.";
+      const errorReason = extractErrorReason(response.error.details);
+      const detailMessage = errorReason ? `${errorMessage} (Reason: ${errorReason})` : errorMessage;
       output.appendLine(
-        `SQLCortex: Query error (${response.error.code ?? "UNKNOWN"}): ${errorMessage}`
+        `SQLCortex: Query error (${response.error.code ?? "UNKNOWN"}): ${detailMessage}`
       );
-      vscode.window.showErrorMessage(`SQLCortex: ${errorMessage}`);
+      vscode.window.showErrorMessage(`SQLCortex: ${detailMessage}`);
       ResultsPanel.show(context).update({
         kind: "error",
-        error: { message: errorMessage, code: response.error.code ?? undefined },
+        error: { message: detailMessage, code: response.error.code ?? undefined },
       });
       return;
     }
@@ -788,13 +995,15 @@ function createAuthorizedClient(
   auth: { baseUrl: string; token: string },
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ) {
   return createApiClient({
     baseUrl: auth.baseUrl,
     token: auth.token,
     clientHeader: clientHeader(context),
-    onUnauthorized: () => handleUnauthorized(context, tokenStore, output, statusBar),
+    onUnauthorized: () =>
+      handleUnauthorized(context, tokenStore, output, statusBars, sidebarProvider),
   });
 }
 
@@ -802,11 +1011,12 @@ async function handleUnauthorized(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
   output: vscode.OutputChannel,
-  statusBar: vscode.StatusBarItem
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
 ): Promise<void> {
   await tokenStore.clear();
   clearCachedSession();
-  await refreshContext(context, tokenStore, statusBar);
+  await refreshContext(context, tokenStore, statusBars, sidebarProvider);
   output.appendLine("SQLCortex: Session expired. Please log in again.");
   const choice = await vscode.window.showErrorMessage(
     "SQLCortex: Session expired. Please log in again.",
@@ -814,7 +1024,7 @@ async function handleUnauthorized(
   );
   if (choice === "Login") {
     await loginFlow(context, tokenStore, output);
-    await refreshContext(context, tokenStore, statusBar);
+    await refreshContext(context, tokenStore, statusBars, sidebarProvider);
   }
 }
 
@@ -897,6 +1107,22 @@ function clientHeader(context: vscode.ExtensionContext): string {
 
 function formatError(err: unknown): string {
   return formatApiError(err);
+}
+
+function extractErrorReason(details?: Record<string, unknown>): string | null {
+  if (!details) {
+    return null;
+  }
+  const reason = details.reason;
+  return typeof reason === "string" && reason.trim() ? reason.trim() : null;
+}
+
+function buildTableSelectSql(schemaName: string, tableName: string): string {
+  return `SELECT * FROM ${quoteIdentifier(schemaName)}.${quoteIdentifier(tableName)}`;
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, "\"\"")}"`;
 }
 
 function getExtensionVersion(context: vscode.ExtensionContext): string {

@@ -11,6 +11,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onLanguage:sql",
     "onCommand:sqlcortex.login",
     "onCommand:sqlcortex.logout",
     "onCommand:sqlcortex.selectOrg",
@@ -20,8 +21,12 @@
     "onCommand:sqlcortex.searchTable",
     "onCommand:sqlcortex.copyTableName",
     "onCommand:sqlcortex.copyColumnName",
+    "onCommand:sqlcortex.runTableQuery",
     "onCommand:sqlcortex.runQuery",
     "onCommand:sqlcortex.runSelection",
+    "onView:sqlcortex.resultsView",
+    "onView:sqlcortex.overview",
+    "onView:sqlcortex.chatView",
     "onView:sqlcortex.databaseExplorer"
   ],
   "main": "./dist/extension.js",
@@ -64,8 +69,17 @@
         "title": "SQLCortex: Copy Column Name"
       },
       {
+        "command": "sqlcortex.runTableQuery",
+        "title": "SQLCortex: Run Table Query"
+      },
+      {
         "command": "sqlcortex.runQuery",
-        "title": "SQLCortex: Run Query"
+        "title": "Run Query",
+        "category": "SQLCortex",
+        "icon": {
+          "dark": "resources/run-query-dark.svg",
+          "light": "resources/run-query-light.svg"
+        }
       },
       {
         "command": "sqlcortex.runSelection",
@@ -79,17 +93,47 @@
           "title": "SQLCortex",
           "icon": "resources/sqlcortex.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "sqlcortexResults",
+          "title": "SQLCortex Results",
+          "icon": "resources/sqlcortex.svg"
+        }
       ]
     },
     "views": {
+      "sqlcortexResults": [
+        {
+          "id": "sqlcortex.resultsView",
+          "name": "Results",
+          "type": "webview"
+        }
+      ],
       "sqlcortex": [
+        {
+          "id": "sqlcortex.overview",
+          "name": "Overview"
+        },
         {
           "id": "sqlcortex.databaseExplorer",
           "name": "Database Explorer"
+        },
+        {
+          "id": "sqlcortex.chatView",
+          "name": "Chat",
+          "type": "webview"
         }
       ]
     },
     "menus": {
+      "editor/title": [
+        {
+          "command": "sqlcortex.runQuery",
+          "when": "resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql",
+          "group": "navigation"
+        }
+      ],
       "view/title": [
         {
           "command": "sqlcortex.refreshExplorer",
@@ -108,6 +152,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "sqlcortex.runTableQuery",
+          "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",
+          "group": "navigation"
+        },
         {
           "command": "sqlcortex.copyTableName",
           "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",

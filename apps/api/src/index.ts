@@ -140,6 +140,7 @@ type AnalyzerError = {
 
 type ExecuteQueryRequest = {
   projectId?: string | null;
+  connectionId?: string | null;
   sql?: string;
   source?: string;
   client?: { extensionVersion?: string; vscodeVersion?: string };
@@ -582,6 +583,23 @@ async function runSchemaQuery<T>(
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SCHEMA_QUERY_TIMEOUT_MS}`);
       await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
       return fn(tx);
+    });
+  } finally {
+    await client.$disconnect();
+  }
+}
+
+async function runConnectionQuery<T>(
+  connectionString: string,
+  sql: string
+): Promise<T> {
+  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
+  try {
+    await client.$connect();
+    return await client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+      await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
+      return tx.$queryRawUnsafe(sql) as Promise<T>;
     });
   } finally {
     await client.$disconnect();
@@ -2360,7 +2378,39 @@ app.post(
         );
     }
 
-    const projectContext = await resolveProjectContext(auth, req.body?.projectId ?? null);
+    const connectionId = req.body?.connectionId ?? null;
+    const requestedProjectId = req.body?.projectId ?? null;
+    let connectionContext:
+      | {
+          projectId: string;
+          orgId: string | null;
+          connection: {
+            id: string;
+            projectId: string;
+            type: string;
+            sslMode: string;
+          };
+          connectionString: string;
+        }
+      | null = null;
+
+    if (connectionId) {
+      if (!requestedProjectId) {
+        return res
+          .status(400)
+          .json(makeError("INVALID_INPUT", "`projectId` is required"));
+      }
+      const resolved = await resolveProjectConnection(auth, requestedProjectId, connectionId);
+      if ("error" in resolved) {
+        return res.status(resolved.status ?? 400).json(resolved.error);
+      }
+      connectionContext = resolved;
+    }
+
+    const projectContext = connectionContext
+      ? { projectId: connectionContext.projectId, orgId: connectionContext.orgId }
+      : await resolveProjectContext(auth, requestedProjectId);
+
     if ("error" in projectContext) {
       return res.status(projectContext.status ?? 400).json(projectContext.error);
     }
@@ -2379,10 +2429,12 @@ app.post(
 
     try {
       const querySql = applyRowLimit(normalizedSql);
-      const rawRows = await queryPrisma.$transaction(async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
-        return tx.$queryRawUnsafe(querySql);
-      });
+      const rawRows = connectionContext
+        ? await runConnectionQuery<unknown[]>(connectionContext.connectionString, querySql)
+        : await queryPrisma.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+            return tx.$queryRawUnsafe(querySql);
+          });
 
       if (Array.isArray(rawRows)) {
         const objectRows = rawRows.filter(

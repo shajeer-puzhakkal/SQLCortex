@@ -27,56 +27,51 @@ type WebviewMessage =
   | { type: "copyCsv" }
   | { type: "exportCsv" };
 
-export class ResultsPanel {
-  private static currentPanel: ResultsPanel | undefined;
+export class ResultsPanel implements vscode.WebviewViewProvider {
+  private static currentProvider: ResultsPanel | undefined;
 
-  private readonly panel: vscode.WebviewPanel;
+  private view?: vscode.WebviewView;
   private readonly disposables: vscode.Disposable[] = [];
   private isReady = false;
   private lastState: ResultState | null = null;
 
-  static show(context: vscode.ExtensionContext): ResultsPanel {
-    const column = vscode.window.activeTextEditor
-      ? vscode.ViewColumn.Beside
-      : vscode.ViewColumn.One;
-
-    if (ResultsPanel.currentPanel) {
-      ResultsPanel.currentPanel.panel.reveal(column, true);
-      return ResultsPanel.currentPanel;
-    }
-
-    const panel = vscode.window.createWebviewPanel(
-      "sqlcortex.results",
-      "SQLCortex Results",
-      { viewColumn: column, preserveFocus: true },
-      {
-        enableScripts: true,
+  static register(context: vscode.ExtensionContext): ResultsPanel {
+    const provider = new ResultsPanel(context);
+    ResultsPanel.currentProvider = provider;
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider("sqlcortex.resultsView", provider, {
         retainContextWhenHidden: true,
-      }
+      })
     );
-
-    ResultsPanel.currentPanel = new ResultsPanel(panel, context);
-    return ResultsPanel.currentPanel;
+    return provider;
   }
 
-  static clearCurrentPanel(panel: ResultsPanel): void {
-    if (ResultsPanel.currentPanel === panel) {
-      ResultsPanel.currentPanel = undefined;
+  static show(context: vscode.ExtensionContext): ResultsPanel {
+    if (!ResultsPanel.currentProvider) {
+      ResultsPanel.register(context);
     }
+    ResultsPanel.currentProvider?.reveal();
+    return ResultsPanel.currentProvider!;
   }
 
-  private constructor(panel: vscode.WebviewPanel, _context: vscode.ExtensionContext) {
-    this.panel = panel;
-    this.panel.webview.html = this.getHtml(this.panel.webview);
+  private constructor(private readonly context: vscode.ExtensionContext) {}
 
-    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-    this.panel.webview.onDidReceiveMessage(
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+    };
+    view.webview.html = this.getHtml(view.webview);
+    view.onDidDispose(() => this.dispose(), null, this.disposables);
+    view.webview.onDidReceiveMessage(
       (message) => {
         void this.handleMessage(message);
       },
       null,
       this.disposables
     );
+
+    this.postState();
   }
 
   update(state: ResultState): void {
@@ -84,12 +79,21 @@ export class ResultsPanel {
     this.postState();
   }
 
+  private reveal(): void {
+    if (this.view) {
+      this.view.show(true);
+      return;
+    }
+    void vscode.commands.executeCommand("workbench.view.extension.sqlcortexResults");
+    void vscode.commands.executeCommand("workbench.action.openView", "sqlcortex.resultsView");
+  }
+
   private postState(): void {
-    if (!this.isReady || !this.lastState) {
+    if (!this.view || !this.isReady || !this.lastState) {
       return;
     }
     const state = sanitizeState(this.lastState);
-    void this.panel.webview.postMessage({ type: "state", state });
+    void this.view.webview.postMessage({ type: "state", state });
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -171,7 +175,10 @@ export class ResultsPanel {
   }
 
   private dispose(): void {
-    ResultsPanel.clearCurrentPanel(this);
+    if (ResultsPanel.currentProvider === this && this.view) {
+      this.view = undefined;
+    }
+    this.isReady = false;
     while (this.disposables.length) {
       const disposable = this.disposables.pop();
       if (disposable) {
@@ -269,6 +276,19 @@ export class ResultsPanel {
         cursor: not-allowed;
       }
 
+      .content {
+        display: grid;
+        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+        gap: 16px;
+        align-items: start;
+      }
+
+      .summary {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
       .meta {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -298,8 +318,9 @@ export class ResultsPanel {
       .table-wrap {
         border-radius: 10px;
         border: 1px solid var(--vscode-panel-border);
-        overflow: hidden;
+        overflow: auto;
         background: var(--vscode-editorWidget-background);
+        max-height: calc(100vh - 220px);
       }
 
       table {
@@ -362,6 +383,17 @@ export class ResultsPanel {
         color: var(--vscode-descriptionForeground);
         font-style: italic;
       }
+
+      @media (max-width: 980px) {
+        .content {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .table-wrap {
+          max-height: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -376,24 +408,28 @@ export class ResultsPanel {
           <button id="exportCsv" class="secondary">Export CSV</button>
         </div>
       </div>
-      <section class="meta">
-        <div class="meta-card">
-          <div class="meta-label">Execution</div>
-          <div class="meta-value" id="execTime">-</div>
+      <div class="content">
+        <section class="summary">
+          <section class="meta">
+            <div class="meta-card">
+              <div class="meta-label">Execution</div>
+              <div class="meta-value" id="execTime">-</div>
+            </div>
+            <div class="meta-card">
+              <div class="meta-label">Rows</div>
+              <div class="meta-value" id="rowCount">-</div>
+            </div>
+            <div class="meta-card">
+              <div class="meta-label">Columns</div>
+              <div class="meta-value" id="colCount">-</div>
+            </div>
+          </section>
+          <section id="error" class="error hidden"></section>
+          <section id="empty" class="empty hidden">No rows returned.</section>
+        </section>
+        <div class="table-wrap">
+          <table id="resultsTable"></table>
         </div>
-        <div class="meta-card">
-          <div class="meta-label">Rows</div>
-          <div class="meta-value" id="rowCount">-</div>
-        </div>
-        <div class="meta-card">
-          <div class="meta-label">Columns</div>
-          <div class="meta-value" id="colCount">-</div>
-        </div>
-      </section>
-      <section id="error" class="error hidden"></section>
-      <section id="empty" class="empty hidden">No rows returned.</section>
-      <div class="table-wrap">
-        <table id="resultsTable"></table>
       </div>
     </div>
 

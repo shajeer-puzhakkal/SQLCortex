@@ -10,20 +10,30 @@ export type DbExplorerNode =
   | ConnectionNode
   | SchemasRootNode
   | SchemaNode
+  | SchemaSectionNode
   | TableNode
   | ColumnsRootNode
+  | ConstraintsRootNode
   | ColumnNode
+  | ConstraintNode
+  | InfoNode
   | ErrorNode
   | LoadingNode;
+
+export type SchemaSectionType = "tables" | "views" | "functions";
 
 type NodeKind =
   | "action"
   | "connection"
   | "schemasRoot"
   | "schema"
+  | "schemaSection"
   | "table"
   | "columnsRoot"
+  | "constraintsRoot"
   | "column"
+  | "constraint"
+  | "info"
   | "error"
   | "loading";
 
@@ -91,6 +101,39 @@ export class SchemaNode extends BaseNode {
   }
 }
 
+export class SchemaSectionNode extends BaseNode {
+  readonly connectionId: string;
+  readonly schemaName: string;
+  readonly sectionType: SchemaSectionType;
+
+  constructor(
+    connectionId: string,
+    schemaName: string,
+    sectionType: SchemaSectionType,
+    parent?: DbExplorerNode
+  ) {
+    const label =
+      sectionType === "tables"
+        ? "Tables"
+        : sectionType === "views"
+          ? "Views"
+          : "Functions";
+    super("schemaSection", label, vscode.TreeItemCollapsibleState.Collapsed, parent);
+    this.connectionId = connectionId;
+    this.schemaName = schemaName;
+    this.sectionType = sectionType;
+    this.id = `sqlcortex.schemaSection.${connectionId}.${schemaName}.${sectionType}`;
+    this.contextValue = "sqlcortex.schemaSection";
+    const icon =
+      sectionType === "tables"
+        ? "table"
+        : sectionType === "views"
+          ? "eye"
+          : "symbol-function";
+    this.iconPath = new vscode.ThemeIcon(icon);
+  }
+}
+
 export class TableNode extends BaseNode {
   readonly connectionId: string;
   readonly schemaName: string;
@@ -134,6 +177,27 @@ export class ColumnsRootNode extends BaseNode {
   }
 }
 
+export class ConstraintsRootNode extends BaseNode {
+  readonly connectionId: string;
+  readonly schemaName: string;
+  readonly tableName: string;
+
+  constructor(
+    connectionId: string,
+    schemaName: string,
+    tableName: string,
+    parent?: DbExplorerNode
+  ) {
+    super("constraintsRoot", "Constraints", vscode.TreeItemCollapsibleState.Collapsed, parent);
+    this.connectionId = connectionId;
+    this.schemaName = schemaName;
+    this.tableName = tableName;
+    this.id = `sqlcortex.constraintsRoot.${connectionId}.${schemaName}.${tableName}`;
+    this.contextValue = "sqlcortex.constraintsRoot";
+    this.iconPath = new vscode.ThemeIcon("key");
+  }
+}
+
 export class ColumnNode extends BaseNode {
   readonly connectionId: string;
   readonly schemaName: string;
@@ -156,6 +220,37 @@ export class ColumnNode extends BaseNode {
     this.contextValue = "sqlcortex.column";
     this.description = column.type;
     this.iconPath = new vscode.ThemeIcon("symbol-field");
+  }
+}
+
+type ConstraintInfo = {
+  name: string;
+  type: string;
+  summary?: string;
+  tooltip?: string;
+  icon?: string;
+};
+
+export class ConstraintNode extends BaseNode {
+  readonly constraint: ConstraintInfo;
+
+  constructor(constraint: ConstraintInfo, parent?: DbExplorerNode) {
+    super("constraint", constraint.name, vscode.TreeItemCollapsibleState.None, parent);
+    this.constraint = constraint;
+    this.contextValue = "sqlcortex.constraint";
+    this.description = constraint.summary;
+    this.tooltip = constraint.tooltip ?? constraint.summary ?? constraint.type;
+    if (constraint.icon) {
+      this.iconPath = new vscode.ThemeIcon(constraint.icon);
+    }
+  }
+}
+
+export class InfoNode extends BaseNode {
+  constructor(label: string, parent?: DbExplorerNode) {
+    super("info", label, vscode.TreeItemCollapsibleState.None, parent);
+    this.contextValue = "sqlcortex.info";
+    this.iconPath = new vscode.ThemeIcon("info");
   }
 }
 
