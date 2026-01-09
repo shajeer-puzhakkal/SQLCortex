@@ -28,6 +28,22 @@ type MeResponse = {
   memberships: Membership[];
 };
 
+type ConnectionRecord = {
+  id: string;
+  project_id: string;
+  type: string;
+  name: string;
+  ssl_mode: string;
+  host: string | null;
+  port: number | null;
+  database: string | null;
+  username: string | null;
+  uses_url: boolean;
+  has_password: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 const ACTIVE_PROJECT_KEY = "sqlcortex.activeProjectId";
 
 export default function ProjectsPage() {
@@ -45,8 +61,42 @@ export default function ProjectsPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sidebarReady, setSidebarReady] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [editProject, setEditProject] = useState<Project | null>(null);
+  const [editProjectName, setEditProjectName] = useState("");
+  const [isSavingProject, setIsSavingProject] = useState(false);
+  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [showConnectionsProject, setShowConnectionsProject] = useState<Project | null>(null);
+  const [connectionsByProject, setConnectionsByProject] = useState<
+    Record<string, ConnectionRecord[]>
+  >({});
+  const [connectionsLoadingId, setConnectionsLoadingId] = useState<string | null>(null);
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
+  const [addConnectionProject, setAddConnectionProject] = useState<Project | null>(null);
+  const [connectionName, setConnectionName] = useState("");
+  const [connectionMode, setConnectionMode] = useState<"fields" | "url">("fields");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("5432");
+  const [database, setDatabase] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [connectionUrl, setConnectionUrl] = useState("");
+  const [sslMode, setSslMode] = useState("require");
+  const [isSavingConnection, setIsSavingConnection] = useState(false);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionTestStatus, setConnectionTestStatus] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   const orgOptions = useMemo(() => me?.memberships ?? [], [me]);
+  const orgNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    orgOptions.forEach((org) => {
+      map.set(org.org_id, org.org_name);
+    });
+    return map;
+  }, [orgOptions]);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [projects, activeProjectId]
@@ -162,6 +212,227 @@ export default function ProjectsPage() {
     setIsCreateOpen(false);
     toast.success("Project created.");
     await loadData();
+  };
+
+  const resetConnectionForm = () => {
+    setConnectionName("");
+    setConnectionMode("fields");
+    setHost("");
+    setPort("5432");
+    setDatabase("");
+    setUsername("");
+    setPassword("");
+    setConnectionUrl("");
+    setSslMode("require");
+  };
+
+  const loadConnectionsForProject = async (projectId: string) => {
+    setConnectionsError(null);
+    setConnectionsLoadingId(projectId);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/projects/${projectId}/connections`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const message = payload?.message ?? "Failed to load connections.";
+        setConnectionsError(message);
+        toast.error(message);
+        return;
+      }
+      const payload = (await response.json()) as { connections?: ConnectionRecord[] };
+      setConnectionsByProject((prev) => ({
+        ...prev,
+        [projectId]: payload.connections ?? [],
+      }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load connections.";
+      setConnectionsError(message);
+      toast.error(message);
+    } finally {
+      setConnectionsLoadingId(null);
+    }
+  };
+
+  const openConnectionsModal = (project: Project) => {
+    setConnectionsError(null);
+    setShowConnectionsProject(project);
+    void loadConnectionsForProject(project.id);
+  };
+
+  const openAddConnectionModal = (project: Project) => {
+    setConnectionsError(null);
+    setConnectionTestStatus(null);
+    setAddConnectionProject(project);
+    resetConnectionForm();
+  };
+
+  const handleCreateConnection = async (projectId: string, testAfter = false) => {
+    if (!connectionName.trim()) {
+      setConnectionsError("Connection name is required.");
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      name: connectionName.trim(),
+      type: "postgres",
+      ssl_mode: sslMode,
+    };
+
+    if (connectionMode === "url") {
+      if (!connectionUrl.trim()) {
+        setConnectionsError("Connection URL is required.");
+        return;
+      }
+      payload.connection_url = connectionUrl.trim();
+    } else {
+      if (!host.trim()) {
+        setConnectionsError("Host is required.");
+        return;
+      }
+      if (!database.trim()) {
+        setConnectionsError("Database is required.");
+        return;
+      }
+      if (!username.trim()) {
+        setConnectionsError("Username is required.");
+        return;
+      }
+      const parsedPort = Number(port);
+      if (!Number.isFinite(parsedPort) || parsedPort <= 0) {
+        setConnectionsError("Port must be a valid number.");
+        return;
+      }
+      payload.host = host.trim();
+      payload.port = parsedPort;
+      payload.database = database.trim();
+      payload.username = username.trim();
+      if (password) {
+        payload.password = password;
+      }
+    }
+
+    setConnectionsError(null);
+    setConnectionTestStatus(null);
+    setIsSavingConnection(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/projects/${projectId}/connections`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const message = payload?.message ?? "Failed to create connection.";
+        setConnectionsError(message);
+        toast.error(message);
+        return;
+      }
+      const created = (await response.json()) as { connection?: ConnectionRecord };
+      if (created.connection) {
+        setConnectionsByProject((prev) => ({
+          ...prev,
+          [projectId]: [created.connection, ...(prev[projectId] ?? [])],
+        }));
+      } else {
+        await loadConnectionsForProject(projectId);
+      }
+      let testOk: boolean | null = null;
+      if (testAfter && created.connection?.id) {
+        setIsTestingConnection(true);
+        const testResponse = await fetch(
+          `${API_BASE}/api/v1/connections/${created.connection.id}/test`,
+          { method: "POST", credentials: "include" }
+        );
+        if (!testResponse.ok) {
+          const payload = await testResponse.json().catch(() => null);
+          setConnectionTestStatus({
+            ok: false,
+            message: payload?.message ?? "Connection test failed.",
+          });
+          testOk = false;
+        } else {
+          setConnectionTestStatus({ ok: true, message: "Connection successful." });
+          testOk = true;
+        }
+      }
+      toast.success("Connection saved.");
+      if (!testAfter || testOk !== false) {
+        resetConnectionForm();
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create connection.";
+      setConnectionsError(message);
+      toast.error(message);
+    } finally {
+      setIsSavingConnection(false);
+      setIsTestingConnection(false);
+    }
+  };
+
+  const handleUpdateProject = async () => {
+    if (!editProject) {
+      return;
+    }
+    if (!editProjectName.trim()) {
+      toast.error("Project name is required.");
+      return;
+    }
+    setIsSavingProject(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/projects/${editProject.id}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: editProjectName.trim() }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        toast.error(payload?.message ?? "Failed to update project.");
+        return;
+      }
+      toast.success("Project updated.");
+      setEditProject(null);
+      await loadData();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update project.");
+    } finally {
+      setIsSavingProject(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (!deleteProject) {
+      return;
+    }
+    setIsDeletingProject(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/projects/${deleteProject.id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        toast.error(payload?.message ?? "Failed to delete project.");
+        return;
+      }
+      if (activeProjectId === deleteProject.id) {
+        setActiveProjectId(null);
+      }
+      setConnectionsByProject((prev) => {
+        const next = { ...prev };
+        delete next[deleteProject.id];
+        return next;
+      });
+      toast.success("Project deleted.");
+      setDeleteProject(null);
+      await loadData();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete project.");
+    } finally {
+      setIsDeletingProject(false);
+    }
   };
 
   if (error && !me) {
@@ -603,62 +874,110 @@ export default function ProjectsPage() {
 
             <div className="grid gap-8">
               <section className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold">Active projects</h2>
-                  {activeProjectId ? (
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-                      Active
-                    </span>
-                  ) : null}
-                </div>
-                <div className="mt-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-black/50">
-                  Choose a project to open the analysis workspace.
-                </div>
-                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {projects.length === 0 ? (
-                    <p className="text-sm text-black/60">No projects yet.</p>
-                  ) : (
-                    projects.map((project) => (
-                      <button
-                        key={project.id}
-                        className={`group flex w-full flex-col items-start justify-between gap-3 rounded-xl border px-4 py-3 text-left text-sm transition ${
-                          activeProjectId === project.id
-                            ? "border-cyan-600/40 bg-cyan-50/50 shadow-sm shadow-cyan-900/5"
-                            : "border-black/5 bg-white hover:border-black/20 hover:shadow-sm hover:shadow-black/5"
-                        }`}
-                        onClick={() => setActiveProjectId(project.id)}
-                      >
-                        <div>
-                          <p className="font-semibold">{project.name}</p>
-                          <p className="mt-0.5 text-xs text-black/60">
-                            {project.org_id ? `Org ${project.org_id.slice(0, 8)}` : "Personal"} - Not connected
-                          </p>
-                        </div>
-                        <div className="flex w-full items-center justify-between text-xs text-black/50">
-                          <span>{activeProjectId === project.id ? "Active" : "Select"}</span>
-                          {activeProjectId === project.id ? (
-                            <div className="h-2 w-2 rounded-full bg-cyan-500 shadow-sm shadow-cyan-500/50" />
-                          ) : (
-                            <div className="h-2 w-2 rounded-full bg-black/10" />
-                          )}
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-                {primaryProject ? (
-                  <div className="mt-4">
-                    <Link
-                      className="inline-flex items-center rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black shadow-sm shadow-black/5 transition hover:border-black/30 hover:bg-black/5"
-                      href={`/projects/${primaryProject.id}/connections`}
-                    >
-                      Manage connections
-                    </Link>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">Projects</h2>
+                    <p className="mt-1 text-sm text-black/60">
+                      Choose a project to open the analysis workspace.
+                    </p>
                   </div>
-                ) : null}
-              </section>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                    {projects.length} total
+                  </span>
+                </div>
 
-          </div>
+                <div className="mt-6 overflow-hidden rounded-2xl border border-black/10 bg-white/70">
+                  <div className="hidden grid-cols-[1.6fr_1fr_0.6fr_auto] items-center gap-4 border-b border-black/10 bg-black/5 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-black/50 md:grid">
+                    <span>Project</span>
+                    <span>Connections</span>
+                    <span>Status</span>
+                    <span className="text-right">Actions</span>
+                  </div>
+                  <div className="divide-y divide-black/5">
+                    {projects.length === 0 ? (
+                      <div className="px-4 py-6 text-sm text-black/60">No projects yet.</div>
+                    ) : (
+                      projects.map((project) => {
+                        const isActive = activeProjectId === project.id;
+                        const orgName = project.org_id
+                          ? orgNameById.get(project.org_id) ?? "Org"
+                          : "Personal";
+                        const connectionCount = connectionsByProject[project.id]?.length;
+                        const connectionLabel =
+                          typeof connectionCount === "number"
+                            ? `${connectionCount} connection${connectionCount === 1 ? "" : "s"}`
+                            : "Click show";
+
+                        return (
+                          <div
+                            key={project.id}
+                            className={`flex flex-col gap-3 px-4 py-4 md:grid md:grid-cols-[1.6fr_1fr_0.6fr_auto] md:items-center md:gap-4 ${
+                              isActive ? "bg-cyan-50/50" : "bg-white"
+                            }`}
+                          >
+                            <div>
+                              <p className="text-sm font-semibold text-black/80">{project.name}</p>
+                              <p className="mt-1 text-xs text-black/50">
+                                {orgName} {project.org_id ? "workspace" : "project"}
+                              </p>
+                            </div>
+                            <div className="text-xs text-black/60">
+                              <span className="font-semibold text-black/70 md:hidden">
+                                Connections:{" "}
+                              </span>
+                              {connectionLabel}
+                            </div>
+                            <div>
+                              {isActive ? (
+                                <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
+                                  Active
+                                </span>
+                              ) : (
+                                <button
+                                  className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                  onClick={() => setActiveProjectId(project.id)}
+                                >
+                                  Set active
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                              <button
+                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                onClick={() => {
+                                  setEditProject(project);
+                                  setEditProjectName(project.name);
+                                }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="rounded-full border border-rose-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-600 transition hover:border-rose-300 hover:bg-rose-50"
+                                onClick={() => setDeleteProject(project)}
+                              >
+                                Delete
+                              </button>
+                              <button
+                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                onClick={() => openAddConnectionModal(project)}
+                              >
+                                Add connection
+                              </button>
+                              <button
+                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                onClick={() => openConnectionsModal(project)}
+                              >
+                                Show connections
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
 
         </div>
         </div>
@@ -722,6 +1041,379 @@ export default function ProjectsPage() {
                   onClick={handleCreateProject}
                 >
                   Create project
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {editProject ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
+          onClick={() => setEditProject(null)}
+        >
+          <div
+            className="w-full max-w-xl overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-black/10 px-6 py-4">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                  Project settings
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-black/90">Edit project</h2>
+              </div>
+              <button
+                className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
+                onClick={() => setEditProject(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              <input
+                className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                placeholder="Project name"
+                value={editProjectName}
+                onChange={(event) => setEditProjectName(event.target.value)}
+              />
+              <p className="text-xs text-black/50">
+                Update the project name for dashboards and workspace lists.
+              </p>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => setEditProject(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleUpdateProject}
+                  disabled={isSavingProject}
+                >
+                  {isSavingProject ? "Saving..." : "Save changes"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {deleteProject ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
+          onClick={() => setDeleteProject(null)}
+        >
+          <div
+            className="w-full max-w-lg overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-black/10 px-6 py-4">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                  Danger zone
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-black/90">Delete project</h2>
+              </div>
+              <button
+                className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
+                onClick={() => setDeleteProject(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              <p className="text-sm text-black/70">
+                This will permanently delete{" "}
+                <span className="font-semibold text-black">{deleteProject.name}</span> and
+                any saved connections. This action cannot be undone.
+              </p>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => setDeleteProject(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-full border border-rose-200 bg-rose-600 px-5 py-2 text-xs font-semibold text-white shadow-md shadow-rose-500/20 transition hover:-translate-y-0.5 hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleDeleteProject}
+                  disabled={isDeletingProject}
+                >
+                  {isDeletingProject ? "Deleting..." : "Delete project"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showConnectionsProject ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
+          onClick={() => {
+            setShowConnectionsProject(null);
+            setConnectionsError(null);
+          }}
+        >
+          <div
+            className="w-full max-w-4xl overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-black/10 px-6 py-4">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                  Connections
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-black/90">
+                  {showConnectionsProject.name}
+                </h2>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => {
+                    openAddConnectionModal(showConnectionsProject);
+                    setShowConnectionsProject(null);
+                  }}
+                >
+                  Add connection
+                </button>
+                <button
+                  className="rounded-full border border-black/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => {
+                    setShowConnectionsProject(null);
+                    setConnectionsError(null);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              {connectionsLoadingId === showConnectionsProject.id ? (
+                <div className="rounded-xl border border-black/10 bg-white px-3 py-2 text-xs text-black/60">
+                  Loading connections...
+                </div>
+              ) : null}
+              {connectionsError ? (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {connectionsError}
+                </div>
+              ) : null}
+              <div className="space-y-3">
+                {(connectionsByProject[showConnectionsProject.id] ?? []).length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-black/10 px-3 py-4 text-sm text-black/50">
+                    No connections yet. Add one to test access.
+                  </div>
+                ) : (
+                  (connectionsByProject[showConnectionsProject.id] ?? []).map((connection) => {
+                    const hostLabel = connection.host ?? "hidden";
+                    const dbLabel = connection.database ?? "hidden";
+                    const userLabel = connection.username ?? "hidden";
+                    const methodLabel = connection.uses_url ? "URL" : "Host";
+
+                    return (
+                      <div
+                        key={connection.id}
+                        className="rounded-xl border border-black/5 bg-white px-4 py-3 text-sm shadow-sm shadow-black/5"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="font-semibold text-black/80">{connection.name}</p>
+                            <p className="text-xs text-black/50">{methodLabel} connection</p>
+                          </div>
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                            {connection.ssl_mode}
+                          </span>
+                        </div>
+                        <div className="mt-4 grid gap-3 text-xs text-black/50 sm:grid-cols-2">
+                          <div>
+                            <p className="font-semibold text-black/60">Host</p>
+                            <p>
+                              {hostLabel}
+                              {connection.port ? `:${connection.port}` : ""}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="font-semibold text-black/60">Database</p>
+                            <p>{dbLabel}</p>
+                          </div>
+                          <div>
+                            <p className="font-semibold text-black/60">Username</p>
+                            <p>{userLabel}</p>
+                          </div>
+                          <div>
+                            <p className="font-semibold text-black/60">Password stored</p>
+                            <p>{connection.has_password ? "Yes" : "No"}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {addConnectionProject ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-8"
+          onClick={() => {
+            setAddConnectionProject(null);
+            setConnectionsError(null);
+            setConnectionTestStatus(null);
+            resetConnectionForm();
+          }}
+        >
+          <div
+            className="w-full max-w-3xl overflow-hidden rounded-3xl border border-black/10 bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-black/10 px-6 py-4">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-black/40">
+                  Add connection
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-black/90">
+                  {addConnectionProject.name}
+                </h2>
+              </div>
+              <button
+                className="rounded-full border border-black/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-black/70 transition hover:border-black/30 hover:bg-black/5"
+                onClick={() => {
+                  setAddConnectionProject(null);
+                  setConnectionsError(null);
+                  setConnectionTestStatus(null);
+                  resetConnectionForm();
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              {connectionsError ? (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {connectionsError}
+                </div>
+              ) : null}
+              {connectionTestStatus ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-xs ${
+                    connectionTestStatus.ok
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                      : "border-rose-200 bg-rose-50 text-rose-700"
+                  }`}
+                >
+                  {connectionTestStatus.message}
+                </div>
+              ) : null}
+              <div className="grid gap-3">
+                <input
+                  className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                  placeholder="Connection name"
+                  value={connectionName}
+                  onChange={(event) => setConnectionName(event.target.value)}
+                />
+                <select
+                  className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                  value={connectionMode}
+                  onChange={(event) =>
+                    setConnectionMode(event.target.value as "fields" | "url")
+                  }
+                >
+                  <option value="fields">Use host credentials</option>
+                  <option value="url">Use connection URL</option>
+                </select>
+                {connectionMode === "url" ? (
+                  <input
+                    className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                    placeholder="postgresql://user:pass@host:5432/db"
+                    value={connectionUrl}
+                    onChange={(event) => setConnectionUrl(event.target.value)}
+                  />
+                ) : (
+                  <>
+                    <input
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                      placeholder="Host"
+                      value={host}
+                      onChange={(event) => setHost(event.target.value)}
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <input
+                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                        placeholder="Port"
+                        value={port}
+                        onChange={(event) => setPort(event.target.value)}
+                      />
+                      <input
+                        className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                        placeholder="Database"
+                        value={database}
+                        onChange={(event) => setDatabase(event.target.value)}
+                      />
+                    </div>
+                    <input
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                      placeholder="Username"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black placeholder:text-black/40 outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                      placeholder="Password (optional)"
+                      type="password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                    />
+                  </>
+                )}
+                <select
+                  className="w-full rounded-xl border border-black/5 bg-white px-3 py-2 text-sm text-black outline-none transition focus:border-cyan-600 focus:shadow-sm focus:shadow-cyan-900/5"
+                  value={sslMode}
+                  onChange={(event) => setSslMode(event.target.value)}
+                >
+                  <option value="require">SSL require</option>
+                  <option value="prefer">SSL prefer</option>
+                  <option value="disable">SSL disable</option>
+                  <option value="verify-full">SSL verify-full</option>
+                  <option value="verify-ca">SSL verify-ca</option>
+                </select>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5"
+                  onClick={() => {
+                    setAddConnectionProject(null);
+                    setConnectionsError(null);
+                    setConnectionTestStatus(null);
+                    resetConnectionForm();
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black transition hover:border-black/30 hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() =>
+                    addConnectionProject
+                      ? handleCreateConnection(addConnectionProject.id, false)
+                      : undefined
+                  }
+                  disabled={isSavingConnection || isTestingConnection}
+                >
+                  {isSavingConnection ? "Saving..." : "Save connection"}
+                </button>
+                <button
+                  className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white shadow-md shadow-black/5 transition hover:-translate-y-0.5 hover:bg-black/80 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() =>
+                    addConnectionProject
+                      ? handleCreateConnection(addConnectionProject.id, true)
+                      : undefined
+                  }
+                  disabled={isSavingConnection || isTestingConnection}
+                >
+                  {isTestingConnection ? "Testing..." : "Save and test"}
                 </button>
               </div>
             </div>
