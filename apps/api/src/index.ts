@@ -1705,6 +1705,96 @@ app.post(
   }
 );
 
+app.patch(
+  "/api/v1/projects/:projectId",
+  requireAuth(prisma),
+  async (req: Request<{ projectId: string }, unknown, { name?: string }>, res) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth?.userId) {
+      return res.status(403).json(makeError("FORBIDDEN", "User context required"));
+    }
+
+    const name = req.body?.name?.trim();
+    if (!name) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`name` is required"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, req.params.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    if (!projectContext.project) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Project not found"));
+    }
+
+    if (projectContext.project.ownerUserId) {
+      if (projectContext.project.ownerUserId !== auth.userId) {
+        return res.status(403).json(makeError("FORBIDDEN", "Project access denied"));
+      }
+    } else if (projectContext.project.orgId) {
+      const allowed = await requireOrgRole(auth.userId, projectContext.project.orgId, [
+        OrgRole.OWNER,
+        OrgRole.ADMIN,
+      ]);
+      if (!allowed) {
+        return res.status(403).json(makeError("FORBIDDEN", "Insufficient org role"));
+      }
+    }
+
+    const updated = await prisma.project.update({
+      where: { id: projectContext.project.id },
+      data: { name },
+    });
+
+    return res.json({
+      project: {
+        id: updated.id,
+        name: updated.name,
+        org_id: updated.orgId ?? null,
+        owner_user_id: updated.ownerUserId ?? null,
+      },
+    });
+  }
+);
+
+app.delete(
+  "/api/v1/projects/:projectId",
+  requireAuth(prisma),
+  async (req: Request<{ projectId: string }>, res) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth?.userId) {
+      return res.status(403).json(makeError("FORBIDDEN", "User context required"));
+    }
+
+    const projectContext = await resolveProjectContext(auth, req.params.projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status ?? 400).json(projectContext.error);
+    }
+
+    if (!projectContext.project) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Project not found"));
+    }
+
+    if (projectContext.project.ownerUserId) {
+      if (projectContext.project.ownerUserId !== auth.userId) {
+        return res.status(403).json(makeError("FORBIDDEN", "Project access denied"));
+      }
+    } else if (projectContext.project.orgId) {
+      const allowed = await requireOrgRole(auth.userId, projectContext.project.orgId, [
+        OrgRole.OWNER,
+        OrgRole.ADMIN,
+      ]);
+      if (!allowed) {
+        return res.status(403).json(makeError("FORBIDDEN", "Insufficient org role"));
+      }
+    }
+
+    await prisma.project.delete({ where: { id: projectContext.project.id } });
+    return res.json({ ok: true });
+  }
+);
+
 app.get(
   "/api/v1/projects/:projectId/connections",
   requireAuth(prisma),
