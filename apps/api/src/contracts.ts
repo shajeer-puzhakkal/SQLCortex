@@ -43,6 +43,21 @@ export type AnalysisCreateResponse = { analysis: AnalysisResource };
 export type AnalysisGetResponse = { analysis: AnalysisResource };
 export type AnalysisListResponse = { analyses: AnalysisResource[] };
 
+export type AiSqlRequest = {
+  sql: string;
+  project_id: string;
+  connection_id: string;
+  user_intent?: string | null;
+};
+
+export type AiSqlResponse = {
+  summary: string;
+  findings: string[];
+  recommendations: string[];
+  risk_level: "low" | "medium" | "high";
+  meta: { provider: string; model: string; latency_ms: number };
+};
+
 export const ERROR_CODES: ErrorCode[] = [
   "UNAUTHORIZED",
   "FORBIDDEN",

@@ -8,17 +8,26 @@ import {
   AnalysisCreateResponse,
   AnalysisGetResponse,
   AnalysisListResponse,
+  AiSqlResponse,
   ErrorResponse,
   HealthResponse,
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
-import { ensureDefaultPlans, getPlanContext, suggestedUpgradeForPlan } from "./plans";
+import { AiServiceError, AiSqlAction, AiSqlPayload, callAiSqlService } from "./aiClient";
+import {
+  ensureDefaultPlans,
+  getPlanContext,
+  suggestedUpgradeForPlan,
+  PlanCode,
+  PlanSubject,
+} from "./plans";
 import {
   checkSqlAndExplainSizeLimits,
   countOrgMembersAndPendingInvites,
   countProjectsForSubject,
   getAnalysesUsedThisMonth,
+  getLlmCallsUsedThisMonth,
   incrementAnalysesThisMonth,
   incrementLlmCallsThisMonth,
   makePlanLimitExceededError,
@@ -38,7 +47,7 @@ import {
   verifyPassword,
 } from "./auth";
 import { createRateLimitMiddleware } from "./rateLimit";
-import { logAnalysisTelemetry } from "./telemetry";
+import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
 
 dotenv.config();
 
@@ -49,7 +58,7 @@ const defaultAnalyzerPort = process.env.ANALYZER_PORT ?? 8000;
 const analyzerBaseUrl =
   process.env.ANALYZER_BASE_URL ??
   process.env.ANALYZER_URL ??
-  `http://analyzer:${defaultAnalyzerPort}`;
+  `http://ai-services:${defaultAnalyzerPort}`;
 const analyzerTimeoutMsEnv = Number(
   process.env.ANALYZER_TIMEOUT_MS ?? process.env.ANALYZER_TIMEOUT ?? 8000
 );
@@ -122,7 +131,14 @@ type ProjectContext =
   | {
       projectId: string | null;
       orgId: string | null;
-      project?: { id: string; orgId: string | null; ownerUserId: string | null; name: string };
+      project?: {
+        id: string;
+        orgId: string | null;
+        ownerUserId: string | null;
+        name: string;
+        aiEnabled: boolean;
+        orgAiEnabled: boolean | null;
+      };
     }
   | { error: ErrorResponse; status: number };
 
@@ -144,6 +160,13 @@ type ExecuteQueryRequest = {
   sql?: string;
   source?: string;
   client?: { extensionVersion?: string; vscodeVersion?: string };
+};
+
+type AiSqlRequestBody = {
+  project_id?: string | null;
+  connection_id?: string | null;
+  sql?: string;
+  user_intent?: string | null;
 };
 
 type ExecuteQueryResponse = {
@@ -202,6 +225,142 @@ type SchemaColumnResource = {
 };
 
 type AnalysisResultValue = Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
+
+type AiFeatureStatus = {
+  enabled: boolean;
+  reason: "org_disabled" | "project_disabled" | null;
+};
+
+type LlmAccessStatus = {
+  enabled: boolean;
+  reason: "plan_disabled" | "limit_reached" | null;
+  used: number | null;
+  limit: number | null;
+};
+
+type AiSqlFallbackReason =
+  | "org_disabled"
+  | "project_disabled"
+  | "plan_disabled"
+  | "limit_reached"
+  | "service_unavailable";
+
+function resolveAiFeatureStatusFromProject(
+  project?: ProjectContext["project"] | null
+): AiFeatureStatus {
+  if (!project) {
+    return { enabled: true, reason: null };
+  }
+  if (project.orgId && project.orgAiEnabled === false) {
+    return { enabled: false, reason: "org_disabled" };
+  }
+  if (!project.aiEnabled) {
+    return { enabled: false, reason: "project_disabled" };
+  }
+  return { enabled: true, reason: null };
+}
+
+async function resolveAiFeatureStatusForContext(
+  prismaClient: PrismaClient,
+  projectContext: ProjectContext
+): Promise<AiFeatureStatus> {
+  const direct = resolveAiFeatureStatusFromProject(projectContext.project ?? null);
+  if (!direct.enabled) {
+    return direct;
+  }
+
+  if (!projectContext.project && projectContext.orgId) {
+    const org = await prismaClient.organization.findUnique({
+      where: { id: projectContext.orgId },
+      select: { aiEnabled: true },
+    });
+    if (org && !org.aiEnabled) {
+      return { enabled: false, reason: "org_disabled" };
+    }
+  }
+
+  return direct;
+}
+
+async function resolveLlmAccess(
+  prismaClient: PrismaClient,
+  subject: PlanSubject,
+  plan: { llmEnabled: boolean; monthlyLlmCallLimit: number },
+  now: Date
+): Promise<LlmAccessStatus> {
+  const limit = plan.monthlyLlmCallLimit;
+  if (!plan.llmEnabled) {
+    return { enabled: false, reason: "plan_disabled", used: null, limit };
+  }
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return { enabled: false, reason: "limit_reached", used: 0, limit };
+  }
+
+  const used = await getLlmCallsUsedThisMonth(prismaClient, subject, now);
+  if (used >= limit) {
+    return { enabled: false, reason: "limit_reached", used, limit };
+  }
+
+  return { enabled: true, reason: null, used, limit };
+}
+
+function buildAiSqlFallbackResponse(params: {
+  reason: AiSqlFallbackReason;
+  planCode?: PlanCode | null;
+  used?: number | null;
+  limit?: number | null;
+}): AiSqlResponse {
+  const suggestedPlan = params.planCode ? suggestedUpgradeForPlan(params.planCode) : null;
+  let summary = "AI response is unavailable.";
+  let recommendations: string[] = [];
+
+  switch (params.reason) {
+    case "org_disabled":
+      summary = "AI is disabled for this organization.";
+      recommendations = ["Ask an org admin to enable AI for this organization."];
+      break;
+    case "project_disabled":
+      summary = "AI is disabled for this project.";
+      recommendations = ["Enable AI in the project settings to use this feature."];
+      break;
+    case "plan_disabled":
+      summary = "AI is disabled for your current plan.";
+      recommendations = [
+        suggestedPlan ? `Upgrade to ${suggestedPlan} to enable AI features.` : "Upgrade your plan to enable AI features.",
+      ];
+      break;
+    case "limit_reached": {
+      const limit = typeof params.limit === "number" ? params.limit : null;
+      const used = typeof params.used === "number" ? params.used : null;
+      summary =
+        limit !== null && used !== null
+          ? `AI usage limit reached (${used}/${limit}) for this period.`
+          : "AI usage limit reached for this period.";
+      recommendations = [
+        suggestedPlan
+          ? `Upgrade to ${suggestedPlan} or wait for the limit to reset.`
+          : "Try again after the limit resets or upgrade your plan.",
+      ];
+      break;
+    }
+    case "service_unavailable":
+      summary = "AI service is temporarily unavailable.";
+      recommendations = ["Retry in a few minutes."];
+      break;
+    default:
+      break;
+  }
+
+  const provider = params.reason === "service_unavailable" ? "unavailable" : "disabled";
+
+  return {
+    summary,
+    findings: [],
+    recommendations,
+    risk_level: "low",
+    meta: { provider, model: "n/a", latency_ms: 0 },
+  };
+}
 
 function toJsonResult(value: unknown): AnalysisResultValue {
   if (value === null || typeof value === "undefined") {
@@ -615,6 +774,7 @@ async function resolveProjectConnection(
   | {
       projectId: string;
       orgId: string | null;
+      project: NonNullable<ProjectContext["project"]>;
       connection: {
         id: string;
         projectId: string;
@@ -631,6 +791,9 @@ async function resolveProjectConnection(
 
   if (!projectContext.projectId) {
     return { error: makeError("INVALID_INPUT", "Project not found"), status: 400 };
+  }
+  if (!projectContext.project) {
+    return { error: makeError("INVALID_INPUT", "Project context missing"), status: 400 };
   }
 
   const connection = await prisma.projectDbConnection.findUnique({
@@ -670,6 +833,7 @@ async function resolveProjectConnection(
   return {
     projectId: projectContext.projectId,
     orgId: projectContext.orgId,
+    project: projectContext.project,
     connection,
     connectionString,
   };
@@ -713,6 +877,7 @@ const BLOCKED_QUERY_KEYWORDS = [
   "call",
   "do",
 ] as const;
+const AI_SQL_ACTIONS = ["explain", "optimize", "index-suggest", "risk-check"] as const;
 
 function isReadOnlySql(sql: string): boolean {
   const cleaned = stripSqlCommentsAndLiterals(sql);
@@ -771,6 +936,10 @@ function hasProhibitedClauses(sql: string): boolean {
     /\binto\b/.test(cleaned) ||
     /\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/.test(cleaned)
   );
+}
+
+function isAiSqlAction(value: string): value is AiSqlAction {
+  return AI_SQL_ACTIONS.includes(value as AiSqlAction);
 }
 
 function applyRowLimit(sql: string): string {
@@ -852,6 +1021,212 @@ function formatQueryError(err: unknown): ErrorResponse {
     return makeError("ANALYZER_TIMEOUT", "Query timed out.", { reason: message });
   }
   return makeError("INVALID_INPUT", "Query failed to execute.", { reason: message });
+}
+
+function redactSqlForLlm(sql: string): string {
+  const withoutComments = sql
+    .replace(/--.*?$/gm, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ");
+  const redactedStrings = withoutComments
+    .replace(/'(?:''|[^'])*'/g, "'?'")
+    .replace(/"(?:\"\"|[^\"])*"/g, "\"?\"");
+  const redactedNumbers = redactedStrings.replace(/\b\d+(?:\.\d+)?\b/g, "?");
+  return redactedNumbers.trim();
+}
+
+function normalizeIdentifier(identifier: string): string {
+  return identifier
+    .split(".")
+    .map((part) => {
+      const trimmed = part.trim();
+      if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+        return trimmed.slice(1, -1).replace(/""/g, "\"");
+      }
+      return trimmed;
+    })
+    .join(".");
+}
+
+function extractTableCandidates(sql: string): string[] {
+  const withoutLineComments = sql.replace(/--.*?$/gm, " ");
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, " ");
+  const cleaned = withoutBlockComments.replace(/'(?:''|[^'])*'/g, "''");
+  const candidates = new Set<string>();
+  const pattern =
+    /\b(from|join)\s+(?:lateral\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(cleaned)) !== null) {
+    candidates.add(match[2]);
+  }
+  return Array.from(candidates);
+}
+
+function extractExplainJson(rows: unknown[]): unknown | null {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+  const first = rows[0];
+  if (!first || typeof first !== "object") {
+    return null;
+  }
+  const record = first as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length === 0) {
+    return null;
+  }
+  return record[keys[0]] ?? null;
+}
+
+async function collectAiMetadata(
+  connectionString: string,
+  sql: string
+): Promise<{
+  schema: { tables: Array<{ schema: string; name: string; type: "table" | "view"; columns: SchemaColumnResource[] }> };
+  indexes: {
+    tables: Array<{
+      schema: string;
+      name: string;
+      primaryKey: string[];
+      indexes: Array<{ name: string; columns: string[]; unique: boolean }>;
+    }>;
+  };
+}> {
+  const candidates = extractTableCandidates(sql);
+  if (candidates.length === 0) {
+    return { schema: { tables: [] }, indexes: { tables: [] } };
+  }
+
+  return runSchemaQuery(connectionString, async (tx) => {
+    const resolved: Array<{ schema: string; name: string; type: "table" | "view" }> = [];
+    const explicit: Array<{ schema: string; name: string }> = [];
+    const names: string[] = [];
+
+    for (const candidate of candidates) {
+      const normalized = normalizeIdentifier(candidate);
+      const parts = normalized.split(".").map((part) => part.trim()).filter(Boolean);
+      if (parts.length === 2) {
+        explicit.push({ schema: parts[0], name: parts[1] });
+      } else if (parts.length === 1) {
+        names.push(parts[0]);
+      }
+    }
+
+    for (const table of explicit) {
+      const rows = await tx.$queryRaw<{ schema: string; name: string; type: string }[]>`
+        SELECT table_schema AS schema, table_name AS name, table_type AS type
+        FROM information_schema.tables
+        WHERE table_schema = ${table.schema}
+          AND table_name = ${table.name}
+          AND table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      `;
+      for (const row of rows) {
+        resolved.push({
+          schema: row.schema,
+          name: row.name,
+          type: row.type === "VIEW" ? "view" : "table",
+        });
+      }
+    }
+
+    if (names.length > 0) {
+      const rows = await tx.$queryRaw<{ schema: string; name: string; type: string }[]>`
+        SELECT table_schema AS schema, table_name AS name, table_type AS type
+        FROM information_schema.tables
+        WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+          AND table_name = ANY(${names})
+      `;
+      for (const row of rows) {
+        resolved.push({
+          schema: row.schema,
+          name: row.name,
+          type: row.type === "VIEW" ? "view" : "table",
+        });
+      }
+    }
+
+    const deduped = new Map<string, { schema: string; name: string; type: "table" | "view" }>();
+    for (const table of resolved) {
+      deduped.set(`${table.schema}.${table.name}`, table);
+    }
+
+    const schemaTables: Array<{
+      schema: string;
+      name: string;
+      type: "table" | "view";
+      columns: SchemaColumnResource[];
+    }> = [];
+    const indexTables: Array<{
+      schema: string;
+      name: string;
+      primaryKey: string[];
+      indexes: Array<{ name: string; columns: string[]; unique: boolean }>;
+    }> = [];
+
+    for (const table of deduped.values()) {
+      const columns = await tx.$queryRaw<SchemaColumnResource[]>`
+        SELECT
+          column_name AS name,
+          udt_name AS type,
+          is_nullable = 'YES' AS nullable,
+          column_default AS "default"
+        FROM information_schema.columns
+        WHERE table_schema = ${table.schema}
+          AND table_name = ${table.name}
+        ORDER BY ordinal_position
+      `;
+
+      schemaTables.push({
+        schema: table.schema,
+        name: table.name,
+        type: table.type,
+        columns,
+      });
+
+      const primaryKeyRows = await tx.$queryRaw<{ name: string }[]>`
+        SELECT a.attname AS name
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indisprimary
+          AND n.nspname = ${table.schema}
+          AND c.relname = ${table.name}
+        ORDER BY array_position(i.indkey::int2[], a.attnum)
+      `;
+
+      const indexRows = await tx.$queryRaw<
+        Array<{ name: string; unique: boolean; columns: string[] }>
+      >`
+        SELECT
+          idx.relname AS name,
+          i.indisunique AS unique,
+          array_agg(a.attname ORDER BY array_position(i.indkey::int2[], a.attnum)) AS columns
+        FROM pg_index i
+        JOIN pg_class tbl ON tbl.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = tbl.relnamespace
+        JOIN pg_class idx ON idx.oid = i.indexrelid
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE n.nspname = ${table.schema}
+          AND tbl.relname = ${table.name}
+          AND NOT i.indisprimary
+        GROUP BY idx.relname, i.indisunique
+        ORDER BY idx.relname
+      `;
+
+      indexTables.push({
+        schema: table.schema,
+        name: table.name,
+        primaryKey: primaryKeyRows.map((row) => row.name),
+        indexes: indexRows.map((row) => ({
+          name: row.name,
+          columns: row.columns ?? [],
+          unique: Boolean(row.unique),
+        })),
+      });
+    }
+
+    return { schema: { tables: schemaTables }, indexes: { tables: indexTables } };
+  });
 }
 
 async function recordQueryExecution(params: {
@@ -1116,22 +1491,38 @@ async function resolveProjectContext(
 
   const project = await prisma.project.findUnique({
     where: { id: resolvedProjectId },
-    select: { id: true, name: true, orgId: true, ownerUserId: true },
+    select: {
+      id: true,
+      name: true,
+      orgId: true,
+      ownerUserId: true,
+      aiEnabled: true,
+      organization: { select: { aiEnabled: true } },
+    },
   });
   if (!project) {
     return { error: makeError("INVALID_INPUT", "Project not found"), status: 400 };
   }
 
+  const projectRecord = {
+    id: project.id,
+    name: project.name,
+    orgId: project.orgId,
+    ownerUserId: project.ownerUserId,
+    aiEnabled: project.aiEnabled,
+    orgAiEnabled: project.organization?.aiEnabled ?? null,
+  };
+
   if (project.ownerUserId) {
     if (!auth.userId || auth.userId !== project.ownerUserId) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
     }
-    return { projectId: project.id, orgId: null, project };
+    return { projectId: project.id, orgId: null, project: projectRecord };
   }
 
   if (project.orgId) {
     if (auth.orgId && auth.orgId === project.orgId) {
-      return { projectId: project.id, orgId: project.orgId, project };
+      return { projectId: project.id, orgId: project.orgId, project: projectRecord };
     }
     if (!auth.userId) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
@@ -1140,7 +1531,7 @@ async function resolveProjectContext(
     if (!membership) {
       return { error: makeError("FORBIDDEN", "Project access denied"), status: 403 };
     }
-    return { projectId: project.id, orgId: project.orgId, project };
+    return { projectId: project.id, orgId: project.orgId, project: projectRecord };
   }
 
   return { error: makeError("INVALID_INPUT", "Project ownership is invalid"), status: 400 };
@@ -1360,7 +1751,7 @@ app.get("/api/v1/me", requireAuth(prisma), async (req: Request, res: Response) =
 
   return res.json({
     user: user ? toUserResource(user) : null,
-    org: org ? { id: org.id, name: org.name } : null,
+    org: org ? { id: org.id, name: org.name, ai_enabled: org.aiEnabled } : null,
     memberships: memberships.map((membership) => ({
       org_id: membership.orgId,
       org_name: membership.organization.name,
@@ -1379,7 +1770,7 @@ app.get("/api/v1/orgs", requireAuth(prisma), async (req: Request, res: Response)
     const org = await prisma.organization.findUnique({ where: { id: auth.orgId } });
     return res.json({
       orgs: org
-        ? [{ id: org.id, name: org.name, role: OrgRole.MEMBER }]
+        ? [{ id: org.id, name: org.name, role: OrgRole.MEMBER, ai_enabled: org.aiEnabled }]
         : [],
     });
   }
@@ -1398,6 +1789,7 @@ app.get("/api/v1/orgs", requireAuth(prisma), async (req: Request, res: Response)
       id: membership.orgId,
       name: membership.organization.name,
       role: membership.role,
+      ai_enabled: membership.organization.aiEnabled,
     })),
   });
 });
@@ -1446,9 +1838,60 @@ app.post(
     });
 
     return res.status(201).json({
-      org: { id: org.id, name: org.name },
+      org: { id: org.id, name: org.name, ai_enabled: org.aiEnabled },
       membership: { org_id: membership.orgId, role: membership.role },
     });
+  }
+);
+
+app.patch(
+  "/api/v1/orgs/:orgId",
+  requireAuth(prisma),
+  async (
+    req: Request<{ orgId: string }, unknown, { name?: string; ai_enabled?: boolean }>,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth?.userId) {
+      return res.status(403).json(makeError("FORBIDDEN", "User context required"));
+    }
+
+    const orgId = req.params.orgId;
+    const name = req.body?.name?.trim();
+    const aiEnabled = typeof req.body?.ai_enabled === "boolean" ? req.body.ai_enabled : null;
+    if (!name && aiEnabled === null) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Provide `name` or `ai_enabled`."));
+    }
+    if (typeof req.body?.name !== "undefined" && !name) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`name` cannot be empty"));
+    }
+
+    const org = await prisma.organization.findUnique({ where: { id: orgId } });
+    if (!org) {
+      return res.status(404).json(makeError("INVALID_INPUT", "Org not found"));
+    }
+
+    const allowed = await requireOrgRole(auth.userId, orgId, [OrgRole.OWNER, OrgRole.ADMIN]);
+    if (!allowed) {
+      return res.status(403).json(makeError("FORBIDDEN", "Insufficient org role"));
+    }
+
+    const updatePayload: Prisma.OrganizationUpdateInput = {};
+    if (name) {
+      updatePayload.name = name;
+    }
+    if (aiEnabled !== null) {
+      updatePayload.aiEnabled = aiEnabled;
+    }
+
+    const updated = await prisma.organization.update({
+      where: { id: orgId },
+      data: updatePayload,
+    });
+
+    return res.json({ org: { id: updated.id, name: updated.name, ai_enabled: updated.aiEnabled } });
   }
 );
 
@@ -1616,6 +2059,7 @@ app.get("/api/v1/projects", requireAuth(prisma), async (req: Request, res: Respo
         name: project.name,
         org_id: project.orgId ?? null,
         owner_user_id: project.ownerUserId ?? null,
+        ai_enabled: project.aiEnabled,
       })),
     });
   }
@@ -1642,6 +2086,7 @@ app.get("/api/v1/projects", requireAuth(prisma), async (req: Request, res: Respo
       name: project.name,
       org_id: project.orgId ?? null,
       owner_user_id: project.ownerUserId ?? null,
+      ai_enabled: project.aiEnabled,
     })),
   });
 });
@@ -1649,7 +2094,10 @@ app.get("/api/v1/projects", requireAuth(prisma), async (req: Request, res: Respo
 app.post(
   "/api/v1/projects",
   requireAuth(prisma),
-  async (req: Request<unknown, unknown, { name?: string; org_id?: string | null }>, res) => {
+  async (
+    req: Request<unknown, unknown, { name?: string; org_id?: string | null; ai_enabled?: boolean }>,
+    res
+  ) => {
     const auth = (req as AuthenticatedRequest).auth;
     if (!auth?.userId) {
       return res.status(403).json(makeError("FORBIDDEN", "User context required"));
@@ -1661,6 +2109,7 @@ app.post(
     }
 
     const orgId = req.body?.org_id ?? null;
+    const aiEnabled = typeof req.body?.ai_enabled === "boolean" ? req.body.ai_enabled : true;
     if (orgId) {
       const allowed = await requireOrgRole(auth.userId, orgId, [OrgRole.OWNER, OrgRole.ADMIN]);
       if (!allowed) {
@@ -1691,6 +2140,7 @@ app.post(
         name,
         orgId,
         ownerUserId: orgId ? null : auth.userId,
+        aiEnabled,
       },
     });
 
@@ -1700,6 +2150,7 @@ app.post(
         name: project.name,
         org_id: project.orgId ?? null,
         owner_user_id: project.ownerUserId ?? null,
+        ai_enabled: project.aiEnabled,
       },
     });
   }
@@ -1708,15 +2159,24 @@ app.post(
 app.patch(
   "/api/v1/projects/:projectId",
   requireAuth(prisma),
-  async (req: Request<{ projectId: string }, unknown, { name?: string }>, res) => {
+  async (
+    req: Request<{ projectId: string }, unknown, { name?: string; ai_enabled?: boolean }>,
+    res
+  ) => {
     const auth = (req as AuthenticatedRequest).auth;
     if (!auth?.userId) {
       return res.status(403).json(makeError("FORBIDDEN", "User context required"));
     }
 
     const name = req.body?.name?.trim();
-    if (!name) {
-      return res.status(400).json(makeError("INVALID_INPUT", "`name` is required"));
+    const aiEnabled = typeof req.body?.ai_enabled === "boolean" ? req.body.ai_enabled : null;
+    if (!name && aiEnabled === null) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Provide `name` or `ai_enabled`."));
+    }
+    if (typeof req.body?.name !== "undefined" && !name) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`name` cannot be empty"));
     }
 
     const projectContext = await resolveProjectContext(auth, req.params.projectId);
@@ -1742,9 +2202,17 @@ app.patch(
       }
     }
 
+    const updatePayload: Prisma.ProjectUpdateInput = {};
+    if (name) {
+      updatePayload.name = name;
+    }
+    if (aiEnabled !== null) {
+      updatePayload.aiEnabled = aiEnabled;
+    }
+
     const updated = await prisma.project.update({
       where: { id: projectContext.project.id },
-      data: { name },
+      data: updatePayload,
     });
 
     return res.json({
@@ -1753,6 +2221,7 @@ app.patch(
         name: updated.name,
         org_id: updated.orgId ?? null,
         owner_user_id: updated.ownerUserId ?? null,
+        ai_enabled: updated.aiEnabled,
       },
     });
   }
@@ -2573,6 +3042,231 @@ app.post(
   }
 );
 
+app.post(
+  "/api/v1/ai/sql/:action",
+  requireAuth(prisma),
+  async (
+    req: Request<{ action: string }, unknown, AiSqlRequestBody>,
+    res: Response<AiSqlResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const actionRaw =
+      typeof req.params.action === "string" ? req.params.action.trim().toLowerCase() : "";
+    if (!actionRaw || !isAiSqlAction(actionRaw)) {
+      return res.status(400).json(makeError("INVALID_INPUT", "Unsupported AI action"));
+    }
+    const action = actionRaw as AiSqlAction;
+
+    const sql = req.body?.sql;
+    if (!sql || typeof sql !== "string" || sql.trim().length === 0) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
+    }
+
+    if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
+      return res
+        .status(400)
+        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or WITH statements are permitted"));
+    }
+
+    const firstKeyword = extractFirstKeyword(stripSqlCommentsAndLiterals(sql));
+    if (firstKeyword && firstKeyword.toLowerCase() === "explain") {
+      return res.status(400).json(
+        makeError(
+          "INVALID_INPUT",
+          "Provide a SELECT or WITH statement. EXPLAIN is run server-side."
+        )
+      );
+    }
+
+    const projectId = req.body?.project_id ?? null;
+    const connectionId = req.body?.connection_id ?? null;
+    if (!projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+    }
+    if (!connectionId) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`connection_id` is required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(auth, projectId, connectionId);
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status ?? 400).json(connectionContext.error);
+    }
+
+    const quotaSubject = connectionContext.orgId
+      ? ({ subjectType: "ORG", orgId: connectionContext.orgId } as const)
+      : auth.userId
+        ? ({ subjectType: "USER", userId: auth.userId } as const)
+        : auth.orgId
+          ? ({ subjectType: "ORG", orgId: auth.orgId } as const)
+          : null;
+
+    if (!quotaSubject) {
+      return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
+    }
+
+    const planContext = await getPlanContext(prisma, quotaSubject);
+    const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
+    const now = new Date();
+    const llmAccess = aiFeatureStatus.enabled
+      ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
+      : null;
+    const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+
+    if (!llmEnabled) {
+      const fallbackReason: AiSqlFallbackReason = aiFeatureStatus.enabled
+        ? llmAccess?.reason ?? "plan_disabled"
+        : aiFeatureStatus.reason ?? "project_disabled";
+      const fallback = buildAiSqlFallbackResponse({
+        reason: fallbackReason,
+        planCode: planContext.planCode,
+        used: llmAccess?.used ?? null,
+        limit: llmAccess?.limit ?? null,
+      });
+      logAiSqlTelemetry({
+        action,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        llmUsed: false,
+        blocked: true,
+        reason: fallbackReason,
+        errorCode: null,
+        provider: fallback.meta.provider,
+        model: fallback.meta.model,
+        latencyMs: fallback.meta.latency_ms,
+      });
+      return res.json(fallback);
+    }
+
+    const normalizedSql = normalizeSql(sql);
+    let explainJson: unknown | null = null;
+    try {
+      const explainRows = await runConnectionQuery<unknown[]>(
+        connectionContext.connectionString,
+        `EXPLAIN (FORMAT JSON) ${normalizedSql}`
+      );
+      explainJson = extractExplainJson(explainRows);
+    } catch (err) {
+      const errorResponse = formatQueryError(err);
+      const status = errorResponse.code === "ANALYZER_TIMEOUT" ? 504 : 400;
+      return res.status(status).json(errorResponse);
+    }
+
+    if (!explainJson) {
+      return res
+        .status(502)
+        .json(makeError("ANALYZER_ERROR", "EXPLAIN did not return JSON output"));
+    }
+
+    let metadata: Awaited<ReturnType<typeof collectAiMetadata>>;
+    try {
+      metadata = await collectAiMetadata(connectionContext.connectionString, normalizedSql);
+    } catch (err) {
+      console.error("Failed to collect AI metadata");
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch schema metadata. Check connection or permissions."
+          )
+        );
+    }
+
+    const userIntent =
+      typeof req.body?.user_intent === "string" ? req.body.user_intent.trim() : null;
+    const payload: AiSqlPayload = {
+      sql_text: redactSqlForLlm(normalizedSql),
+      schema: metadata.schema,
+      indexes: metadata.indexes,
+      explain_output: JSON.stringify(explainJson, null, 2),
+      db_engine: "postgres",
+      project_id: connectionContext.projectId,
+      user_intent: userIntent && userIntent.length > 0 ? userIntent : null,
+    };
+
+    try {
+      const response = await callAiSqlService(action, payload);
+      const llmUsed =
+        response.meta.provider !== "disabled" && response.meta.provider !== "mock";
+      if (llmUsed) {
+        await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+      }
+      logAiSqlTelemetry({
+        action,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        llmUsed,
+        blocked: false,
+        reason: null,
+        errorCode: null,
+        provider: response.meta.provider,
+        model: response.meta.model,
+        latencyMs: response.meta.latency_ms,
+      });
+      return res.json(response);
+    } catch (err) {
+      const aiErr = err as AiServiceError;
+      if (aiErr?.payload) {
+        if (aiErr.payload.code === "INVALID_INPUT") {
+          logAiSqlTelemetry({
+            action,
+            projectId: connectionContext.projectId,
+            userId: auth.userId ?? null,
+            orgId: connectionContext.orgId ?? auth.orgId ?? null,
+            llmUsed: false,
+            blocked: false,
+            reason: null,
+            errorCode: aiErr.payload.code,
+          });
+          return res.status(aiErr.status ?? 400).json(aiErr.payload);
+        }
+
+        const fallback = buildAiSqlFallbackResponse({ reason: "service_unavailable" });
+        logAiSqlTelemetry({
+          action,
+          projectId: connectionContext.projectId,
+          userId: auth.userId ?? null,
+          orgId: connectionContext.orgId ?? auth.orgId ?? null,
+          llmUsed: false,
+          blocked: false,
+          reason: "service_unavailable",
+          errorCode: aiErr.payload.code ?? "ANALYZER_ERROR",
+          provider: fallback.meta.provider,
+          model: fallback.meta.model,
+          latencyMs: fallback.meta.latency_ms,
+        });
+        return res.json(fallback);
+      }
+
+      const fallback = buildAiSqlFallbackResponse({ reason: "service_unavailable" });
+      logAiSqlTelemetry({
+        action,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        llmUsed: false,
+        blocked: false,
+        reason: "service_unavailable",
+        errorCode: "ANALYZER_ERROR",
+        provider: fallback.meta.provider,
+        model: fallback.meta.model,
+        latencyMs: fallback.meta.latency_ms,
+      });
+      return res.json(fallback);
+    }
+  }
+);
+
 app.get("/api/v1/tokens", requireAuth(prisma), async (req: Request, res: Response) => {
   const auth = (req as AuthenticatedRequest).auth;
   if (!auth) {
@@ -2844,7 +3538,13 @@ app.post(
     }
 
     const planContext = await getPlanContext(prisma, quotaSubject);
-    const llmEnabled = planContext.plan.llmEnabled;
+    const now = new Date();
+    const aiFeatureStatus = await resolveAiFeatureStatusForContext(prisma, projectContext);
+    let llmEnabled = false;
+    if (aiFeatureStatus.enabled) {
+      const llmAccess = await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now);
+      llmEnabled = llmAccess.enabled;
+    }
 
     const sizeError = checkSqlAndExplainSizeLimits(
       planContext.plan,
@@ -2867,7 +3567,6 @@ app.post(
       return res.status(402).json(sizeError);
     }
 
-    const now = new Date();
     const usedThisMonth = await getAnalysesUsedThisMonth(prisma, quotaSubject, now);
     if (usedThisMonth >= planContext.plan.analysesPerMonth) {
       logAnalysisTelemetry({
@@ -3095,3 +3794,4 @@ start().catch((err) => {
   console.error("Failed to start API", err);
   process.exitCode = 1;
 });
+

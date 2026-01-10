@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -76,3 +76,27 @@ class AnalysisResource(BaseModel):
 
 class AnalysisResponse(BaseModel):
     analysis: AnalysisResource
+
+class AiSqlRequest(BaseModel):
+    sql_text: str
+    schema: Dict[str, Any]
+    indexes: Dict[str, Any]
+    explain_output: str
+    db_engine: str
+    project_id: str
+    user_intent: Optional[str] = None
+
+
+class AiSqlResponseMeta(BaseModel):
+    provider: str
+    model: str
+    latency_ms: int
+
+
+class AiSqlResponse(BaseModel):
+    summary: str
+    findings: List[str]
+    recommendations: List[str]
+    risk_level: Literal["low", "medium", "high"]
+    meta: AiSqlResponseMeta
+
