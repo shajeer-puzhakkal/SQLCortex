@@ -74,7 +74,7 @@ def analyze(sql: str, explain_json: Any, llm_enabled: bool = False) -> AnalyzerO
             elif llm_suggestion.notes:
                 suggested_rewrite_explanation = llm_suggestion.notes[0]
     else:
-        suggested_rewrite_explanation = "LLM disabled for current plan."
+        suggested_rewrite_explanation = "LLM disabled for current settings."
 
     return AnalyzerOutput(
         primary_bottleneck=primary,

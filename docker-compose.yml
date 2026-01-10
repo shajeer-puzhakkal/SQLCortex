@@ -42,9 +42,9 @@ services:
       timeout: 5s
       retries: 5
 
-  analyzer:
+  ai-services:
     build:
-      context: ./services/analyzer
+      context: ./services/ai-services
     env_file:
       - .env
     ports:
@@ -81,7 +81,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      analyzer:
+      ai-services:
         condition: service_started
     healthcheck:
       test:
@@ -93,5 +93,15 @@ services:
       timeout: 5s
       retries: 5
 
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: sqlcortex-ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama:/root/.ollama
+
 volumes:
   pgdata:
+

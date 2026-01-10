@@ -8,6 +8,7 @@ export type PlanDefinition = {
   maxProjects: number;
   maxMembersPerOrg: number;
   analysesPerMonth: number;
+  monthlyLlmCallLimit: number;
   historyRetentionDays: number;
   maxSqlLength: number;
   maxExplainJsonBytes: number;
@@ -22,6 +23,7 @@ export const PLAN_DEFINITIONS: Record<PlanCode, PlanDefinition> = {
     maxProjects: 1,
     maxMembersPerOrg: 3,
     analysesPerMonth: 100,
+    monthlyLlmCallLimit: 0,
     historyRetentionDays: 7,
     maxSqlLength: 20_000,
     maxExplainJsonBytes: 512 * 1024,
@@ -34,6 +36,7 @@ export const PLAN_DEFINITIONS: Record<PlanCode, PlanDefinition> = {
     maxProjects: 50,
     maxMembersPerOrg: 50,
     analysesPerMonth: 1_000,
+    monthlyLlmCallLimit: 1_000,
     historyRetentionDays: 365,
     maxSqlLength: 200_000,
     maxExplainJsonBytes: 5 * 1024 * 1024,
@@ -65,13 +68,13 @@ export function ensureDefaultPlans(prisma: PrismaClient) {
       update: {
         name: free.name,
         monthlyAnalysisLimit: free.analysesPerMonth,
-        monthlyLlmCallLimit: 0,
+        monthlyLlmCallLimit: free.monthlyLlmCallLimit,
       },
       create: {
         code: free.code,
         name: free.name,
         monthlyAnalysisLimit: free.analysesPerMonth,
-        monthlyLlmCallLimit: 0,
+        monthlyLlmCallLimit: free.monthlyLlmCallLimit,
       },
     });
 
@@ -80,13 +83,13 @@ export function ensureDefaultPlans(prisma: PrismaClient) {
       update: {
         name: pro.name,
         monthlyAnalysisLimit: pro.analysesPerMonth,
-        monthlyLlmCallLimit: 1_000,
+        monthlyLlmCallLimit: pro.monthlyLlmCallLimit,
       },
       create: {
         code: pro.code,
         name: pro.name,
         monthlyAnalysisLimit: pro.analysesPerMonth,
-        monthlyLlmCallLimit: 1_000,
+        monthlyLlmCallLimit: pro.monthlyLlmCallLimit,
       },
     });
   })();
