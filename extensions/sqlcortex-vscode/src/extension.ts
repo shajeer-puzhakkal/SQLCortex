@@ -6,7 +6,7 @@ import {
   listOrgs,
   listProjects,
 } from "./api/endpoints";
-import type { ConnectionResource, Org, Project } from "./api/types";
+import type { ConnectionResource, ExplainMode, Org, Project } from "./api/types";
 import {
   clearCachedSession,
   requireAuth,
@@ -40,6 +40,7 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.selectOrg", label: "Select Org" },
   { id: "sqlcortex.selectProject", label: "Select Project" },
   { id: "sqlcortex.selectConnection", label: "Select Connection" },
+  { id: "sqlcortex.setExplainMode", label: "Set EXPLAIN Mode" },
   { id: "sqlcortex.refreshExplorer", label: "Refresh Explorer" },
   { id: "sqlcortex.searchTable", label: "Search Table" },
   { id: "sqlcortex.copyTableName", label: "Copy Table Name" },
@@ -55,6 +56,8 @@ const CONTEXT_HAS_PROJECT = "sqlcortex.hasProject";
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
 const LEGACY_API_BASE_URL = "http://localhost:3000";
 const PERSONAL_ORG_LABEL = "Personal workspace";
+const EXPLAIN_MODE_SETTING = "explainMode";
+const EXPLAIN_ANALYZE_WARNING = "May execute query; use only on safe environments.";
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -179,6 +182,9 @@ export function activate(context: vscode.ExtensionContext) {
         dbExplorerProvider,
         sidebarProvider
       );
+    },
+    "sqlcortex.setExplainMode": async () => {
+      await setExplainModeFlow();
     },
     "sqlcortex.refreshExplorer": async () => {
       dbExplorerProvider.clearCache();
@@ -649,6 +655,53 @@ async function selectConnectionFlow(
   }
   dbExplorerProvider.refresh();
   await refreshContext(context, tokenStore, statusBars, sidebarProvider);
+}
+
+async function setExplainModeFlow(): Promise<void> {
+  const config = vscode.workspace.getConfiguration("sqlcortex");
+  const current =
+    (config.get<string>(EXPLAIN_MODE_SETTING) as ExplainMode | undefined) ?? "EXPLAIN";
+
+  const picks = [
+    {
+      label: "EXPLAIN",
+      description: "Default (does not execute query).",
+      value: "EXPLAIN" as ExplainMode,
+      picked: current === "EXPLAIN",
+    },
+    {
+      label: "EXPLAIN ANALYZE",
+      description: EXPLAIN_ANALYZE_WARNING,
+      value: "EXPLAIN_ANALYZE" as ExplainMode,
+      picked: current === "EXPLAIN_ANALYZE",
+    },
+  ];
+
+  const selection = await vscode.window.showQuickPick(picks, {
+    placeHolder: "Select EXPLAIN mode for analysis requests",
+    ignoreFocusOut: true,
+  });
+  if (!selection) {
+    return;
+  }
+
+  if (selection.value === "EXPLAIN_ANALYZE") {
+    const confirm = await vscode.window.showWarningMessage(
+      EXPLAIN_ANALYZE_WARNING,
+      { modal: true },
+      "Enable"
+    );
+    if (confirm !== "Enable") {
+      return;
+    }
+  }
+
+  if (selection.value === current) {
+    return;
+  }
+
+  await config.update(EXPLAIN_MODE_SETTING, selection.value, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`SQLCortex: EXPLAIN mode set to ${selection.label}.`);
 }
 
 async function searchTableFlow(

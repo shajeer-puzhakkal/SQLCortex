@@ -4,6 +4,14 @@ export type ApiError = {
   details?: Record<string, unknown>;
 };
 
+export type {
+  AnalyzeRequest,
+  AnalyzeResponse,
+  DashboardMetricsResponse,
+  ExplainMode,
+  MeterEvent,
+} from "../../../../packages/shared/src/contracts";
+
 export type Org = {
   id: string;
   name: string;

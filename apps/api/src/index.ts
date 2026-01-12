@@ -11,6 +11,7 @@ import {
   AiSqlResponse,
   ErrorResponse,
   HealthResponse,
+  ExplainMode,
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
@@ -48,6 +49,8 @@ import {
 } from "./auth";
 import { createRateLimitMiddleware } from "./rateLimit";
 import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
+import { recordMeterEvent } from "./metering";
+import { redactError } from "../../packages/shared/src";
 
 dotenv.config();
 
@@ -167,6 +170,7 @@ type AiSqlRequestBody = {
   connection_id?: string | null;
   sql?: string;
   user_intent?: string | null;
+  explain_mode?: ExplainMode;
 };
 
 type ExecuteQueryResponse = {
@@ -877,6 +881,7 @@ const BLOCKED_QUERY_KEYWORDS = [
   "call",
   "do",
 ] as const;
+const EXPLAIN_MODE_VALUES = ["EXPLAIN", "EXPLAIN_ANALYZE"] as const;
 const AI_SQL_ACTIONS = ["explain", "optimize", "index-suggest", "risk-check"] as const;
 
 function isReadOnlySql(sql: string): boolean {
@@ -904,6 +909,16 @@ function isReadOnlySql(sql: string): boolean {
   return ALLOWED_QUERY_START_KEYWORDS.includes(
     normalizedKeyword as (typeof ALLOWED_QUERY_START_KEYWORDS)[number]
   );
+}
+
+function normalizeExplainMode(value: unknown): ExplainMode {
+  if (typeof value !== "string") {
+    return "EXPLAIN";
+  }
+  const normalized = value.trim().toUpperCase().replace(/\s+/g, "_");
+  return EXPLAIN_MODE_VALUES.includes(normalized as ExplainMode)
+    ? (normalized as ExplainMode)
+    : "EXPLAIN";
 }
 
 function normalizeSql(sql: string): string {
@@ -1015,8 +1030,9 @@ function serializeCell(value: unknown): unknown {
 }
 
 function formatQueryError(err: unknown): ErrorResponse {
-  const message =
+  const rawMessage =
     err instanceof Error && err.message ? err.message : "Query failed to execute.";
+  const message = redactError(rawMessage);
   if (message.toLowerCase().includes("statement timeout")) {
     return makeError("ANALYZER_TIMEOUT", "Query timed out.", { reason: message });
   }
@@ -2925,6 +2941,8 @@ app.post(
         .status(400)
         .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
     }
+    const explainMode = normalizeExplainMode(req.body?.explain_mode);
+    const meterStartedAt = Date.now();
 
     if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
       return res
@@ -3147,20 +3165,54 @@ app.post(
     }
 
     const normalizedSql = normalizeSql(sql);
+    const explainClause =
+      explainMode === "EXPLAIN_ANALYZE"
+        ? "EXPLAIN (ANALYZE, FORMAT JSON)"
+        : "EXPLAIN (FORMAT JSON)";
     let explainJson: unknown | null = null;
     try {
       const explainRows = await runConnectionQuery<unknown[]>(
         connectionContext.connectionString,
-        `EXPLAIN (FORMAT JSON) ${normalizedSql}`
+        `${explainClause} ${normalizedSql}`
       );
       explainJson = extractExplainJson(explainRows);
     } catch (err) {
       const errorResponse = formatQueryError(err);
       const status = errorResponse.code === "ANALYZER_TIMEOUT" ? 504 : 400;
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: errorResponse.code ?? "ANALYZER_ERROR",
+        explainMode,
+      });
       return res.status(status).json(errorResponse);
     }
 
     if (!explainJson) {
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: "ANALYZER_ERROR",
+        explainMode,
+      });
       return res
         .status(502)
         .json(makeError("ANALYZER_ERROR", "EXPLAIN did not return JSON output"));
@@ -3171,6 +3223,21 @@ app.post(
       metadata = await collectAiMetadata(connectionContext.connectionString, normalizedSql);
     } catch (err) {
       console.error("Failed to collect AI metadata");
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: "SCHEMA_FETCH_FAILED",
+        explainMode,
+      });
       return res
         .status(500)
         .json(
@@ -3213,11 +3280,41 @@ app.post(
         model: response.meta.model,
         latencyMs: response.meta.latency_ms,
       });
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+        aiUsed: llmUsed,
+        model: response.meta.model,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "success",
+        errorCode: null,
+        explainMode,
+      });
       return res.json(response);
     } catch (err) {
       const aiErr = err as AiServiceError;
       if (aiErr?.payload) {
         if (aiErr.payload.code === "INVALID_INPUT") {
+          void recordMeterEvent(prisma, {
+            orgId: connectionContext.orgId ?? auth.orgId ?? null,
+            projectId: connectionContext.projectId,
+            userId: auth.userId ?? null,
+            source: "vscode",
+            eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+            aiUsed: false,
+            model: null,
+            tokensEstimated: null,
+            sql,
+            durationMs: Date.now() - meterStartedAt,
+            status: "error",
+            errorCode: aiErr.payload.code ?? "ANALYZER_ERROR",
+            explainMode,
+          });
           logAiSqlTelemetry({
             action,
             projectId: connectionContext.projectId,
@@ -3232,6 +3329,21 @@ app.post(
         }
 
         const fallback = buildAiSqlFallbackResponse({ reason: "service_unavailable" });
+        void recordMeterEvent(prisma, {
+          orgId: connectionContext.orgId ?? auth.orgId ?? null,
+          projectId: connectionContext.projectId,
+          userId: auth.userId ?? null,
+          source: "vscode",
+          eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+          aiUsed: false,
+          model: fallback.meta.model,
+          tokensEstimated: null,
+          sql,
+          durationMs: Date.now() - meterStartedAt,
+          status: "error",
+          errorCode: aiErr.payload.code ?? "ANALYZER_ERROR",
+          explainMode,
+        });
         logAiSqlTelemetry({
           action,
           projectId: connectionContext.projectId,
@@ -3249,6 +3361,21 @@ app.post(
       }
 
       const fallback = buildAiSqlFallbackResponse({ reason: "service_unavailable" });
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: action === "explain" ? "ai_explain" : "ai_suggest",
+        aiUsed: false,
+        model: fallback.meta.model,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: "ANALYZER_ERROR",
+        explainMode,
+      });
       logAiSqlTelemetry({
         action,
         projectId: connectionContext.projectId,
@@ -3480,6 +3607,7 @@ app.post(
         .status(400)
         .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
     }
+    const explainMode = normalizeExplainMode(body.explain_mode);
 
     if (!isReadOnlySql(body.sql) || hasProhibitedClauses(body.sql)) {
       return res
@@ -3649,6 +3777,21 @@ app.post(
         rateLimited: false,
         llmUsed,
       });
+      void recordMeterEvent(prisma, {
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: "query_analysis",
+        aiUsed: llmUsed,
+        model: null,
+        tokensEstimated: null,
+        sql: body.sql,
+        durationMs: analyzerDurationMs ?? 0,
+        status: "success",
+        errorCode: null,
+        explainMode,
+      });
 
       return res.status(201).json({ analysis: mapAnalysisToResource(completed) });
     } catch (err) {
@@ -3669,6 +3812,21 @@ app.post(
         quotaDenied: false,
         rateLimited: false,
         llmUsed: false,
+      });
+      void recordMeterEvent(prisma, {
+        orgId: projectContext.orgId ?? auth.orgId ?? null,
+        projectId: projectContext.projectId ?? null,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: "query_analysis",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql: body.sql,
+        durationMs: analyzerDurationMs ?? 0,
+        status: "error",
+        errorCode: payload.code ?? "ANALYZER_ERROR",
+        explainMode,
       });
       return res.status(status).json(payload);
     }

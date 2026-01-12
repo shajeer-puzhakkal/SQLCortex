@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import type { DashboardMetricsResponse } from "@/types/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const SIDEBAR_STATE_KEY = "sqlcortex.sidebarOpen";
@@ -158,7 +159,14 @@ export default function DashboardPage() {
   const queryCounts = [12, 18, 9, 24, 20, 14, 28];
   const queryLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const maxQueryCount = Math.max(...queryCounts, 1);
-  const totalQueries = queryCounts.reduce((sum, value) => sum + value, 0);
+  const sampleMetrics: DashboardMetricsResponse = {
+    periodStart: new Date().toISOString(),
+    periodEnd: new Date().toISOString(),
+    analyses: queryCounts.reduce((sum, value) => sum + value, 0),
+    aiCalls: 0,
+    tokensEstimated: null,
+  };
+  const totalQueries = sampleMetrics.analyses;
 
   const perfScores = [72, 68, 74, 70, 78, 82, 76];
   const perfMax = Math.max(...perfScores, 1);
