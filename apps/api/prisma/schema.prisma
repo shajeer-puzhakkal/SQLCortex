@@ -122,6 +122,26 @@ model QueryExecution {
   @@map("query_executions")
 }
 
+model MeterEvent {
+  id              String   @id @default(uuid()) @db.Uuid
+  timestamp       DateTime @default(now())
+  orgId           String?  @db.Uuid @map("org_id")
+  projectId       String?  @db.Uuid @map("project_id")
+  userId          String?  @db.Uuid @map("user_id")
+  source          String
+  eventType       String   @map("event_type")
+  aiUsed          Boolean  @map("ai_used")
+  model           String?
+  tokensEstimated Int?     @map("tokens_estimated")
+  sqlHash         String   @map("sql_hash")
+  durationMs      Int      @map("duration_ms")
+  status          String
+  errorCode       String?  @map("error_code")
+  explainMode     String?  @map("explain_mode")
+
+  @@map("meter_events")
+}
+
 model ApiToken {
   id          String      @id @default(uuid()) @db.Uuid
   tokenHash   String      @unique @map("token_hash")

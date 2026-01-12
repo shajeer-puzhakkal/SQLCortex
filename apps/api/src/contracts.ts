@@ -1,4 +1,19 @@
 import { Analysis } from "@prisma/client";
+import type {
+  AnalyzeRequest,
+  AnalyzeResponse,
+  DashboardMetricsResponse,
+  ExplainMode,
+  MeterEvent,
+} from "../../packages/shared/src/contracts";
+
+export type {
+  AnalyzeRequest,
+  AnalyzeResponse,
+  DashboardMetricsResponse,
+  ExplainMode,
+  MeterEvent,
+};
 
 export type ErrorCode =
   | "UNAUTHORIZED"
@@ -23,6 +38,7 @@ export type HealthResponse = { ok: true; service: string };
 export type AnalysisCreateRequest = {
   sql: string;
   explain_json: unknown;
+  explain_mode?: ExplainMode;
   project_id?: string | null;
 };
 

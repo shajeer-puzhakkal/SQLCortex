@@ -1,0 +1,20 @@
+CREATE TABLE "meter_events" (
+    "id" UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "org_id" UUID,
+    "project_id" UUID,
+    "user_id" UUID,
+    "source" TEXT NOT NULL,
+    "event_type" TEXT NOT NULL,
+    "ai_used" BOOLEAN NOT NULL,
+    "model" TEXT,
+    "tokens_estimated" INTEGER,
+    "sql_hash" TEXT NOT NULL,
+    "duration_ms" INTEGER NOT NULL,
+    "status" TEXT NOT NULL,
+    "error_code" TEXT,
+    "explain_mode" TEXT,
+    CONSTRAINT "meter_events_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT "meter_events_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "projects"("id") ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT "meter_events_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE
+);

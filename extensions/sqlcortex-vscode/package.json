@@ -17,6 +17,7 @@
     "onCommand:sqlcortex.selectOrg",
     "onCommand:sqlcortex.selectProject",
     "onCommand:sqlcortex.selectConnection",
+    "onCommand:sqlcortex.setExplainMode",
     "onCommand:sqlcortex.refreshExplorer",
     "onCommand:sqlcortex.searchTable",
     "onCommand:sqlcortex.copyTableName",
@@ -53,6 +54,10 @@
         "title": "SQLCortex: Select Connection"
       },
       {
+        "command": "sqlcortex.setExplainMode",
+        "title": "SQLCortex: Set EXPLAIN Mode"
+      },
+      {
         "command": "sqlcortex.refreshExplorer",
         "title": "SQLCortex: Refresh Database Explorer"
       },
@@ -86,6 +91,17 @@
         "title": "SQLCortex: Run Selection"
       }
     ],
+    "configuration": {
+      "title": "SQLCortex",
+      "properties": {
+        "sqlcortex.explainMode": {
+          "type": "string",
+          "enum": ["EXPLAIN", "EXPLAIN_ANALYZE"],
+          "default": "EXPLAIN",
+          "description": "Choose the EXPLAIN mode for analysis requests. EXPLAIN ANALYZE may execute the query; use only on safe environments."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
