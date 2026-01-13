@@ -11,24 +11,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:sql",
-    "onCommand:sqlcortex.login",
-    "onCommand:sqlcortex.logout",
-    "onCommand:sqlcortex.selectOrg",
-    "onCommand:sqlcortex.selectProject",
-    "onCommand:sqlcortex.selectConnection",
-    "onCommand:sqlcortex.setExplainMode",
-    "onCommand:sqlcortex.refreshExplorer",
-    "onCommand:sqlcortex.searchTable",
-    "onCommand:sqlcortex.copyTableName",
-    "onCommand:sqlcortex.copyColumnName",
-    "onCommand:sqlcortex.runTableQuery",
-    "onCommand:sqlcortex.runQuery",
-    "onCommand:sqlcortex.runSelection",
-    "onView:sqlcortex.resultsView",
-    "onView:sqlcortex.overview",
-    "onView:sqlcortex.chatView",
-    "onView:sqlcortex.databaseExplorer"
+    "onLanguage:sql"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -89,16 +72,51 @@
       {
         "command": "sqlcortex.runSelection",
         "title": "SQLCortex: Run Selection"
+      },
+      {
+        "command": "sqlcortex.analyzeSelection",
+        "title": "SQLCortex: Analyze Selection"
+      },
+      {
+        "command": "sqlcortex.analyzeSelectionWithAnalyze",
+        "title": "SQLCortex: Analyze Selection (EXPLAIN ANALYZE)"
       }
     ],
     "configuration": {
       "title": "SQLCortex",
       "properties": {
+        "sqlcortex.explain.mode": {
+          "type": "string",
+          "enum": [
+            "EXPLAIN",
+            "EXPLAIN_ANALYZE"
+          ],
+          "default": "EXPLAIN",
+          "description": "Choose the EXPLAIN mode for analysis requests."
+        },
+        "sqlcortex.explain.allowAnalyze": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow EXPLAIN ANALYZE for analysis requests. May execute queries."
+        },
         "sqlcortex.explainMode": {
           "type": "string",
-          "enum": ["EXPLAIN", "EXPLAIN_ANALYZE"],
+          "enum": [
+            "EXPLAIN",
+            "EXPLAIN_ANALYZE"
+          ],
           "default": "EXPLAIN",
-          "description": "Choose the EXPLAIN mode for analysis requests. EXPLAIN ANALYZE may execute the query; use only on safe environments."
+          "description": "Deprecated. Use sqlcortex.explain.mode instead."
+        },
+        "sqlcortex.maxSqlLength": {
+          "type": "number",
+          "default": 20000,
+          "description": "Maximum SQL length (in characters) allowed for analysis."
+        },
+        "sqlcortex.diagnostics.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable inline diagnostics for basic SQL anti-patterns."
         }
       }
     },
@@ -123,22 +141,32 @@
         {
           "id": "sqlcortex.resultsView",
           "name": "Results",
-          "type": "webview"
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
         }
       ],
       "sqlcortex": [
         {
           "id": "sqlcortex.overview",
-          "name": "Overview"
+          "name": "Overview",
+          "icon": "resources/sqlcortex.svg"
         },
         {
           "id": "sqlcortex.databaseExplorer",
-          "name": "Database Explorer"
+          "name": "Database Explorer",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "sqlcortex.queryInsights",
+          "name": "Query Insights",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
         },
         {
           "id": "sqlcortex.chatView",
           "name": "Chat",
-          "type": "webview"
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
         }
       ]
     },
@@ -147,6 +175,13 @@
         {
           "command": "sqlcortex.runQuery",
           "when": "resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sqlcortex.analyzeSelection",
+          "when": "editorTextFocus && editorHasSelection && (resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql)",
           "group": "navigation"
         }
       ],

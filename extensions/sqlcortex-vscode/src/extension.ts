@@ -1,12 +1,21 @@
+import { createHash } from "crypto";
 import * as vscode from "vscode";
 import { createApiClient, formatApiError } from "./api/client";
 import {
+  analyzeQuery,
   executeQuery,
   listConnections,
   listOrgs,
   listProjects,
 } from "./api/endpoints";
-import type { ConnectionResource, ExplainMode, Org, Project } from "./api/types";
+import type {
+  AnalyzeRequest,
+  ConnectionResource,
+  ExplainMode,
+  Org,
+  Project,
+} from "./api/types";
+import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../packages/shared/src/sql";
 import {
   clearCachedSession,
   requireAuth,
@@ -26,12 +35,14 @@ import {
 } from "./state/workspaceState";
 import { createStatusBarItems, updateStatusBar, type StatusBarItems } from "./ui/statusBar";
 import { ResultsPanel } from "./ui/resultsPanel";
+import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
 import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { SidebarProvider } from "./ui/tree/sidebarProvider";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
+import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
 import { validateReadOnlySql } from "./sql/validator";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
@@ -48,6 +59,8 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.runTableQuery", label: "Run Table Query" },
   { id: "sqlcortex.runQuery", label: "Run Query" },
   { id: "sqlcortex.runSelection", label: "Run Selection" },
+  { id: "sqlcortex.analyzeSelection", label: "Analyze Selection" },
+  { id: "sqlcortex.analyzeSelectionWithAnalyze", label: "Analyze Selection (EXPLAIN ANALYZE)" },
 ];
 
 const API_BASE_URL_KEY = "sqlcortex.apiBaseUrl";
@@ -56,7 +69,12 @@ const CONTEXT_HAS_PROJECT = "sqlcortex.hasProject";
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
 const LEGACY_API_BASE_URL = "http://localhost:3000";
 const PERSONAL_ORG_LABEL = "Personal workspace";
-const EXPLAIN_MODE_SETTING = "explainMode";
+const EXPLAIN_MODE_SETTING = "explain.mode";
+const LEGACY_EXPLAIN_MODE_SETTING = "explainMode";
+const EXPLAIN_ALLOW_ANALYZE_SETTING = "explain.allowAnalyze";
+const MAX_SQL_LENGTH_SETTING = "maxSqlLength";
+const DIAGNOSTICS_ENABLED_SETTING = "diagnostics.enabled";
+const DEFAULT_MAX_SQL_LENGTH = 20000;
 const EXPLAIN_ANALYZE_WARNING = "May execute query; use only on safe environments.";
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
@@ -77,6 +95,11 @@ export function activate(context: vscode.ExtensionContext) {
   void migrateApiBaseUrl(context, output);
 
   ResultsPanel.register(context);
+  QueryInsightsView.register(context);
+  QueryInsightsView.show(context);
+
+  const diagnostics = createSqlDiagnosticsCollection();
+  context.subscriptions.push(diagnostics);
 
   const tokenStore = createTokenStore(context.secrets);
   const statusBars = createStatusBarItems();
@@ -84,6 +107,16 @@ export function activate(context: vscode.ExtensionContext) {
     statusBars.workspace,
     statusBars.connection,
     statusBars.runQuery
+  );
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration(`sqlcortex.${DIAGNOSTICS_ENABLED_SETTING}`)) {
+        const config = vscode.workspace.getConfiguration("sqlcortex");
+        if (!resolveDiagnosticsEnabled(config)) {
+          diagnostics.clear();
+        }
+      }
+    })
   );
 
   const sidebarProvider = new SidebarProvider({ context, tokenStore });
@@ -224,6 +257,17 @@ export function activate(context: vscode.ExtensionContext) {
     },
     "sqlcortex.runSelection": async () => {
       await runSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider);
+    },
+    "sqlcortex.analyzeSelection": async () => {
+      await analyzeSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider, {
+        diagnostics,
+      });
+    },
+    "sqlcortex.analyzeSelectionWithAnalyze": async () => {
+      await analyzeSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider, {
+        diagnostics,
+        forcedMode: "EXPLAIN_ANALYZE",
+      });
     },
   };
 
@@ -659,8 +703,7 @@ async function selectConnectionFlow(
 
 async function setExplainModeFlow(): Promise<void> {
   const config = vscode.workspace.getConfiguration("sqlcortex");
-  const current =
-    (config.get<string>(EXPLAIN_MODE_SETTING) as ExplainMode | undefined) ?? "EXPLAIN";
+  const current = resolveExplainModeSetting(config);
 
   const picks = [
     {
@@ -686,12 +729,28 @@ async function setExplainModeFlow(): Promise<void> {
   }
 
   if (selection.value === "EXPLAIN_ANALYZE") {
+    const allowAnalyze = resolveAllowAnalyze(config);
+    if (!allowAnalyze) {
+      const enable = await vscode.window.showWarningMessage(
+        "EXPLAIN ANALYZE is disabled. Enable it to continue.",
+        { modal: true },
+        "Enable"
+      );
+      if (enable !== "Enable") {
+        return;
+      }
+      await config.update(
+        EXPLAIN_ALLOW_ANALYZE_SETTING,
+        true,
+        vscode.ConfigurationTarget.Global
+      );
+    }
     const confirm = await vscode.window.showWarningMessage(
       EXPLAIN_ANALYZE_WARNING,
       { modal: true },
-      "Enable"
+      "Use EXPLAIN ANALYZE"
     );
-    if (confirm !== "Enable") {
+    if (confirm !== "Use EXPLAIN ANALYZE") {
       return;
     }
   }
@@ -701,7 +760,94 @@ async function setExplainModeFlow(): Promise<void> {
   }
 
   await config.update(EXPLAIN_MODE_SETTING, selection.value, vscode.ConfigurationTarget.Global);
+  await config.update(
+    LEGACY_EXPLAIN_MODE_SETTING,
+    selection.value,
+    vscode.ConfigurationTarget.Global
+  );
   vscode.window.showInformationMessage(`SQLCortex: EXPLAIN mode set to ${selection.label}.`);
+}
+
+function resolveExplainModeSetting(
+  config: vscode.WorkspaceConfiguration
+): ExplainMode {
+  const configured =
+    config.get<string>(EXPLAIN_MODE_SETTING) ??
+    config.get<string>(LEGACY_EXPLAIN_MODE_SETTING);
+  return configured === "EXPLAIN_ANALYZE" ? "EXPLAIN_ANALYZE" : "EXPLAIN";
+}
+
+function resolveAllowAnalyze(config: vscode.WorkspaceConfiguration): boolean {
+  return config.get<boolean>(EXPLAIN_ALLOW_ANALYZE_SETTING) ?? false;
+}
+
+function resolveDiagnosticsEnabled(config: vscode.WorkspaceConfiguration): boolean {
+  return config.get<boolean>(DIAGNOSTICS_ENABLED_SETTING) ?? false;
+}
+
+function resolveMaxSqlLength(config: vscode.WorkspaceConfiguration): number {
+  const value = config.get<number>(MAX_SQL_LENGTH_SETTING);
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  return DEFAULT_MAX_SQL_LENGTH;
+}
+
+async function confirmExplainAnalyze(
+  config: vscode.WorkspaceConfiguration,
+  mode: ExplainMode
+): Promise<boolean> {
+  if (mode !== "EXPLAIN_ANALYZE") {
+    return true;
+  }
+  if (!resolveAllowAnalyze(config)) {
+    const choice = await vscode.window.showWarningMessage(
+      "EXPLAIN ANALYZE is disabled. Enable sqlcortex.explain.allowAnalyze to proceed.",
+      "Open Settings"
+    );
+    if (choice === "Open Settings") {
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "sqlcortex.explain.allowAnalyze"
+      );
+    }
+    return false;
+  }
+  const confirm = await vscode.window.showWarningMessage(
+    EXPLAIN_ANALYZE_WARNING,
+    { modal: true },
+    "Run"
+  );
+  return confirm === "Run";
+}
+
+function resolveWorkspaceIdHash(): string {
+  const workspaceId =
+    vscode.workspace.workspaceFile?.fsPath ??
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+    "no-workspace";
+  return createHash("sha256").update(workspaceId, "utf8").digest("hex");
+}
+
+function resolveOrgId(
+  workspaceContext: ReturnType<typeof getWorkspaceContext>,
+  session: SessionSnapshot
+): string {
+  return (
+    workspaceContext.orgId ??
+    session.org?.id ??
+    session.user?.id ??
+    "personal"
+  );
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
 }
 
 async function searchTableFlow(
@@ -923,6 +1069,165 @@ async function runSelectionFlow(
   sidebarProvider?: SidebarProvider
 ): Promise<void> {
   await runSqlFlow("selection", context, tokenStore, output, statusBars, sidebarProvider);
+}
+
+type AnalyzeSelectionOptions = {
+  diagnostics: vscode.DiagnosticCollection;
+  forcedMode?: ExplainMode;
+};
+
+async function analyzeSelectionFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  options: AnalyzeSelectionOptions
+): Promise<void> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "SQLCortex: Select a connection before analyzing queries."
+    );
+    return;
+  }
+
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage("SQLCortex: Open a file to analyze SQL.");
+    return;
+  }
+
+  const selectionText = editor.selection.isEmpty
+    ? ""
+    : editor.document.getText(editor.selection);
+  if (!selectionText.trim()) {
+    vscode.window.showWarningMessage("SQLCortex: Select SQL to analyze.");
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration("sqlcortex");
+  const maxSqlLength = resolveMaxSqlLength(config);
+  if (selectionText.trim().length > maxSqlLength) {
+    vscode.window.showErrorMessage(
+      `SQLCortex: Selection is too large (max ${maxSqlLength} characters).`
+    );
+    return;
+  }
+
+  const extracted = extractSql(editor, "selection");
+  if (!extracted.sql) {
+    vscode.window.showWarningMessage("SQLCortex: Select SQL to analyze.");
+    return;
+  }
+
+  const validation = validateReadOnlySql(extracted.sql);
+  if (!validation.ok) {
+    vscode.window.showErrorMessage(`SQLCortex: ${validation.reason}`);
+    return;
+  }
+
+  const explainMode =
+    options.forcedMode ?? resolveExplainModeSetting(config);
+  const allowed = await confirmExplainAnalyze(config, explainMode);
+  if (!allowed) {
+    return;
+  }
+
+  updateSqlDiagnostics({
+    collection: options.diagnostics,
+    document: editor.document,
+    selection: editor.selection,
+    sql: selectionText,
+    enabled: resolveDiagnosticsEnabled(config),
+  });
+
+  const normalizedSql = normalizeSqlForHash(extracted.sql);
+  if (!normalizedSql) {
+    vscode.window.showWarningMessage("SQLCortex: SQL selection is empty.");
+    return;
+  }
+
+  const sqlHash = hashSql(normalizedSql);
+  const request: AnalyzeRequest = {
+    orgId: resolveOrgId(workspaceContext, auth.session),
+    projectId: workspaceContext.projectId,
+    source: "vscode" as const,
+    explainMode,
+    sqlHash,
+    connectionRef: workspaceContext.connectionId,
+    clientContext: {
+      extensionVersion: getExtensionVersion(context),
+      workspaceIdHash: resolveWorkspaceIdHash(),
+    },
+  };
+
+  QueryInsightsView.show(context).update({
+    kind: "loading",
+    data: { hash: sqlHash, mode: explainMode },
+  });
+
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  output.show(true);
+  output.appendLine(
+    `SQLCortex: Analyzing selection ${sqlHash.slice(0, 8)} (${explainMode}).`
+  );
+
+  try {
+    const response = await analyzeQuery(client, request);
+    const suggestions = normalizeStringList(
+      (response as { suggestions?: unknown }).suggestions
+    );
+    const insightsState = {
+      kind: "success" as const,
+      data: {
+        hash: sqlHash,
+        mode: explainMode,
+        findings: normalizeStringList(response.findings),
+        ai: normalizeStringList(response.ai),
+        suggestions,
+        warnings: normalizeStringList(response.warnings),
+        confidence: response.confidence ?? "low",
+        eventId: response.metering?.eventId ?? null,
+      },
+    };
+    QueryInsightsView.show(context).update(insightsState);
+
+    if (response.metering?.eventId) {
+      output.appendLine(`SQLCortex: Analysis event ${response.metering.eventId}.`);
+    }
+    vscode.window.showInformationMessage("SQLCortex: Analysis complete.");
+  } catch (err) {
+    const message = formatRequestError(err);
+    QueryInsightsView.show(context).update({
+      kind: "error",
+      error: { message },
+      data: { hash: sqlHash, mode: explainMode },
+    });
+    reportRequestError(output, "Analysis failed", err);
+  }
 }
 
 async function runSqlFlow(

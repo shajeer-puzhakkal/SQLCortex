@@ -1,5 +1,7 @@
 import type { ApiClient } from "./client";
 import type {
+  AnalyzeRequest,
+  AnalyzeResponse,
   ConnectionResource,
   ExecuteQueryRequest,
   ExecuteQueryResponse,
@@ -103,4 +105,11 @@ export async function executeQuery(
   request: ExecuteQueryRequest
 ): Promise<ExecuteQueryResponse> {
   return client.post<ExecuteQueryResponse>("/api/v1/query/execute", request);
+}
+
+export async function analyzeQuery(
+  client: ApiClient,
+  request: AnalyzeRequest
+): Promise<AnalyzeResponse> {
+  return client.post<AnalyzeResponse>("/analyze", request);
 }
