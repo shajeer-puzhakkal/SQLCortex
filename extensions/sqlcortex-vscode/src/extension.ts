@@ -1168,6 +1168,8 @@ async function analyzeSelectionFlow(
     projectId: workspaceContext.projectId,
     source: "vscode" as const,
     explainMode,
+    allowAnalyze: resolveAllowAnalyze(config),
+    sql: extracted.sql,
     sqlHash,
     connectionRef: workspaceContext.connectionId,
     clientContext: {
