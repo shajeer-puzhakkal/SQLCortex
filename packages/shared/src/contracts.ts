@@ -5,6 +5,8 @@ export type AnalyzeRequest = {
   projectId: string;
   source: "vscode";
   explainMode: ExplainMode;
+  allowAnalyze?: boolean;
+  sql: string;
   sqlHash: string;
   connectionRef: string;
   clientContext: {
@@ -13,13 +15,27 @@ export type AnalyzeRequest = {
   };
 };
 
+export type PlanSummary = {
+  totalCost: number | null;
+  planRows: number | null;
+  actualRows: number | null;
+  nodeTypes: string[];
+  hasSeqScan: boolean;
+  hasNestedLoop: boolean;
+  hasSort: boolean;
+  hasHashJoin: boolean;
+  hasBitmapHeapScan: boolean;
+  hasMisestimation: boolean;
+};
+
 export type AnalyzeResponse = {
+  planSummary: PlanSummary;
   findings: string[];
   ai: string[];
   confidence: "low" | "medium" | "high";
   warnings: string[];
   metering: {
-    eventId: string;
+    eventId: string | null;
     aiUsed: boolean;
     tokensEstimated: number | null;
   };

@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
-import { hashSql, normalizeSql, redactError } from "../../packages/shared/src";
-import type { ExplainMode, MeterEvent } from "../../packages/shared/src/contracts";
+import { hashSql, normalizeSql, redactError } from "../../../packages/shared/src";
+import type { ExplainMode, MeterEvent } from "../../../packages/shared/src/contracts";
 
 type MeterEventInput = {
   orgId: string | null;

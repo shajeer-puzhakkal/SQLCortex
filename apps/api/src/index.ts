@@ -4,6 +4,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { OrgRole, Prisma, PrismaClient } from "@prisma/client";
 import {
+  AnalyzeRequest,
+  AnalyzeResponse,
   AnalysisCreateRequest,
   AnalysisCreateResponse,
   AnalysisGetResponse,
@@ -12,6 +14,7 @@ import {
   ErrorResponse,
   HealthResponse,
   ExplainMode,
+  PlanSummary,
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
@@ -50,7 +53,7 @@ import {
 import { createRateLimitMiddleware } from "./rateLimit";
 import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
 import { recordMeterEvent } from "./metering";
-import { redactError } from "../../packages/shared/src";
+import { redactError } from "../../../packages/shared/src";
 
 dotenv.config();
 
@@ -1093,6 +1096,167 @@ function extractExplainJson(rows: unknown[]): unknown | null {
   return record[keys[0]] ?? null;
 }
 
+type PlanNode = Record<string, unknown>;
+const MIS_ESTIMATION_RATIO = 10;
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function readInt(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null) {
+    return null;
+  }
+  return Math.max(0, Math.round(parsed));
+}
+
+function readNodeType(node: PlanNode): string | null {
+  const raw = node["Node Type"] ?? node["Operation"];
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : null;
+}
+
+function isPlanNode(node: PlanNode): boolean {
+  return (
+    typeof node["Node Type"] === "string" ||
+    typeof node["Operation"] === "string" ||
+    Array.isArray(node["Plans"])
+  );
+}
+
+function extractPlanRoots(explainJson: unknown): PlanNode[] {
+  if (Array.isArray(explainJson)) {
+    const roots: PlanNode[] = [];
+    for (const entry of explainJson) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const record = entry as PlanNode;
+      const plan = record["Plan"];
+      if (plan && typeof plan === "object" && !Array.isArray(plan)) {
+        roots.push(plan as PlanNode);
+      } else if (isPlanNode(record)) {
+        roots.push(record);
+      }
+    }
+    return roots;
+  }
+
+  if (explainJson && typeof explainJson === "object" && !Array.isArray(explainJson)) {
+    const record = explainJson as PlanNode;
+    const plan = record["Plan"];
+    if (plan && typeof plan === "object" && !Array.isArray(plan)) {
+      return [plan as PlanNode];
+    }
+    if (isPlanNode(record)) {
+      return [record];
+    }
+  }
+
+  return [];
+}
+
+function parsePlanSummary(explainJson: unknown): PlanSummary {
+  const roots = extractPlanRoots(explainJson);
+  if (roots.length === 0) {
+    throw new Error("EXPLAIN JSON missing Plan node");
+  }
+
+  const nodeTypes = new Set<string>();
+  let hasSeqScan = false;
+  let hasNestedLoop = false;
+  let hasSort = false;
+  let hasHashJoin = false;
+  let hasBitmapHeapScan = false;
+  let hasMisestimation = false;
+
+  const visit = (node: PlanNode): void => {
+    const nodeType = readNodeType(node);
+    if (nodeType) {
+      nodeTypes.add(nodeType);
+      const normalized = nodeType.toLowerCase();
+      if (normalized === "seq scan") {
+        hasSeqScan = true;
+      } else if (normalized === "nested loop") {
+        hasNestedLoop = true;
+      } else if (normalized === "sort") {
+        hasSort = true;
+      } else if (normalized === "hash join") {
+        hasHashJoin = true;
+      } else if (normalized === "bitmap heap scan") {
+        hasBitmapHeapScan = true;
+      }
+    }
+
+    if (!hasMisestimation) {
+      const planRows = readInt(node["Plan Rows"]);
+      const actualRows = readInt(node["Actual Rows"]);
+      const loops = readInt(node["Actual Loops"]) ?? 1;
+      const totalActualRows = actualRows !== null ? actualRows * Math.max(1, loops) : null;
+      if (planRows !== null && totalActualRows !== null) {
+        if (planRows === 0) {
+          if (totalActualRows > 0) {
+            hasMisestimation = true;
+          }
+        } else {
+          const ratio = totalActualRows / planRows;
+          if (ratio >= MIS_ESTIMATION_RATIO || ratio <= 1 / MIS_ESTIMATION_RATIO) {
+            hasMisestimation = true;
+          }
+        }
+      }
+    }
+
+    const children = node["Plans"];
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        if (child && typeof child === "object" && !Array.isArray(child)) {
+          visit(child as PlanNode);
+        }
+      }
+    }
+  };
+
+  for (const root of roots) {
+    visit(root);
+  }
+
+  const root = roots[0];
+  const totalCost = readNumber(root["Total Cost"]);
+  const planRows = readInt(root["Plan Rows"]);
+  const actualRows = readInt(root["Actual Rows"]);
+  const loops = readInt(root["Actual Loops"]) ?? 1;
+  const totalActualRows = actualRows !== null ? actualRows * Math.max(1, loops) : null;
+
+  return {
+    totalCost,
+    planRows,
+    actualRows: totalActualRows,
+    nodeTypes: Array.from(nodeTypes).sort(),
+    hasSeqScan,
+    hasNestedLoop,
+    hasSort,
+    hasHashJoin,
+    hasBitmapHeapScan,
+    hasMisestimation,
+  };
+}
+
 async function collectAiMetadata(
   connectionString: string,
   sql: string
@@ -1262,14 +1426,14 @@ async function recordQueryExecution(params: {
         ("id", "sql", "source", "execution_time_ms", "rows_returned", "project_id", "user_id", "org_id", "client_extension_version", "client_vscode_version")
       VALUES
         (
-          ${params.queryId},
+          ${params.queryId}::uuid,
           ${params.sql},
           ${params.source},
           ${params.executionTimeMs},
           ${params.rowsReturned},
-          ${params.projectId},
-          ${params.userId},
-          ${params.orgId},
+          ${params.projectId}::uuid,
+          ${params.userId}::uuid,
+          ${params.orgId}::uuid,
           ${params.client?.extensionVersion ?? null},
           ${params.client?.vscodeVersion ?? null}
         )
@@ -3054,6 +3218,186 @@ app.post(
       columns,
       rows,
       error,
+    };
+
+    return res.json(response);
+  }
+);
+
+app.post(
+  "/analyze",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, AnalyzeRequest>,
+    res: Response<AnalyzeResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const body = req.body;
+    const sql = body?.sql;
+    if (!sql || typeof sql !== "string" || sql.trim().length === 0) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
+    }
+    if (!body?.projectId || typeof body.projectId !== "string") {
+      return res.status(400).json(makeError("INVALID_INPUT", "`projectId` is required"));
+    }
+    if (!body?.connectionRef || typeof body.connectionRef !== "string") {
+      return res.status(400).json(makeError("INVALID_INPUT", "`connectionRef` is required"));
+    }
+    if (!body?.sqlHash || typeof body.sqlHash !== "string") {
+      return res.status(400).json(makeError("INVALID_INPUT", "`sqlHash` is required"));
+    }
+
+    if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
+      return res
+        .status(400)
+        .json(
+          makeError(
+            "SQL_NOT_READ_ONLY",
+            "Only SELECT, WITH, or EXPLAIN statements are permitted"
+          )
+        );
+    }
+
+    const firstKeyword = extractFirstKeyword(stripSqlCommentsAndLiterals(sql));
+    if (firstKeyword && firstKeyword.toLowerCase() === "explain") {
+      return res.status(400).json(
+        makeError(
+          "INVALID_INPUT",
+          "Provide a SELECT or WITH statement. EXPLAIN is run server-side."
+        )
+      );
+    }
+
+    const explainMode = normalizeExplainMode(body.explainMode);
+    if (explainMode === "EXPLAIN_ANALYZE" && body.allowAnalyze !== true) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "EXPLAIN ANALYZE is disabled for this request."));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      body.projectId,
+      body.connectionRef
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const normalizedSql = normalizeSql(sql);
+    const explainClause =
+      explainMode === "EXPLAIN_ANALYZE"
+        ? "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)"
+        : "EXPLAIN (FORMAT JSON)";
+    const meterStartedAt = Date.now();
+    let explainJson: unknown | null = null;
+
+    try {
+      const explainRows = await runConnectionQuery<unknown[]>(
+        connectionContext.connectionString,
+        `${explainClause} ${normalizedSql}`
+      );
+      explainJson = extractExplainJson(explainRows);
+    } catch (err) {
+      const errorResponse = formatQueryError(err);
+      const status = errorResponse.code === "ANALYZER_TIMEOUT" ? 504 : 400;
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: "query_analysis",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: errorResponse.code ?? "ANALYZER_ERROR",
+        explainMode,
+      });
+      return res.status(status).json(errorResponse);
+    }
+
+    if (!explainJson) {
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: "query_analysis",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: "INVALID_EXPLAIN_JSON",
+        explainMode,
+      });
+      return res
+        .status(400)
+        .json(makeError("INVALID_EXPLAIN_JSON", "EXPLAIN did not return JSON output"));
+    }
+
+    let planSummary: PlanSummary;
+    try {
+      planSummary = parsePlanSummary(explainJson);
+    } catch (err) {
+      const reason = redactError(err);
+      void recordMeterEvent(prisma, {
+        orgId: connectionContext.orgId ?? auth.orgId ?? null,
+        projectId: connectionContext.projectId,
+        userId: auth.userId ?? null,
+        source: "vscode",
+        eventType: "query_analysis",
+        aiUsed: false,
+        model: null,
+        tokensEstimated: null,
+        sql,
+        durationMs: Date.now() - meterStartedAt,
+        status: "error",
+        errorCode: "INVALID_EXPLAIN_JSON",
+        explainMode,
+      });
+      return res
+        .status(400)
+        .json(makeError("INVALID_EXPLAIN_JSON", "Invalid EXPLAIN JSON output.", { reason }));
+    }
+
+    const eventId = await recordMeterEvent(prisma, {
+      orgId: connectionContext.orgId ?? auth.orgId ?? null,
+      projectId: connectionContext.projectId,
+      userId: auth.userId ?? null,
+      source: "vscode",
+      eventType: "query_analysis",
+      aiUsed: false,
+      model: null,
+      tokensEstimated: null,
+      sql,
+      durationMs: Date.now() - meterStartedAt,
+      status: "success",
+      errorCode: null,
+      explainMode,
+    });
+
+    const response: AnalyzeResponse = {
+      planSummary,
+      findings: [],
+      ai: [],
+      confidence: "low",
+      warnings: [],
+      metering: {
+        eventId,
+        aiUsed: false,
+        tokensEstimated: null,
+      },
     };
 
     return res.json(response);

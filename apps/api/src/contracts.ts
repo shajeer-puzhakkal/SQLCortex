@@ -5,7 +5,8 @@ import type {
   DashboardMetricsResponse,
   ExplainMode,
   MeterEvent,
-} from "../../packages/shared/src/contracts";
+  PlanSummary,
+} from "../../../packages/shared/src/contracts";
 
 export type {
   AnalyzeRequest,
@@ -13,6 +14,7 @@ export type {
   DashboardMetricsResponse,
   ExplainMode,
   MeterEvent,
+  PlanSummary,
 };
 
 export type ErrorCode =

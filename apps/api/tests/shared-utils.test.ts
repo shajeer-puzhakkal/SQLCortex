@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hashSql, normalizeSql, redactError } from "../../packages/shared/src";
+import { hashSql, normalizeSql, redactError } from "../../../packages/shared/src";
 
 test("normalizeSql removes comments and collapses whitespace", () => {
   const input = "SELECT  *  -- comment\nFROM users /* block */ WHERE id = 1";

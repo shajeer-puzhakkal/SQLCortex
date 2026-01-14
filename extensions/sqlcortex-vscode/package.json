@@ -80,6 +80,14 @@
       {
         "command": "sqlcortex.analyzeSelectionWithAnalyze",
         "title": "SQLCortex: Analyze Selection (EXPLAIN ANALYZE)"
+      },
+      {
+        "command": "sqlcortex.analyzeDocument",
+        "title": "SQLCortex: Analyze Query"
+      },
+      {
+        "command": "sqlcortex.analyzeDocumentWithAnalyze",
+        "title": "SQLCortex: Analyze Query (EXPLAIN ANALYZE)"
       }
     ],
     "configuration": {
@@ -117,6 +125,11 @@
           "type": "boolean",
           "default": false,
           "description": "Enable inline diagnostics for basic SQL anti-patterns."
+        },
+        "sqlcortex.codelens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show SQLCortex analyze actions above SQL files."
         }
       }
     },
