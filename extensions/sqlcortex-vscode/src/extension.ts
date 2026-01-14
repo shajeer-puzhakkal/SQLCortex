@@ -37,6 +37,7 @@ import { createStatusBarItems, updateStatusBar, type StatusBarItems } from "./ui
 import { ResultsPanel } from "./ui/resultsPanel";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
+import { AnalyzeCodeLensProvider } from "./ui/analyzeCodeLens";
 import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { SidebarProvider } from "./ui/tree/sidebarProvider";
@@ -61,6 +62,8 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.runSelection", label: "Run Selection" },
   { id: "sqlcortex.analyzeSelection", label: "Analyze Selection" },
   { id: "sqlcortex.analyzeSelectionWithAnalyze", label: "Analyze Selection (EXPLAIN ANALYZE)" },
+  { id: "sqlcortex.analyzeDocument", label: "Analyze Query" },
+  { id: "sqlcortex.analyzeDocumentWithAnalyze", label: "Analyze Query (EXPLAIN ANALYZE)" },
 ];
 
 const API_BASE_URL_KEY = "sqlcortex.apiBaseUrl";
@@ -174,6 +177,20 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(completionDisposable);
 
+  const codeLensProvider = new AnalyzeCodeLensProvider();
+  const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+    [
+      { language: "sql", scheme: "file" },
+      { language: "sql", scheme: "untitled" },
+      { language: "pgsql", scheme: "file" },
+      { language: "pgsql", scheme: "untitled" },
+      { language: "mssql", scheme: "file" },
+      { language: "mssql", scheme: "untitled" },
+    ],
+    codeLensProvider
+  );
+  context.subscriptions.push(codeLensDisposable);
+
   const handlers: Record<string, (...args: unknown[]) => Thenable<unknown>> = {
     "sqlcortex.login": async () => {
       const didLogin = await loginFlow(context, tokenStore, output);
@@ -266,6 +283,19 @@ export function activate(context: vscode.ExtensionContext) {
     "sqlcortex.analyzeSelectionWithAnalyze": async () => {
       await analyzeSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider, {
         diagnostics,
+        forcedMode: "EXPLAIN_ANALYZE",
+      });
+    },
+    "sqlcortex.analyzeDocument": async () => {
+      await analyzeSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider, {
+        diagnostics,
+        mode: "smart",
+      });
+    },
+    "sqlcortex.analyzeDocumentWithAnalyze": async () => {
+      await analyzeSelectionFlow(context, tokenStore, output, statusBars, sidebarProvider, {
+        diagnostics,
+        mode: "smart",
         forcedMode: "EXPLAIN_ANALYZE",
       });
     },
@@ -1074,6 +1104,7 @@ async function runSelectionFlow(
 type AnalyzeSelectionOptions = {
   diagnostics: vscode.DiagnosticCollection;
   forcedMode?: ExplainMode;
+  mode?: ExtractMode;
 };
 
 async function analyzeSelectionFlow(
@@ -1129,7 +1160,7 @@ async function analyzeSelectionFlow(
     return;
   }
 
-  const extracted = extractSql(editor, "selection");
+  const extracted = extractSql(editor, options.mode ?? "selection");
   if (!extracted.sql) {
     vscode.window.showWarningMessage("SQLCortex: Select SQL to analyze.");
     return;
