@@ -40,7 +40,9 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
     ResultsPanel.currentProvider = provider;
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider("sqlcortex.resultsView", provider, {
-        retainContextWhenHidden: true,
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
       })
     );
     return provider;

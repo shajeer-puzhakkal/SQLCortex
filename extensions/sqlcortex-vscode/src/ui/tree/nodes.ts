@@ -37,12 +37,12 @@ type NodeKind =
   | "error"
   | "loading";
 
-abstract class BaseNode extends vscode.TreeItem {
-  readonly kind: NodeKind;
+abstract class BaseNode<K extends NodeKind> extends vscode.TreeItem {
+  readonly kind: K;
   readonly parent?: DbExplorerNode;
 
   protected constructor(
-    kind: NodeKind,
+    kind: K,
     label: string,
     collapsibleState: vscode.TreeItemCollapsibleState,
     parent?: DbExplorerNode
@@ -53,7 +53,7 @@ abstract class BaseNode extends vscode.TreeItem {
   }
 }
 
-export class ActionNode extends BaseNode {
+export class ActionNode extends BaseNode<"action"> {
   constructor(label: string, commandId: string, parent?: DbExplorerNode) {
     super("action", label, vscode.TreeItemCollapsibleState.None, parent);
     this.contextValue = "sqlcortex.action";
@@ -61,7 +61,7 @@ export class ActionNode extends BaseNode {
   }
 }
 
-export class ConnectionNode extends BaseNode {
+export class ConnectionNode extends BaseNode<"connection"> {
   readonly connection: ConnectionResource;
 
   constructor(connection: ConnectionResource, parent?: DbExplorerNode) {
@@ -75,7 +75,7 @@ export class ConnectionNode extends BaseNode {
   }
 }
 
-export class SchemasRootNode extends BaseNode {
+export class SchemasRootNode extends BaseNode<"schemasRoot"> {
   readonly connectionId: string;
 
   constructor(connectionId: string, parent?: DbExplorerNode) {
@@ -87,7 +87,7 @@ export class SchemasRootNode extends BaseNode {
   }
 }
 
-export class SchemaNode extends BaseNode {
+export class SchemaNode extends BaseNode<"schema"> {
   readonly connectionId: string;
   readonly schemaName: string;
 
@@ -101,7 +101,7 @@ export class SchemaNode extends BaseNode {
   }
 }
 
-export class SchemaSectionNode extends BaseNode {
+export class SchemaSectionNode extends BaseNode<"schemaSection"> {
   readonly connectionId: string;
   readonly schemaName: string;
   readonly sectionType: SchemaSectionType;
@@ -134,7 +134,7 @@ export class SchemaSectionNode extends BaseNode {
   }
 }
 
-export class TableNode extends BaseNode {
+export class TableNode extends BaseNode<"table"> {
   readonly connectionId: string;
   readonly schemaName: string;
   readonly table: SchemaTableResource;
@@ -156,7 +156,7 @@ export class TableNode extends BaseNode {
   }
 }
 
-export class ColumnsRootNode extends BaseNode {
+export class ColumnsRootNode extends BaseNode<"columnsRoot"> {
   readonly connectionId: string;
   readonly schemaName: string;
   readonly tableName: string;
@@ -177,7 +177,7 @@ export class ColumnsRootNode extends BaseNode {
   }
 }
 
-export class ConstraintsRootNode extends BaseNode {
+export class ConstraintsRootNode extends BaseNode<"constraintsRoot"> {
   readonly connectionId: string;
   readonly schemaName: string;
   readonly tableName: string;
@@ -198,7 +198,7 @@ export class ConstraintsRootNode extends BaseNode {
   }
 }
 
-export class ColumnNode extends BaseNode {
+export class ColumnNode extends BaseNode<"column"> {
   readonly connectionId: string;
   readonly schemaName: string;
   readonly tableName: string;
@@ -231,7 +231,7 @@ type ConstraintInfo = {
   icon?: string;
 };
 
-export class ConstraintNode extends BaseNode {
+export class ConstraintNode extends BaseNode<"constraint"> {
   readonly constraint: ConstraintInfo;
 
   constructor(constraint: ConstraintInfo, parent?: DbExplorerNode) {
@@ -246,7 +246,7 @@ export class ConstraintNode extends BaseNode {
   }
 }
 
-export class InfoNode extends BaseNode {
+export class InfoNode extends BaseNode<"info"> {
   constructor(label: string, parent?: DbExplorerNode) {
     super("info", label, vscode.TreeItemCollapsibleState.None, parent);
     this.contextValue = "sqlcortex.info";
@@ -254,7 +254,7 @@ export class InfoNode extends BaseNode {
   }
 }
 
-export class ErrorNode extends BaseNode {
+export class ErrorNode extends BaseNode<"error"> {
   constructor(label: string, commandId: string, parent?: DbExplorerNode) {
     super("error", label, vscode.TreeItemCollapsibleState.None, parent);
     this.contextValue = "sqlcortex.error";
@@ -263,7 +263,7 @@ export class ErrorNode extends BaseNode {
   }
 }
 
-export class LoadingNode extends BaseNode {
+export class LoadingNode extends BaseNode<"loading"> {
   constructor(label = "Loading...", parent?: DbExplorerNode) {
     super("loading", label, vscode.TreeItemCollapsibleState.None, parent);
     this.contextValue = "sqlcortex.loading";

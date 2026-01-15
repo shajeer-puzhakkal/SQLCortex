@@ -10,15 +10,24 @@ import {
   AnalysisCreateResponse,
   AnalysisGetResponse,
   AnalysisListResponse,
+  AiInsight,
   AiSqlResponse,
   ErrorResponse,
   HealthResponse,
   ExplainMode,
   PlanSummary,
+  RuleFinding,
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
-import { AiServiceError, AiSqlAction, AiSqlPayload, callAiSqlService } from "./aiClient";
+import {
+  AiInsightsPayload,
+  AiServiceError,
+  AiSqlAction,
+  AiSqlPayload,
+  callAiInsightsService,
+  callAiSqlService,
+} from "./aiClient";
 import {
   ensureDefaultPlans,
   getPlanContext,
@@ -53,6 +62,7 @@ import {
 import { createRateLimitMiddleware } from "./rateLimit";
 import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
 import { recordMeterEvent } from "./metering";
+import { evaluate } from "./rules";
 import { redactError } from "../../../packages/shared/src";
 
 dotenv.config();
@@ -922,6 +932,19 @@ function normalizeExplainMode(value: unknown): ExplainMode {
   return EXPLAIN_MODE_VALUES.includes(normalized as ExplainMode)
     ? (normalized as ExplainMode)
     : "EXPLAIN";
+}
+
+function estimateAiTokens(input: {
+  sql: string;
+  planSummary: PlanSummary;
+  findings: RuleFinding[];
+}): number {
+  const payload = JSON.stringify({
+    sql: input.sql,
+    planSummary: input.planSummary,
+    findings: input.findings,
+  });
+  return Math.max(1, Math.ceil(payload.length / 4));
 }
 
 function normalizeSql(sql: string): string {
@@ -3371,15 +3394,95 @@ app.post(
         .json(makeError("INVALID_EXPLAIN_JSON", "Invalid EXPLAIN JSON output.", { reason }));
     }
 
+    const { findings: ruleFindings } = evaluate({
+      sqlTextInMemory: sql,
+      planSummary,
+    });
+
+    const warnings: string[] = [];
+    if (explainMode === "EXPLAIN") {
+      warnings.push("Plan is based on estimates only; runtime behavior may differ.");
+    }
+
+    let aiInsight: AiInsight | null = null;
+    let aiUsed = false;
+    let tokensEstimated: number | null = null;
+
+    const quotaSubject = connectionContext.orgId
+      ? ({ subjectType: "ORG", orgId: connectionContext.orgId } as const)
+      : auth.userId
+        ? ({ subjectType: "USER", userId: auth.userId } as const)
+        : auth.orgId
+          ? ({ subjectType: "ORG", orgId: auth.orgId } as const)
+          : null;
+
+    if (quotaSubject) {
+      const planContext = await getPlanContext(prisma, quotaSubject);
+      const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
+      const now = new Date();
+      const llmAccess = aiFeatureStatus.enabled
+        ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
+        : null;
+      const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+
+      if (llmEnabled) {
+        const aiPayload: AiInsightsPayload = {
+          plan_summary: planSummary,
+          rule_findings: ruleFindings,
+          user_intent: null,
+        };
+
+        try {
+          const aiResponse = await callAiInsightsService(aiPayload);
+          aiInsight = {
+            explanation: aiResponse.explanation,
+            suggestions: aiResponse.suggestions,
+            warnings: aiResponse.warnings,
+            assumptions: aiResponse.assumptions,
+          };
+          aiUsed = true;
+          tokensEstimated = estimateAiTokens({
+            sql,
+            planSummary,
+            findings: ruleFindings,
+          });
+          await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+        } catch (err) {
+          console.error("Failed to fetch AI insights", err);
+          warnings.push("AI explanation is temporarily unavailable.");
+        }
+      } else {
+        if (!aiFeatureStatus.enabled) {
+          warnings.push(
+            aiFeatureStatus.reason === "org_disabled"
+              ? "AI is disabled for this organization."
+              : "AI is disabled for this project."
+          );
+        } else if (llmAccess?.reason === "plan_disabled") {
+          warnings.push("AI is disabled for your current plan.");
+        } else if (llmAccess?.reason === "limit_reached") {
+          const limit = typeof llmAccess.limit === "number" ? llmAccess.limit : null;
+          const used = typeof llmAccess.used === "number" ? llmAccess.used : null;
+          warnings.push(
+            limit !== null && used !== null
+              ? `AI usage limit reached (${used}/${limit}) for this period.`
+              : "AI usage limit reached for this period."
+          );
+        }
+      }
+    } else {
+      warnings.push("AI is unavailable for this request.");
+    }
+
     const eventId = await recordMeterEvent(prisma, {
       orgId: connectionContext.orgId ?? auth.orgId ?? null,
       projectId: connectionContext.projectId,
       userId: auth.userId ?? null,
       source: "vscode",
       eventType: "query_analysis",
-      aiUsed: false,
+      aiUsed,
       model: null,
-      tokensEstimated: null,
+      tokensEstimated,
       sql,
       durationMs: Date.now() - meterStartedAt,
       status: "success",
@@ -3389,14 +3492,13 @@ app.post(
 
     const response: AnalyzeResponse = {
       planSummary,
-      findings: [],
-      ai: [],
-      confidence: "low",
-      warnings: [],
+      findings: ruleFindings,
+      ai: aiInsight,
+      warnings,
       metering: {
         eventId,
-        aiUsed: false,
-        tokensEstimated: null,
+        aiUsed,
+        tokensEstimated,
       },
     };
 

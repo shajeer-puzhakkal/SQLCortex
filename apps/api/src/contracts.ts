@@ -4,6 +4,9 @@ import type {
   AnalyzeResponse,
   DashboardMetricsResponse,
   ExplainMode,
+  RuleFinding,
+  AiInsight,
+  AiSuggestion,
   MeterEvent,
   PlanSummary,
 } from "../../../packages/shared/src/contracts";
@@ -13,6 +16,9 @@ export type {
   AnalyzeResponse,
   DashboardMetricsResponse,
   ExplainMode,
+  RuleFinding,
+  AiInsight,
+  AiSuggestion,
   MeterEvent,
   PlanSummary,
 };

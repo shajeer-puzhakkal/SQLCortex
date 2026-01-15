@@ -35,3 +35,18 @@ def render_prompt(
         project_id=project_id,
         user_intent=user_intent or "None",
     )
+
+
+def render_insights_prompt(
+    *,
+    plan_summary: Any,
+    rule_findings: Any,
+    user_intent: Optional[str],
+) -> str:
+    template_path = _PROMPT_DIR / "insights.md"
+    template = template_path.read_text(encoding="utf-8")
+    return template.format(
+        plan_summary=_stringify(plan_summary),
+        rule_findings=_stringify(rule_findings),
+        user_intent=user_intent or "None",
+    )
