@@ -194,6 +194,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       return [new ActionNode("Select Project", "sqlcortex.selectProject")];
     }
 
+    const projectId = workspace.projectId;
     if (!workspace.connectionId) {
       return [new ActionNode("Select Connection", "sqlcortex.selectConnection")];
     }
@@ -206,7 +207,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     const client = this.deps.createAuthorizedClient(auth);
     try {
       const connections = await this.withProgress("Loading connections...", () =>
-        listConnections(client, workspace.projectId)
+        listConnections(client, projectId)
       );
       const connection = connections.find((item) => item.id === workspace.connectionId);
       if (!connection) {
@@ -225,6 +226,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
     }
 
+    const projectId = workspace.projectId;
     const auth = await this.deps.resolveAuthContext();
     if (!auth) {
       return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
@@ -233,7 +235,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     const client = this.deps.createAuthorizedClient(auth);
     try {
       const schemas = await this.withProgress("Loading schemas...", () =>
-        this.fetchSchemas(client, workspace.projectId, element.connectionId)
+        this.fetchSchemas(client, projectId, element.connectionId)
       );
       if (schemas.length === 0) {
         return [new ErrorNode("No schemas found.", "sqlcortex.refreshExplorer", element)];
@@ -265,6 +267,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
     }
 
+    const projectId = workspace.projectId;
     const auth = await this.deps.resolveAuthContext();
     if (!auth) {
       return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
@@ -274,7 +277,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     const label = tableType === "view" ? "views" : "tables";
     try {
       const tables = await this.withProgress(`Loading ${label}...`, () =>
-        this.fetchTables(client, workspace.projectId, element.connectionId, element.schemaName)
+        this.fetchTables(client, projectId, element.connectionId, element.schemaName)
       );
       const filtered = tables.filter((table) => table.type === tableType);
       if (filtered.length === 0) {
@@ -312,6 +315,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
     }
 
+    const projectId = workspace.projectId;
     const auth = await this.deps.resolveAuthContext();
     if (!auth) {
       return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
@@ -322,7 +326,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       const columns = await this.withProgress("Loading columns...", () =>
         this.fetchColumns(
           client,
-          workspace.projectId,
+          projectId,
           element.connectionId,
           element.schemaName,
           element.tableName
@@ -377,6 +381,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
     }
 
+    const projectId = workspace.projectId;
     const auth = await this.deps.resolveAuthContext();
     if (!auth) {
       return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
@@ -387,7 +392,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       const constraints = await this.withProgress("Loading constraints...", () =>
         this.fetchConstraints(
           client,
-          workspace.projectId,
+          projectId,
           element.connectionId,
           element.schemaName,
           element.tableName

@@ -10,10 +10,14 @@ export type ApiClientOptions = {
   onUnauthorized?: () => void | Promise<void>;
 };
 
+type ApiRequestInit = Omit<RequestInit, "body"> & {
+  body?: BodyInit | Record<string, unknown> | null;
+};
+
 export type ApiClient = {
-  get<T>(path: string, init?: RequestInit): Promise<T>;
-  post<T>(path: string, body?: unknown, init?: RequestInit): Promise<T>;
-  request<T>(path: string, init?: RequestInit & { body?: unknown }): Promise<T>;
+  get<T>(path: string, init?: ApiRequestInit): Promise<T>;
+  post<T>(path: string, body?: BodyInit | Record<string, unknown> | null, init?: ApiRequestInit): Promise<T>;
+  request<T>(path: string, init?: ApiRequestInit): Promise<T>;
 };
 
 export class ApiClientError extends Error {
@@ -47,10 +51,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  const request = async <T>(
-    path: string,
-    init: RequestInit & { body?: unknown } = {}
-  ): Promise<T> => {
+  const request = async <T>(path: string, init: ApiRequestInit = {}): Promise<T> => {
     const url = buildUrl(baseUrl, path);
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");

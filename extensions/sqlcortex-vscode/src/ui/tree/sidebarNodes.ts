@@ -4,12 +4,12 @@ export type SidebarNode = SidebarSectionNode | SidebarInfoNode | SidebarActionNo
 
 type NodeKind = "section" | "info" | "action";
 
-abstract class SidebarBaseNode extends vscode.TreeItem {
-  readonly kind: NodeKind;
+abstract class SidebarBaseNode<K extends NodeKind> extends vscode.TreeItem {
+  readonly kind: K;
   readonly parent?: SidebarNode;
 
   protected constructor(
-    kind: NodeKind,
+    kind: K,
     label: string,
     collapsibleState: vscode.TreeItemCollapsibleState,
     parent?: SidebarNode
@@ -20,7 +20,7 @@ abstract class SidebarBaseNode extends vscode.TreeItem {
   }
 }
 
-export class SidebarSectionNode extends SidebarBaseNode {
+export class SidebarSectionNode extends SidebarBaseNode<"section"> {
   readonly children: SidebarNode[];
 
   constructor(label: string, children: SidebarNode[]) {
@@ -30,7 +30,7 @@ export class SidebarSectionNode extends SidebarBaseNode {
   }
 }
 
-export class SidebarInfoNode extends SidebarBaseNode {
+export class SidebarInfoNode extends SidebarBaseNode<"info"> {
   constructor(
     label: string,
     options: {
@@ -53,7 +53,7 @@ export class SidebarInfoNode extends SidebarBaseNode {
   }
 }
 
-export class SidebarActionNode extends SidebarBaseNode {
+export class SidebarActionNode extends SidebarBaseNode<"action"> {
   constructor(
     label: string,
     commandId: string,

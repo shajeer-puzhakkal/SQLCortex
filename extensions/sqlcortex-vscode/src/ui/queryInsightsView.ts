@@ -10,10 +10,10 @@ export type QueryInsightsState =
         hash: string;
         mode: ExplainMode;
         findings: string[];
-        ai: string[];
         suggestions: string[];
         warnings: string[];
-        confidence: "low" | "medium" | "high";
+        assumptions: string[];
+        explanation: string | null;
         eventId: string | null;
       };
     }
@@ -305,6 +305,10 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           <h2>Warnings</h2>
           <div id="warnings"></div>
         </section>
+        <section class="section">
+          <h2>Assumptions</h2>
+          <div id="assumptions"></div>
+        </section>
       </div>
 
       <div class="footer">
@@ -322,6 +326,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       const aiEl = document.getElementById("ai");
       const suggestionsEl = document.getElementById("suggestions");
       const warningsEl = document.getElementById("warnings");
+      const assumptionsEl = document.getElementById("assumptions");
       const eventIdEl = document.getElementById("eventId");
 
       function formatMode(value) {
@@ -372,6 +377,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           renderList(aiEl, [], "No AI explanation yet.");
           renderList(suggestionsEl, [], "No suggestions yet.");
           renderList(warningsEl, [], "No warnings.");
+          renderList(assumptionsEl, [], "No assumptions.");
           eventIdEl.textContent = "-";
           return;
         }
@@ -384,6 +390,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           renderList(aiEl, [], "Analyzing...");
           renderList(suggestionsEl, [], "Analyzing...");
           renderList(warningsEl, [], "Analyzing...");
+          renderList(assumptionsEl, [], "Analyzing...");
           eventIdEl.textContent = "-";
           return;
         }
@@ -396,17 +403,23 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           renderList(aiEl, [], "No AI explanation.");
           renderList(suggestionsEl, [], "No suggestions.");
           renderList(warningsEl, [], "No warnings.");
+          renderList(assumptionsEl, [], "No assumptions.");
           eventIdEl.textContent = "-";
           return;
         }
 
-        subtitle.textContent = "Confidence: " + state.data.confidence.toUpperCase();
+        subtitle.textContent = "Analysis complete.";
         setMeta(state.data.hash, state.data.mode);
         setStatus("Analysis complete.", false);
         renderList(findingsEl, state.data.findings, "No findings.");
-        renderList(aiEl, state.data.ai, "No AI explanation.");
+        renderList(
+          aiEl,
+          state.data.explanation ? [state.data.explanation] : [],
+          "No AI explanation."
+        );
         renderList(suggestionsEl, state.data.suggestions, "No suggestions.");
         renderList(warningsEl, state.data.warnings, "No warnings.");
+        renderList(assumptionsEl, state.data.assumptions, "No assumptions.");
         eventIdEl.textContent = state.data.eventId || "-";
       }
 

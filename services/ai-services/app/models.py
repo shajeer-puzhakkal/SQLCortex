@@ -100,3 +100,32 @@ class AiSqlResponse(BaseModel):
     risk_level: Literal["low", "medium", "high"]
     meta: AiSqlResponseMeta
 
+
+class RuleFindingPayload(BaseModel):
+    code: str
+    severity: Literal["info", "warn", "high"]
+    message: str
+    recommendation: str
+    rationale: str
+
+
+class AiInsightsRequest(BaseModel):
+    plan_summary: Dict[str, Any]
+    rule_findings: List[RuleFindingPayload]
+    user_intent: Optional[str] = None
+
+
+class AiInsightSuggestion(BaseModel):
+    title: str
+    description: str
+    confidence: Literal["low", "medium", "high"]
+    tradeoffs: List[str] = Field(default_factory=list)
+
+
+class AiInsightsResponse(BaseModel):
+    explanation: str
+    suggestions: List[AiInsightSuggestion]
+    warnings: List[str]
+    assumptions: List[str]
+    meta: AiSqlResponseMeta
+

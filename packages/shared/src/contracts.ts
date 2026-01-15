@@ -28,11 +28,32 @@ export type PlanSummary = {
   hasMisestimation: boolean;
 };
 
+export type RuleFinding = {
+  code: string;
+  severity: "info" | "warn" | "high";
+  message: string;
+  recommendation: string;
+  rationale: string;
+};
+
+export type AiSuggestion = {
+  title: string;
+  description: string;
+  confidence: "low" | "medium" | "high";
+  tradeoffs: string[];
+};
+
+export type AiInsight = {
+  explanation: string;
+  suggestions: AiSuggestion[];
+  warnings: string[];
+  assumptions: string[];
+};
+
 export type AnalyzeResponse = {
   planSummary: PlanSummary;
-  findings: string[];
-  ai: string[];
-  confidence: "low" | "medium" | "high";
+  findings: RuleFinding[];
+  ai: AiInsight | null;
   warnings: string[];
   metering: {
     eventId: string | null;

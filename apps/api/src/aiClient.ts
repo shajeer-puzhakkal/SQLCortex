@@ -1,3 +1,4 @@
+import type { AiInsight, AiSuggestion, PlanSummary, RuleFinding } from "./contracts";
 import { ErrorResponse, makeError } from "./contracts";
 
 export type AiSqlAction = "explain" | "optimize" | "index-suggest" | "risk-check";
@@ -17,6 +18,16 @@ export type AiSqlResponse = {
   findings: string[];
   recommendations: string[];
   risk_level: "low" | "medium" | "high";
+  meta: { provider: string; model: string; latency_ms: number };
+};
+
+export type AiInsightsPayload = {
+  plan_summary: PlanSummary;
+  rule_findings: RuleFinding[];
+  user_intent?: string | null;
+};
+
+export type AiInsightsResponse = AiInsight & {
   meta: { provider: string; model: string; latency_ms: number };
 };
 
@@ -79,6 +90,50 @@ function normalizeAiSqlResponse(payload: unknown): AiSqlResponse {
     findings,
     recommendations,
     risk_level: risk,
+    meta: { provider, model, latency_ms: latencyMs },
+  };
+}
+
+function normalizeAiSuggestion(payload: unknown): AiSuggestion {
+  const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const title = typeof record.title === "string" ? record.title : "";
+  const description = typeof record.description === "string" ? record.description : "";
+  const confidence =
+    record.confidence === "low" || record.confidence === "medium" || record.confidence === "high"
+      ? record.confidence
+      : "low";
+  const tradeoffs = normalizeStringArray(record.tradeoffs);
+
+  return {
+    title,
+    description,
+    confidence,
+    tradeoffs,
+  };
+}
+
+function normalizeAiInsightsResponse(payload: unknown): AiInsightsResponse {
+  const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const explanation = typeof record.explanation === "string" ? record.explanation : "";
+  const suggestionsRaw = Array.isArray(record.suggestions) ? record.suggestions : [];
+  const suggestions = suggestionsRaw.map(normalizeAiSuggestion).filter((item) => item.title);
+  const warnings = normalizeStringArray(record.warnings);
+  const assumptions = normalizeStringArray(record.assumptions);
+
+  const metaRecord =
+    record.meta && typeof record.meta === "object" ? (record.meta as Record<string, unknown>) : {};
+  const provider = typeof metaRecord.provider === "string" ? metaRecord.provider : "unknown";
+  const model = typeof metaRecord.model === "string" ? metaRecord.model : "unknown";
+  const latencyMs =
+    typeof metaRecord.latency_ms === "number" && Number.isFinite(metaRecord.latency_ms)
+      ? metaRecord.latency_ms
+      : 0;
+
+  return {
+    explanation,
+    suggestions,
+    warnings,
+    assumptions,
     meta: { provider, model, latency_ms: latencyMs },
   };
 }
@@ -148,6 +203,56 @@ export async function callAiSqlService(
     }
 
     return normalizeAiSqlResponse(responsePayload);
+  } catch (err) {
+    if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      throw err as AiServiceError;
+    }
+
+    if ((err as Error)?.name === "AbortError") {
+      throw {
+        status: 504,
+        payload: makeError("ANALYZER_TIMEOUT", "AI request timed out.", {
+          timeout_ms: timeoutMs,
+        }),
+      } satisfies AiServiceError;
+    }
+
+    throw {
+      status: 502,
+      payload: makeError("ANALYZER_ERROR", "Could not reach AI service.", {
+        reason: err instanceof Error ? err.message : "unknown",
+      }),
+    } satisfies AiServiceError;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function callAiInsightsService(
+  payload: AiInsightsPayload
+): Promise<AiInsightsResponse> {
+  const controller = new AbortController();
+  const timeoutMs = resolveAiServicesTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const aiServicesBaseUrl = resolveAiServicesBaseUrl();
+
+  try {
+    const response = await fetch(`${aiServicesBaseUrl}/ai/insights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const responsePayload = (await response.json().catch(() => null)) as unknown;
+    if (!response.ok) {
+      throw {
+        status: response.status,
+        payload: mapAiServiceError(response.status, responsePayload),
+      } satisfies AiServiceError;
+    }
+
+    return normalizeAiInsightsResponse(responsePayload);
   } catch (err) {
     if (err && typeof err === "object" && "status" in err && "payload" in err) {
       throw err as AiServiceError;

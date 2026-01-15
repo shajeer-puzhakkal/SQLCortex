@@ -10,10 +10,12 @@ import {
 } from "./api/endpoints";
 import type {
   AnalyzeRequest,
+  AiSuggestion,
   ConnectionResource,
   ExplainMode,
   Org,
   Project,
+  RuleFinding,
 } from "./api/types";
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../packages/shared/src/sql";
 import {
@@ -151,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider(
       "sqlcortex.chatView",
       chatViewProvider,
-      { retainContextWhenHidden: true }
+      { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
 
@@ -880,6 +882,62 @@ function normalizeStringList(value: unknown): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+function normalizeRuleFindings(value: unknown): RuleFinding[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is RuleFinding => {
+    if (!entry || typeof entry !== "object") {
+      return false;
+    }
+    const record = entry as RuleFinding;
+    return (
+      typeof record.code === "string" &&
+      typeof record.message === "string" &&
+      typeof record.recommendation === "string" &&
+      typeof record.rationale === "string"
+    );
+  });
+}
+
+function normalizeAiSuggestions(value: unknown): AiSuggestion[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is AiSuggestion => {
+    if (!entry || typeof entry !== "object") {
+      return false;
+    }
+    const record = entry as AiSuggestion;
+    return (
+      typeof record.title === "string" &&
+      typeof record.description === "string" &&
+      typeof record.confidence === "string"
+    );
+  });
+}
+
+function formatRuleFinding(finding: RuleFinding): string {
+  const severity = finding.severity.toUpperCase();
+  const parts = [finding.message];
+  if (finding.recommendation) {
+    parts.push(`Recommendation: ${finding.recommendation}`);
+  }
+  if (finding.rationale) {
+    parts.push(`Rationale: ${finding.rationale}`);
+  }
+  return `[${severity}] ${parts.join(" ")}`;
+}
+
+function formatAiSuggestion(suggestion: AiSuggestion): string {
+  const confidence = suggestion.confidence.toUpperCase();
+  const tradeoffs =
+    suggestion.tradeoffs && suggestion.tradeoffs.length > 0
+      ? ` Tradeoffs: ${suggestion.tradeoffs.join(" ")}`
+      : "";
+  return `${suggestion.title} (${confidence}) — ${suggestion.description}${tradeoffs}`;
+}
+
 async function searchTableFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
@@ -1230,19 +1288,31 @@ async function analyzeSelectionFlow(
 
   try {
     const response = await analyzeQuery(client, request);
-    const suggestions = normalizeStringList(
-      (response as { suggestions?: unknown }).suggestions
-    );
+    const findings = normalizeRuleFindings(response.findings).map(formatRuleFinding);
+    const ai = response.ai;
+    const aiSuggestions = normalizeAiSuggestions(ai?.suggestions);
+    const suggestions = aiSuggestions.length
+      ? aiSuggestions.map(formatAiSuggestion)
+      : normalizeStringList((response as { suggestions?: unknown }).suggestions);
+    const explanation =
+      ai && typeof ai.explanation === "string" && ai.explanation.trim()
+        ? ai.explanation.trim()
+        : null;
+    const warnings = [
+      ...normalizeStringList(response.warnings),
+      ...normalizeStringList(ai?.warnings),
+    ];
+    const assumptions = normalizeStringList(ai?.assumptions);
     const insightsState = {
       kind: "success" as const,
       data: {
         hash: sqlHash,
         mode: explainMode,
-        findings: normalizeStringList(response.findings),
-        ai: normalizeStringList(response.ai),
+        findings,
+        explanation,
         suggestions,
-        warnings: normalizeStringList(response.warnings),
-        confidence: response.confidence ?? "low",
+        warnings,
+        assumptions,
         eventId: response.metering?.eventId ?? null,
       },
     };

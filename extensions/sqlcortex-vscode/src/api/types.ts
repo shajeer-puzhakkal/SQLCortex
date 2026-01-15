@@ -7,9 +7,12 @@ export type ApiError = {
 export type {
   AnalyzeRequest,
   AnalyzeResponse,
+  AiInsight,
+  AiSuggestion,
   DashboardMetricsResponse,
   ExplainMode,
   MeterEvent,
+  RuleFinding,
 } from "../../../../packages/shared/src/contracts";
 
 export type Org = {
