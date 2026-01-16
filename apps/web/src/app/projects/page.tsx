@@ -887,7 +887,7 @@ export default function ProjectsPage() {
                 </div>
 
                 <div className="mt-6 overflow-hidden rounded-2xl border border-black/10 bg-white/70">
-                  <div className="hidden grid-cols-[1.6fr_1fr_0.6fr_auto] items-center gap-4 border-b border-black/10 bg-black/5 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-black/50 md:grid">
+                  <div className="hidden items-center gap-4 border-b border-black/10 bg-black/5 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-black/50 md:grid md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,0.7fr)_minmax(0,1fr)]">
                     <span>Project</span>
                     <span>Connections</span>
                     <span>Status</span>
@@ -911,7 +911,7 @@ export default function ProjectsPage() {
                         return (
                           <div
                             key={project.id}
-                            className={`flex flex-col gap-3 px-4 py-4 md:grid md:grid-cols-[1.6fr_1fr_0.6fr_auto] md:items-center md:gap-4 ${
+                            className={`flex flex-col gap-3 px-4 py-4 md:grid md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,0.7fr)_minmax(0,1fr)] md:items-center md:gap-4 ${
                               isActive ? "bg-cyan-50/50" : "bg-white"
                             }`}
                           >
@@ -941,33 +941,88 @@ export default function ProjectsPage() {
                                 </button>
                               )}
                             </div>
-                            <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                            <div className="flex flex-wrap items-center gap-2 md:justify-end md:justify-self-end">
                               <button
-                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                aria-label="Edit project"
+                                title="Edit project"
+                                className="group inline-flex items-center justify-center rounded-full border border-black/10 bg-white p-2 text-black/70 transition hover:border-black/30 hover:bg-black/5"
                                 onClick={() => {
                                   setEditProject(project);
                                   setEditProjectName(project.name);
                                 }}
                               >
-                                Edit
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                                </svg>
                               </button>
                               <button
-                                className="rounded-full border border-rose-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-600 transition hover:border-rose-300 hover:bg-rose-50"
+                                aria-label="Delete project"
+                                title="Delete project"
+                                className="group inline-flex items-center justify-center rounded-full border border-rose-200 bg-white p-2 text-rose-600 transition hover:border-rose-300 hover:bg-rose-50"
                                 onClick={() => setDeleteProject(project)}
                               >
-                                Delete
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M3 6h18" />
+                                  <path d="M8 6V4h8v2" />
+                                  <path d="M5 6l1 14h12l1-14" />
+                                  <path d="M10 11v6" />
+                                  <path d="M14 11v6" />
+                                </svg>
                               </button>
                               <button
-                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                aria-label="Add connection"
+                                title="Add connection"
+                                className="group inline-flex items-center justify-center rounded-full border border-black/10 bg-white p-2 text-black/70 transition hover:border-black/30 hover:bg-black/5"
                                 onClick={() => openAddConnectionModal(project)}
                               >
-                                Add connection
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M12 5v14" />
+                                  <path d="M5 12h14" />
+                                </svg>
                               </button>
                               <button
-                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                                aria-label="Show connections"
+                                title="Show connections"
+                                className="group inline-flex items-center justify-center rounded-full border border-black/10 bg-white p-2 text-black/70 transition hover:border-black/30 hover:bg-black/5"
                                 onClick={() => openConnectionsModal(project)}
                               >
-                                Show connections
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" />
+                                  <circle cx="12" cy="12" r="3" />
+                                </svg>
                               </button>
                             </div>
                           </div>
