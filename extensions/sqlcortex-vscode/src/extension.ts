@@ -1303,25 +1303,63 @@ async function analyzeSelectionFlow(
       ...normalizeStringList(ai?.warnings),
     ];
     const assumptions = normalizeStringList(ai?.assumptions);
-    const insightsState = {
-      kind: "success" as const,
-      data: {
-        hash: sqlHash,
-        mode: explainMode,
-        findings,
-        explanation,
-        suggestions,
-        warnings,
-        assumptions,
-        eventId: response.metering?.eventId ?? null,
-      },
-    };
+    const requiredPlan = response.requiredPlan
+      ? response.requiredPlan.charAt(0).toUpperCase() + response.requiredPlan.slice(1)
+      : null;
+    const gateTitle = "AI suggestions are unavailable on your current plan.";
+    const gateDescription =
+      response.gateReason === "PLAN_LIMIT"
+        ? `AI usage limit reached for this period.${requiredPlan ? ` Upgrade to ${requiredPlan} for more capacity.` : ""}`
+        : requiredPlan
+          ? `Upgrade to ${requiredPlan} to unlock AI analyzer features.`
+          : "Upgrade to unlock AI analyzer features.";
+    const gate =
+      response.status === "gated"
+        ? {
+            title: gateTitle,
+            description: gateDescription,
+            ctaLabel: requiredPlan ? `Upgrade to ${requiredPlan}` : "Open dashboard to upgrade",
+            upgradeUrl: response.upgradeUrl ?? null,
+          }
+        : null;
+    const insightsState = gate
+      ? {
+          kind: "gated" as const,
+          data: {
+            hash: sqlHash,
+            mode: explainMode,
+            findings,
+            explanation,
+            suggestions,
+            warnings,
+            assumptions,
+            eventId: response.metering?.eventId ?? null,
+            gate,
+          },
+        }
+      : {
+          kind: "success" as const,
+          data: {
+            hash: sqlHash,
+            mode: explainMode,
+            findings,
+            explanation,
+            suggestions,
+            warnings,
+            assumptions,
+            eventId: response.metering?.eventId ?? null,
+          },
+        };
     QueryInsightsView.show(context).update(insightsState);
 
     if (response.metering?.eventId) {
       output.appendLine(`SQLCortex: Analysis event ${response.metering.eventId}.`);
     }
-    vscode.window.showInformationMessage("SQLCortex: Analysis complete.");
+    if (gate) {
+      vscode.window.showWarningMessage("SQLCortex: AI suggestions are gated for your plan.");
+    } else {
+      vscode.window.showInformationMessage("SQLCortex: Analysis complete.");
+    }
   } catch (err) {
     const message = formatRequestError(err);
     QueryInsightsView.show(context).update({

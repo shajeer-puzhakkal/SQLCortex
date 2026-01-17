@@ -557,6 +557,13 @@ export default function DashboardPage() {
                         >
                           Settings
                         </button>
+                        <Link
+                          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-black/70 hover:bg-black/5"
+                          href="/dashboard/plan"
+                          onClick={() => setProfileOpen(false)}
+                        >
+                          Plan &amp; usage
+                        </Link>
                       </div>
                       <div className="mt-2 border-t border-black/10 pt-2">
                         <button

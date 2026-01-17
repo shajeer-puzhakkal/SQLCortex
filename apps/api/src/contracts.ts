@@ -9,6 +9,7 @@ import type {
   AiSuggestion,
   MeterEvent,
   PlanSummary,
+  PlanUsageSummary,
 } from "../../../packages/shared/src/contracts";
 
 export type {
@@ -21,6 +22,7 @@ export type {
   AiSuggestion,
   MeterEvent,
   PlanSummary,
+  PlanUsageSummary,
 };
 
 export type ErrorCode =

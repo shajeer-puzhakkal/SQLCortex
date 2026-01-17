@@ -4,4 +4,5 @@ export type {
   DashboardMetricsResponse,
   ExplainMode,
   MeterEvent,
+  PlanUsageSummary,
 } from "../../../../packages/shared/src/contracts";

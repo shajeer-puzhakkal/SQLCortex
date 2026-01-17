@@ -15,6 +15,7 @@ import {
   ErrorResponse,
   HealthResponse,
   ExplainMode,
+  PlanUsageSummary,
   PlanSummary,
   RuleFinding,
   makeError,
@@ -44,6 +45,7 @@ import {
   incrementAnalysesThisMonth,
   incrementLlmCallsThisMonth,
   makePlanLimitExceededError,
+  monthWindowUtc,
 } from "./quota";
 import {
   attachAuth,
@@ -261,6 +263,17 @@ type AiSqlFallbackReason =
   | "plan_disabled"
   | "limit_reached"
   | "service_unavailable";
+
+function formatPlanId(planCode: PlanCode): string {
+  return planCode.toLowerCase();
+}
+
+function buildUpgradeUrl(subject: PlanSubject | null): string {
+  if (subject?.subjectType === "ORG") {
+    return `${webOrigin}/dashboard/plan?org_id=${subject.orgId}#upgrade`;
+  }
+  return `${webOrigin}/dashboard/plan#upgrade`;
+}
 
 function resolveAiFeatureStatusFromProject(
   project?: ProjectContext["project"] | null
@@ -1963,6 +1976,102 @@ app.get("/api/v1/me", requireAuth(prisma), async (req: Request, res: Response) =
   });
 });
 
+app.get(
+  "/api/v1/plan",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, unknown, { org_id?: string }>,
+    res: Response<PlanUsageSummary | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const orgIdParam = typeof req.query.org_id === "string" ? req.query.org_id : null;
+    let subject: PlanSubject | null = null;
+
+    if (orgIdParam) {
+      if (auth.orgId && auth.orgId === orgIdParam) {
+        subject = { subjectType: "ORG", orgId: orgIdParam };
+      } else if (auth.userId) {
+        const membership = await fetchMembership(auth.userId, orgIdParam);
+        if (!membership) {
+          return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
+        }
+        subject = { subjectType: "ORG", orgId: orgIdParam };
+      } else {
+        return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
+      }
+    } else if (auth.orgId) {
+      subject = { subjectType: "ORG", orgId: auth.orgId };
+    } else if (auth.userId) {
+      subject = { subjectType: "USER", userId: auth.userId };
+    }
+
+    if (!subject) {
+      return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
+    }
+
+    const planContext = await getPlanContext(prisma, subject);
+    const now = new Date();
+    const { start, end } = monthWindowUtc(now);
+    const usedThisPeriod = await getLlmCallsUsedThisMonth(prisma, subject, now);
+    const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+    const summary: PlanUsageSummary = {
+      planId: formatPlanId(planContext.planCode),
+      planName: planContext.plan.name,
+      aiEnabled: planContext.plan.llmEnabled,
+      monthlyAiActionsLimit: planContext.plan.llmEnabled
+        ? planContext.plan.monthlyLlmCallLimit
+        : null,
+      usedAiActionsThisPeriod: usedThisPeriod,
+      periodStart: start.toISOString(),
+      periodEnd: end.toISOString(),
+      upgradeAvailable: Boolean(suggestedPlan),
+    };
+
+    return res.json(summary);
+  }
+);
+
+app.post(
+  "/api/v1/upgrade-request",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, { message?: string; org_id?: string | null }>,
+    res: Response<{ ok: true } | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const orgIdParam = typeof req.body?.org_id === "string" ? req.body.org_id : null;
+    if (orgIdParam) {
+      if (auth.orgId && auth.orgId === orgIdParam) {
+        // Allowed via org token.
+      } else if (auth.userId) {
+        const membership = await fetchMembership(auth.userId, orgIdParam);
+        if (!membership) {
+          return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
+        }
+      } else {
+        return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
+      }
+    }
+
+    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+    console.info("Upgrade request received", {
+      userId: auth.userId ?? null,
+      orgId: orgIdParam ?? auth.orgId ?? null,
+      message: message || null,
+    });
+
+    return res.json({ ok: true });
+  }
+);
+
 app.get("/api/v1/orgs", requireAuth(prisma), async (req: Request, res: Response) => {
   const auth = (req as AuthenticatedRequest).auth;
   if (!auth) {
@@ -3407,6 +3516,9 @@ app.post(
     let aiInsight: AiInsight | null = null;
     let aiUsed = false;
     let tokensEstimated: number | null = null;
+    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | null = null;
+    let requiredPlan: string | null = null;
+    let upgradeUrl: string | null = null;
 
     const quotaSubject = connectionContext.orgId
       ? ({ subjectType: "ORG", orgId: connectionContext.orgId } as const)
@@ -3424,6 +3536,13 @@ app.post(
         ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
         : null;
       const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+
+      if (aiFeatureStatus.enabled && llmAccess && !llmAccess.enabled) {
+        gateReason = llmAccess.reason === "limit_reached" ? "PLAN_LIMIT" : "AI_DISABLED";
+        const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+        requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : null;
+        upgradeUrl = buildUpgradeUrl(quotaSubject);
+      }
 
       if (llmEnabled) {
         const aiPayload: AiInsightsPayload = {
@@ -3491,6 +3610,10 @@ app.post(
     });
 
     const response: AnalyzeResponse = {
+      status: gateReason ? "gated" : "ok",
+      gateReason: gateReason ?? undefined,
+      requiredPlan,
+      upgradeUrl,
       planSummary,
       findings: ruleFindings,
       ai: aiInsight,

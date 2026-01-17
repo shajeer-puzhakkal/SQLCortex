@@ -51,6 +51,10 @@ export type AiInsight = {
 };
 
 export type AnalyzeResponse = {
+  status: "ok" | "gated";
+  gateReason?: "PLAN_LIMIT" | "AI_DISABLED";
+  requiredPlan?: string | null;
+  upgradeUrl?: string | null;
   planSummary: PlanSummary;
   findings: RuleFinding[];
   ai: AiInsight | null;
@@ -60,6 +64,17 @@ export type AnalyzeResponse = {
     aiUsed: boolean;
     tokensEstimated: number | null;
   };
+};
+
+export type PlanUsageSummary = {
+  planId: string;
+  planName: string;
+  aiEnabled: boolean;
+  monthlyAiActionsLimit: number | null;
+  usedAiActionsThisPeriod: number;
+  periodStart: string;
+  periodEnd: string;
+  upgradeAvailable: boolean;
 };
 
 export type MeterEvent = {
