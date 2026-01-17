@@ -1,6 +1,13 @@
 import * as vscode from "vscode";
 import type { ExplainMode } from "../api/types";
 
+type QueryInsightsGate = {
+  title: string;
+  description: string;
+  ctaLabel: string;
+  upgradeUrl: string | null;
+};
+
 export type QueryInsightsState =
   | { kind: "idle" }
   | { kind: "loading"; data: { hash: string; mode: ExplainMode } }
@@ -18,12 +25,26 @@ export type QueryInsightsState =
       };
     }
   | {
+      kind: "gated";
+      data: {
+        hash: string;
+        mode: ExplainMode;
+        findings: string[];
+        suggestions: string[];
+        warnings: string[];
+        assumptions: string[];
+        explanation: string | null;
+        eventId: string | null;
+        gate: QueryInsightsGate;
+      };
+    }
+  | {
       kind: "error";
       error: { message: string };
       data?: { hash?: string; mode?: ExplainMode };
     };
 
-type WebviewMessage = { type: "ready" };
+type WebviewMessage = { type: "ready" } | { type: "openUpgrade"; url?: string | null };
 
 export class QueryInsightsView implements vscode.WebviewViewProvider {
   private static currentProvider: QueryInsightsView | undefined;
@@ -103,6 +124,15 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     if (payload.type === "ready") {
       this.isReady = true;
       this.postState();
+      return;
+    }
+
+    if (payload.type === "openUpgrade") {
+      const url = typeof payload.url === "string" ? payload.url : "";
+      if (!url) {
+        return;
+      }
+      await vscode.env.openExternal(vscode.Uri.parse(url));
     }
   }
 
@@ -224,6 +254,48 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         background: var(--vscode-inputValidation-errorBackground);
       }
 
+      .gate {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        border-radius: 8px;
+        border: 1px solid var(--vscode-panel-border);
+        background: var(--vscode-editorWidget-background);
+        padding: 12px;
+      }
+
+      .gate.hidden {
+        display: none;
+      }
+
+      .gate-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .gate-description {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .gate-button {
+        align-self: flex-start;
+        border-radius: 6px;
+        border: 1px solid var(--vscode-button-border, transparent);
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .gate-button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
       .sections {
         display: flex;
         flex-direction: column;
@@ -287,6 +359,15 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       </header>
 
       <div id="status" class="status">Waiting for analysis...</div>
+      <div id="gate" class="gate hidden">
+        <div>
+          <p id="gateTitle" class="gate-title"></p>
+          <p id="gateDescription" class="gate-description"></p>
+        </div>
+        <button id="gateButton" class="gate-button" type="button">
+          Open dashboard to upgrade
+        </button>
+      </div>
 
       <div class="sections">
         <section class="section">
@@ -322,12 +403,17 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       const hashEl = document.getElementById("hash");
       const modeEl = document.getElementById("mode");
       const statusEl = document.getElementById("status");
+      const gateEl = document.getElementById("gate");
+      const gateTitleEl = document.getElementById("gateTitle");
+      const gateDescriptionEl = document.getElementById("gateDescription");
+      const gateButtonEl = document.getElementById("gateButton");
       const findingsEl = document.getElementById("findings");
       const aiEl = document.getElementById("ai");
       const suggestionsEl = document.getElementById("suggestions");
       const warningsEl = document.getElementById("warnings");
       const assumptionsEl = document.getElementById("assumptions");
       const eventIdEl = document.getElementById("eventId");
+      let upgradeUrl = "";
 
       function formatMode(value) {
         return value === "EXPLAIN_ANALYZE" ? "EXPLAIN ANALYZE" : "EXPLAIN";
@@ -348,6 +434,31 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       function setStatus(text, isError) {
         statusEl.textContent = text;
         statusEl.classList.toggle("error", Boolean(isError));
+      }
+
+      function setGate(gate) {
+        if (!gate || !gateEl || !gateTitleEl || !gateDescriptionEl || !gateButtonEl) {
+          if (gateEl) {
+            gateEl.classList.add("hidden");
+          }
+          upgradeUrl = "";
+          return;
+        }
+        gateEl.classList.remove("hidden");
+        gateTitleEl.textContent = gate.title || "AI is gated.";
+        gateDescriptionEl.textContent = gate.description || "";
+        gateButtonEl.textContent = gate.ctaLabel || "Open dashboard to upgrade";
+        upgradeUrl = gate.upgradeUrl || "";
+        gateButtonEl.disabled = !upgradeUrl;
+      }
+
+      if (gateButtonEl) {
+        gateButtonEl.addEventListener("click", () => {
+          if (!upgradeUrl) {
+            return;
+          }
+          vscode.postMessage({ type: "openUpgrade", url: upgradeUrl });
+        });
       }
 
       function renderList(container, items, emptyText) {
@@ -373,6 +484,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           subtitle.textContent = "Analyze a SQL selection to see results here.";
           setMeta(null, null);
           setStatus("Waiting for analysis...", false);
+          setGate(null);
           renderList(findingsEl, [], "No findings yet.");
           renderList(aiEl, [], "No AI explanation yet.");
           renderList(suggestionsEl, [], "No suggestions yet.");
@@ -386,6 +498,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           subtitle.textContent = "Analyzing selection...";
           setMeta(state.data.hash, state.data.mode);
           setStatus("Analyzing query insights...", false);
+          setGate(null);
           renderList(findingsEl, [], "Analyzing...");
           renderList(aiEl, [], "Analyzing...");
           renderList(suggestionsEl, [], "Analyzing...");
@@ -399,6 +512,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           subtitle.textContent = "Analysis failed.";
           setMeta(state.data?.hash || null, state.data?.mode || null);
           setStatus(state.error.message || "Analysis failed.", true);
+          setGate(null);
           renderList(findingsEl, [], "No findings.");
           renderList(aiEl, [], "No AI explanation.");
           renderList(suggestionsEl, [], "No suggestions.");
@@ -408,9 +522,11 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           return;
         }
 
-        subtitle.textContent = "Analysis complete.";
+        const gated = state.kind === "gated";
+        subtitle.textContent = gated ? "Analysis complete (AI gated)." : "Analysis complete.";
         setMeta(state.data.hash, state.data.mode);
-        setStatus("Analysis complete.", false);
+        setStatus(gated ? state.data.gate.title : "Analysis complete.", false);
+        setGate(gated ? state.data.gate : null);
         renderList(findingsEl, state.data.findings, "No findings.");
         renderList(
           aiEl,
