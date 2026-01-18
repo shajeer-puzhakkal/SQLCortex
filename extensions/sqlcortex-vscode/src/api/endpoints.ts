@@ -2,10 +2,12 @@ import type { ApiClient } from "./client";
 import type {
   AnalyzeRequest,
   AnalyzeResponse,
+  BillingCreditsResponse,
   ConnectionResource,
   ExecuteQueryRequest,
   ExecuteQueryResponse,
   Org,
+  PlanUsageSummary,
   Project,
   SchemaColumnResource,
   SchemaResource,
@@ -112,4 +114,20 @@ export async function analyzeQuery(
   request: AnalyzeRequest
 ): Promise<AnalyzeResponse> {
   return client.post<AnalyzeResponse>("/analyze", request);
+}
+
+export async function getBillingPlan(
+  client: ApiClient,
+  orgId?: string | null
+): Promise<PlanUsageSummary> {
+  const query = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
+  return client.get<PlanUsageSummary>(`/billing/plan${query}`);
+}
+
+export async function getBillingCredits(
+  client: ApiClient,
+  orgId?: string | null
+): Promise<BillingCreditsResponse> {
+  const query = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
+  return client.get<BillingCreditsResponse>(`/billing/credits${query}`);
 }

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
-import type { PlanUsageSummary } from "@/types/contracts";
+import type { BillingCreditsResponse, PlanUsageSummary } from "@/types/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const SIDEBAR_STATE_KEY = "sqlcortex.sidebarOpen";
@@ -38,6 +38,7 @@ export default function PlanPage() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [plan, setPlan] = useState<PlanUsageSummary | null>(null);
+  const [credits, setCredits] = useState<BillingCreditsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -123,12 +124,24 @@ export default function PlanPage() {
         const payload = await planResponse.json().catch(() => null);
         setError(payload?.message ?? "Failed to load plan details");
         setPlan(null);
+        setCredits(null);
         setLoading(false);
         return;
       }
 
       const planPayload = (await planResponse.json()) as PlanUsageSummary;
       setPlan(planPayload);
+
+      const creditsUrl = allowedOrgId
+        ? `${API_BASE}/billing/credits?org_id=${encodeURIComponent(allowedOrgId)}`
+        : `${API_BASE}/billing/credits`;
+      const creditsResponse = await fetch(creditsUrl, { credentials: "include" });
+      if (creditsResponse.ok) {
+        const creditsPayload = (await creditsResponse.json()) as BillingCreditsResponse;
+        setCredits(creditsPayload);
+      } else {
+        setCredits(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load plan details");
     } finally {
@@ -221,17 +234,30 @@ export default function PlanPage() {
     : "Plan details unavailable";
   const planName = plan?.planName ?? fallbackPlanLabel;
   const planId = plan?.planId ?? "-";
-  const aiEnabled = plan?.aiEnabled ?? false;
+  const isFreePlan = planId === "free" || planName.toLowerCase() === "free";
+  const aiEnabled = plan?.aiEnabled ?? isFreePlan;
   const limit = plan?.monthlyAiActionsLimit ?? null;
   const used = plan?.usedAiActionsThisPeriod ?? 0;
+  const creditSystemEnabled = plan?.creditSystemEnabled ?? isFreePlan;
+  const dailyCredits = credits?.dailyCredits ?? plan?.dailyCredits ?? null;
+  const creditsRemaining = credits?.creditsRemaining ?? plan?.creditsRemaining ?? null;
+  const graceUsed = credits?.graceUsed ?? plan?.graceUsed ?? null;
+  const softLimit70Reached =
+    credits?.softLimit70Reached ?? plan?.softLimit70Reached ?? false;
+  const softLimit90Reached =
+    credits?.softLimit90Reached ?? plan?.softLimit90Reached ?? false;
   const planPeriodStart = plan?.periodStart ? new Date(plan.periodStart) : null;
   const planPeriodEnd = plan?.periodEnd ? new Date(plan.periodEnd) : null;
   const usageLimitLabel = hasPlan
-    ? limit === null
-      ? aiEnabled
-        ? `${used} / Unlimited`
-        : "Not included"
-      : `${used} / ${limit}`
+    ? creditSystemEnabled && dailyCredits !== null && creditsRemaining !== null
+      ? `${creditsRemaining} / ${dailyCredits} credits`
+      : creditSystemEnabled
+        ? "Daily credits unavailable"
+      : limit === null
+        ? aiEnabled
+          ? `${used} / Unlimited`
+          : "Not included"
+        : `${used} / ${limit}`
     : needsPlanSelection
       ? "Select a workspace"
       : "Unavailable";
@@ -248,7 +274,21 @@ export default function PlanPage() {
       : "Top tier"
     : "Select a workspace";
   const isLimitReached = limit !== null && used >= limit;
-  const isGated = hasPlan ? !aiEnabled || isLimitReached : false;
+  const creditExhausted =
+    creditSystemEnabled &&
+    creditsRemaining !== null &&
+    creditsRemaining <= 0 &&
+    graceUsed === true;
+  const isGated = hasPlan ? !aiEnabled || isLimitReached || creditExhausted : false;
+  const creditNotice =
+    credits?.notice ??
+    (creditSystemEnabled
+      ? softLimit90Reached
+        ? "You have used 90% of your daily AI credits. Upgrade to Pro for unlimited usage."
+        : softLimit70Reached
+          ? "You have used 70% of your daily AI credits. Consider upgrading to Pro."
+          : null
+      : null);
   const selectionLink = (
     <Link
       className="text-xs font-semibold text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-800"
@@ -351,9 +391,13 @@ export default function PlanPage() {
             </p>
             <p className="mt-1 text-sm font-semibold">AI analyzer is limited on your current plan.</p>
             <p className="mt-1 text-xs text-amber-700/80">
-              {isLimitReached
-                ? "Your AI usage has reached the monthly limit for this period."
-                : "Upgrade to unlock AI analyzer features."}
+              {!aiEnabled
+                ? "AI is disabled for this workspace."
+                : creditExhausted
+                  ? "Daily AI credits are exhausted."
+                  : isLimitReached
+                    ? "Your AI usage has reached the monthly limit for this period."
+                    : "Upgrade to unlock AI analyzer features."}
             </p>
             {upgradeAvailable ? (
               <a
@@ -363,6 +407,14 @@ export default function PlanPage() {
                 Upgrade
               </a>
             ) : null}
+          </div>
+        ) : null}
+        {creditNotice && !creditExhausted && !needsPlanSelection ? (
+          <div className="mt-6 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sky-800 shadow-sm shadow-sky-100/60">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-700">
+              Credit notice
+            </p>
+            <p className="mt-1 text-sm font-semibold">{creditNotice}</p>
           </div>
         ) : null}
 
@@ -414,7 +466,9 @@ export default function PlanPage() {
             <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
               Usage
             </p>
-            <p className="mt-2 text-sm font-semibold text-black/80">AI-assisted actions</p>
+            <p className="mt-2 text-sm font-semibold text-black/80">
+              {creditSystemEnabled ? "Daily AI credits remaining" : "AI-assisted actions"}
+            </p>
             <p className="mt-2 text-2xl font-semibold text-black/90">
               {needsPlanSelection ? (
                 <Link
@@ -427,9 +481,15 @@ export default function PlanPage() {
                 usageLimitLabel
               )}
             </p>
-            <p className="mt-1 text-xs text-black/50">Period: {periodLabel}</p>
+            <p className="mt-1 text-xs text-black/50">
+              {creditSystemEnabled
+                ? `Grace credits used: ${graceUsed === null ? "Unknown" : graceUsed ? "Yes" : "No"}`
+                : `Period: ${periodLabel}`}
+            </p>
             <div className="mt-4 rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-xs text-black/60">
-              Counts only. No token or cost details yet.
+              {creditSystemEnabled
+                ? "Credits reset daily (UTC)."
+                : "Counts only. No token or cost details yet."}
             </div>
           </div>
         </section>

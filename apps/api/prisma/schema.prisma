@@ -33,6 +33,10 @@ model User {
   projects        Project[]       @relation("user_projects")
   sessions        Session[]
   acceptedInvites OrgInvite[]     @relation("invite_acceptances")
+  orgEntitlements OrgEntitlement[]
+  aiCredits       OrgAiCredit[]
+  creditEvents    CreditEvent[]
+  aiValueDaily    AiValueDaily[]
 
   @@map("users")
 }
@@ -50,6 +54,10 @@ model Organization {
   queryExecutions QueryExecution[]
   subscriptions  Subscription[]  @relation("org_subscriptions")
   usageCounters  UsageCounter[]  @relation("org_usage")
+  entitlements   OrgEntitlement[]
+  aiCredits      OrgAiCredit[]
+  creditEvents   CreditEvent[]
+  aiValueDaily   AiValueDaily[]
 
   @@map("organizations")
 }
@@ -226,6 +234,74 @@ model UsageCounter {
 
   @@unique([subjectType, userId, orgId, month])
   @@map("usage_counters")
+}
+
+model OrgEntitlement {
+  id           String      @id @default(uuid()) @db.Uuid
+  subjectType  SubjectType @map("subject_type")
+  orgId        String?     @db.Uuid @map("org_id")
+  userId       String?     @db.Uuid @map("user_id")
+  planId       String      @map("plan_id")
+  proStartedAt DateTime?   @map("pro_started_at")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([subjectType, orgId])
+  @@unique([subjectType, userId])
+  @@map("org_entitlements")
+}
+
+model OrgAiCredit {
+  id               String      @id @default(uuid()) @db.Uuid
+  subjectType      SubjectType @map("subject_type")
+  orgId            String?     @db.Uuid @map("org_id")
+  userId           String?     @db.Uuid @map("user_id")
+  dailyCredits     Int         @map("daily_credits")
+  creditsRemaining Int         @map("credits_remaining")
+  graceUsed        Boolean     @default(false) @map("grace_used")
+  lastResetAt      DateTime    @map("last_reset_at")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  organization     Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user             User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([subjectType, orgId])
+  @@unique([subjectType, userId])
+  @@map("org_ai_credits")
+}
+
+model CreditEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  orgId        String?  @db.Uuid @map("org_id")
+  userId       String?  @db.Uuid @map("user_id")
+  eventType    String   @map("event_type")
+  creditsDelta Int      @map("credits_delta")
+  meta         Json     @map("meta")
+  createdAt    DateTime @default(now()) @map("created_at")
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("credit_events")
+}
+
+model AiValueDaily {
+  id                     String   @id @default(uuid()) @db.Uuid
+  orgId                  String?  @db.Uuid @map("org_id")
+  userId                 String?  @db.Uuid @map("user_id")
+  date                   DateTime @db.Date @map("date")
+  actionsCount           Int      @default(0) @map("actions_count")
+  estimatedMinutesSaved  Int      @default(0) @map("estimated_minutes_saved")
+  estimatedCostSavedUsd  Float    @default(0) @map("estimated_cost_saved_usd")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+  organization           Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  user                   User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, date])
+  @@unique([userId, date])
+  @@map("ai_value_daily")
 }
 
 model ProjectDbConnection {

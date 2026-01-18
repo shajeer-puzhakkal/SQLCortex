@@ -12,6 +12,17 @@ export type QueryInsightsState =
   | { kind: "idle" }
   | { kind: "loading"; data: { hash: string; mode: ExplainMode } }
   | {
+      kind: "confirm";
+      data: {
+        hash: string;
+        mode: ExplainMode;
+        estimatedCredits: number;
+        remainingCredits: number;
+        dailyCredits: number;
+        notice?: string | null;
+      };
+    }
+  | {
       kind: "success";
       data: {
         hash: string;
@@ -44,7 +55,11 @@ export type QueryInsightsState =
       data?: { hash?: string; mode?: ExplainMode };
     };
 
-type WebviewMessage = { type: "ready" } | { type: "openUpgrade"; url?: string | null };
+type WebviewMessage =
+  | { type: "ready" }
+  | { type: "openUpgrade"; url?: string | null }
+  | { type: "confirmRun" }
+  | { type: "cancelRun" };
 
 export class QueryInsightsView implements vscode.WebviewViewProvider {
   private static currentProvider: QueryInsightsView | undefined;
@@ -53,6 +68,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
   private isReady = false;
   private lastState: QueryInsightsState = { kind: "idle" };
   private movedToSecondary = false;
+  private pendingConfirmation: ((value: boolean) => void) | null = null;
 
   static register(context: vscode.ExtensionContext): QueryInsightsView {
     const provider = new QueryInsightsView(context);
@@ -99,6 +115,18 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     this.postState();
   }
 
+  async requestConfirmation(
+    data: Extract<QueryInsightsState, { kind: "confirm" }>["data"]
+  ): Promise<boolean> {
+    if (this.pendingConfirmation) {
+      this.pendingConfirmation(false);
+    }
+    this.update({ kind: "confirm", data });
+    return new Promise((resolve) => {
+      this.pendingConfirmation = resolve;
+    });
+  }
+
   private async reveal(): Promise<void> {
     if (this.view) {
       this.view.show(true);
@@ -134,6 +162,21 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       }
       await vscode.env.openExternal(vscode.Uri.parse(url));
     }
+
+    if (payload.type === "confirmRun") {
+      if (this.pendingConfirmation) {
+        this.pendingConfirmation(true);
+        this.pendingConfirmation = null;
+      }
+      return;
+    }
+
+    if (payload.type === "cancelRun") {
+      if (this.pendingConfirmation) {
+        this.pendingConfirmation(false);
+        this.pendingConfirmation = null;
+      }
+    }
   }
 
   private dispose(): void {
@@ -142,6 +185,10 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     }
     this.isReady = false;
     this.movedToSecondary = false;
+    if (this.pendingConfirmation) {
+      this.pendingConfirmation(false);
+      this.pendingConfirmation = null;
+    }
     while (this.disposables.length) {
       const disposable = this.disposables.pop();
       if (disposable) {
@@ -296,6 +343,84 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         cursor: not-allowed;
       }
 
+      .confirm {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        border-radius: 8px;
+        border: 1px solid var(--vscode-panel-border);
+        background: var(--vscode-editorWidget-background);
+        padding: 12px;
+      }
+
+      .confirm.hidden {
+        display: none;
+      }
+
+      .confirm-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .confirm-description {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .confirm-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .confirm-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        border-radius: 6px;
+        border: 1px solid var(--vscode-panel-border);
+        padding: 8px;
+        background: var(--vscode-editor-background);
+      }
+
+      .confirm-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .confirm-value {
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .confirm-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .confirm-button {
+        border-radius: 6px;
+        border: 1px solid var(--vscode-button-border, transparent);
+        padding: 6px 12px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .confirm-button.primary {
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+      }
+
+      .confirm-button.secondary {
+        background: transparent;
+        color: var(--vscode-descriptionForeground);
+      }
+
       .sections {
         display: flex;
         flex-direction: column;
@@ -359,6 +484,26 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       </header>
 
       <div id="status" class="status">Waiting for analysis...</div>
+      <div id="confirm" class="confirm hidden">
+        <div>
+          <p class="confirm-title">Confirm AI credit usage</p>
+          <p id="confirmDescription" class="confirm-description"></p>
+        </div>
+        <div class="confirm-grid">
+          <div class="confirm-row">
+            <span class="confirm-label">Estimated cost</span>
+            <span id="confirmEstimated" class="confirm-value"></span>
+          </div>
+          <div class="confirm-row">
+            <span class="confirm-label">Remaining after run</span>
+            <span id="confirmRemaining" class="confirm-value"></span>
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button id="confirmRun" class="confirm-button primary" type="button">Run</button>
+          <button id="confirmCancel" class="confirm-button secondary" type="button">Cancel</button>
+        </div>
+      </div>
       <div id="gate" class="gate hidden">
         <div>
           <p id="gateTitle" class="gate-title"></p>
@@ -407,6 +552,12 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       const gateTitleEl = document.getElementById("gateTitle");
       const gateDescriptionEl = document.getElementById("gateDescription");
       const gateButtonEl = document.getElementById("gateButton");
+      const confirmEl = document.getElementById("confirm");
+      const confirmDescriptionEl = document.getElementById("confirmDescription");
+      const confirmEstimatedEl = document.getElementById("confirmEstimated");
+      const confirmRemainingEl = document.getElementById("confirmRemaining");
+      const confirmRunEl = document.getElementById("confirmRun");
+      const confirmCancelEl = document.getElementById("confirmCancel");
       const findingsEl = document.getElementById("findings");
       const aiEl = document.getElementById("ai");
       const suggestionsEl = document.getElementById("suggestions");
@@ -452,12 +603,46 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         gateButtonEl.disabled = !upgradeUrl;
       }
 
+      function setConfirm(confirm) {
+        if (
+          !confirm ||
+          !confirmEl ||
+          !confirmDescriptionEl ||
+          !confirmEstimatedEl ||
+          !confirmRemainingEl
+        ) {
+          if (confirmEl) {
+            confirmEl.classList.add("hidden");
+          }
+          return;
+        }
+        confirmEl.classList.remove("hidden");
+        const baseCopy = `Daily credits: ${confirm.dailyCredits}.`;
+        confirmDescriptionEl.textContent = confirm.notice
+          ? `${confirm.notice} ${baseCopy}`
+          : baseCopy;
+        confirmEstimatedEl.textContent = `${confirm.estimatedCredits} credits`;
+        confirmRemainingEl.textContent = `${confirm.remainingCredits} credits`;
+      }
+
       if (gateButtonEl) {
         gateButtonEl.addEventListener("click", () => {
           if (!upgradeUrl) {
             return;
           }
           vscode.postMessage({ type: "openUpgrade", url: upgradeUrl });
+        });
+      }
+
+      if (confirmRunEl) {
+        confirmRunEl.addEventListener("click", () => {
+          vscode.postMessage({ type: "confirmRun" });
+        });
+      }
+
+      if (confirmCancelEl) {
+        confirmCancelEl.addEventListener("click", () => {
+          vscode.postMessage({ type: "cancelRun" });
         });
       }
 
@@ -485,6 +670,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           setMeta(null, null);
           setStatus("Waiting for analysis...", false);
           setGate(null);
+          setConfirm(null);
           renderList(findingsEl, [], "No findings yet.");
           renderList(aiEl, [], "No AI explanation yet.");
           renderList(suggestionsEl, [], "No suggestions yet.");
@@ -499,6 +685,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           setMeta(state.data.hash, state.data.mode);
           setStatus("Analyzing query insights...", false);
           setGate(null);
+          setConfirm(null);
           renderList(findingsEl, [], "Analyzing...");
           renderList(aiEl, [], "Analyzing...");
           renderList(suggestionsEl, [], "Analyzing...");
@@ -508,11 +695,27 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           return;
         }
 
+        if (state.kind === "confirm") {
+          subtitle.textContent = "Confirm AI credits before running.";
+          setMeta(state.data.hash, state.data.mode);
+          setStatus("Awaiting confirmation...", false);
+          setGate(null);
+          setConfirm(state.data);
+          renderList(findingsEl, [], "Awaiting confirmation.");
+          renderList(aiEl, [], "Awaiting confirmation.");
+          renderList(suggestionsEl, [], "Awaiting confirmation.");
+          renderList(warningsEl, [], "Awaiting confirmation.");
+          renderList(assumptionsEl, [], "Awaiting confirmation.");
+          eventIdEl.textContent = "-";
+          return;
+        }
+
         if (state.kind === "error") {
           subtitle.textContent = "Analysis failed.";
           setMeta(state.data?.hash || null, state.data?.mode || null);
           setStatus(state.error.message || "Analysis failed.", true);
           setGate(null);
+          setConfirm(null);
           renderList(findingsEl, [], "No findings.");
           renderList(aiEl, [], "No AI explanation.");
           renderList(suggestionsEl, [], "No suggestions.");
@@ -527,6 +730,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         setMeta(state.data.hash, state.data.mode);
         setStatus(gated ? state.data.gate.title : "Analysis complete.", false);
         setGate(gated ? state.data.gate : null);
+        setConfirm(null);
         renderList(findingsEl, state.data.findings, "No findings.");
         renderList(
           aiEl,
