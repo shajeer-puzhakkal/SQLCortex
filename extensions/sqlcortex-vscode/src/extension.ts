@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { createApiClient, formatApiError } from "./api/client";
 import {
   analyzeQuery,
+  getBillingPlan,
   executeQuery,
   listConnections,
   listOrgs,
@@ -17,6 +18,7 @@ import type {
   Project,
   RuleFinding,
 } from "./api/types";
+import { estimateCredits } from "../../../packages/shared/src/credits";
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../packages/shared/src/sql";
 import {
   clearCachedSession,
@@ -77,6 +79,8 @@ const PERSONAL_ORG_LABEL = "Personal workspace";
 const EXPLAIN_MODE_SETTING = "explain.mode";
 const LEGACY_EXPLAIN_MODE_SETTING = "explainMode";
 const EXPLAIN_ALLOW_ANALYZE_SETTING = "explain.allowAnalyze";
+const GRACE_CREDITS = 20;
+const CREDIT_MODEL_TIER = "standard" as const;
 const MAX_SQL_LENGTH_SETTING = "maxSqlLength";
 const DIAGNOSTICS_ENABLED_SETTING = "diagnostics.enabled";
 const DEFAULT_MAX_SQL_LENGTH = 20000;
@@ -873,6 +877,27 @@ function resolveOrgId(
   );
 }
 
+function buildCreditNotice(plan: { softLimit90Reached: boolean; softLimit70Reached: boolean }): string | null {
+  if (plan.softLimit90Reached) {
+    return "You have used 90% of your daily AI credits. Upgrade to Pro for unlimited usage.";
+  }
+  if (plan.softLimit70Reached) {
+    return "You have used 70% of your daily AI credits. Consider upgrading to Pro for unlimited usage.";
+  }
+  return null;
+}
+
+function resolveRemainingCredits(plan: {
+  creditsRemaining: number | null;
+  graceUsed: boolean | null;
+}, estimatedCost: number): number {
+  const remaining = plan.creditsRemaining ?? 0;
+  if (remaining <= 0 && plan.graceUsed === false) {
+    return Math.max(0, GRACE_CREDITS - estimatedCost);
+  }
+  return Math.max(0, remaining - estimatedCost);
+}
+
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -1267,11 +1292,6 @@ async function analyzeSelectionFlow(
     },
   };
 
-  QueryInsightsView.show(context).update({
-    kind: "loading",
-    data: { hash: sqlHash, mode: explainMode },
-  });
-
   const client = createAuthorizedClient(
     context,
     auth,
@@ -1280,6 +1300,40 @@ async function analyzeSelectionFlow(
     statusBars,
     sidebarProvider
   );
+
+  const insightsView = QueryInsightsView.show(context);
+  try {
+    const billingPlan = await getBillingPlan(client, workspaceContext.orgId ?? null);
+    if (billingPlan.creditSystemEnabled) {
+      const estimate = estimateCredits({
+        action: "schema-analysis",
+        sql: extracted.sql,
+        modelTier: CREDIT_MODEL_TIER,
+      });
+      const remainingCredits = resolveRemainingCredits(billingPlan, estimate.total);
+      const notice = buildCreditNotice(billingPlan);
+      const confirmed = await insightsView.requestConfirmation({
+        hash: sqlHash,
+        mode: explainMode,
+        estimatedCredits: estimate.total,
+        remainingCredits,
+        dailyCredits: billingPlan.dailyCredits ?? 0,
+        notice,
+      });
+      if (!confirmed) {
+        insightsView.update({ kind: "idle" });
+        output.appendLine("SQLCortex: Analysis canceled before running.");
+        return;
+      }
+    }
+  } catch (err) {
+    output.appendLine(`SQLCortex: Unable to load billing details: ${formatRequestError(err)}`);
+  }
+
+  insightsView.update({
+    kind: "loading",
+    data: { hash: sqlHash, mode: explainMode },
+  });
 
   output.show(true);
   output.appendLine(
@@ -1310,9 +1364,11 @@ async function analyzeSelectionFlow(
     const gateDescription =
       response.gateReason === "PLAN_LIMIT"
         ? `AI usage limit reached for this period.${requiredPlan ? ` Upgrade to ${requiredPlan} for more capacity.` : ""}`
-        : requiredPlan
-          ? `Upgrade to ${requiredPlan} to unlock AI analyzer features.`
-          : "Upgrade to unlock AI analyzer features.";
+        : response.gateReason === "CREDITS_EXHAUSTED"
+          ? `Daily AI credits exhausted.${requiredPlan ? ` Upgrade to ${requiredPlan} for unlimited usage.` : ""}`
+          : requiredPlan
+            ? `Upgrade to ${requiredPlan} to unlock AI analyzer features.`
+            : "Upgrade to unlock AI analyzer features.";
     const gate =
       response.status === "gated"
         ? {

@@ -4,7 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import type { DashboardMetricsResponse } from "@/types/contracts";
+import type {
+  BillingCreditsResponse,
+  DashboardUsageResponse,
+  PlanUsageSummary,
+} from "@/types/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const SIDEBAR_STATE_KEY = "sqlcortex.sidebarOpen";
@@ -34,6 +38,9 @@ export default function DashboardPage() {
   const router = useRouter();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [usage, setUsage] = useState<DashboardUsageResponse | null>(null);
+  const [plan, setPlan] = useState<PlanUsageSummary | null>(null);
+  const [credits, setCredits] = useState<BillingCreditsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -96,6 +103,53 @@ export default function DashboardPage() {
       const projectsPayload = (await projectsResponse.json()) as { projects: Project[] };
       setMe(mePayload);
       setProjects(projectsPayload.projects ?? []);
+
+      const storedActiveProjectId =
+        typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_PROJECT_KEY) : null;
+      const selectedProjectId =
+        activeProjectId ?? storedActiveProjectId ?? projectsPayload.projects?.[0]?.id ?? null;
+      const selectedProject = selectedProjectId
+        ? projectsPayload.projects?.find((project) => project.id === selectedProjectId) ?? null
+        : null;
+      const defaultOrgId = selectedProject
+        ? selectedProject.org_id
+        : mePayload.org?.id ?? mePayload.memberships?.[0]?.org_id ?? null;
+      const usageUrl = defaultOrgId
+        ? `${API_BASE}/dashboard/usage?org_id=${encodeURIComponent(defaultOrgId)}&range=7d`
+        : `${API_BASE}/dashboard/usage?range=7d`;
+      const planUrl = defaultOrgId
+        ? `${API_BASE}/api/v1/plan?org_id=${encodeURIComponent(defaultOrgId)}`
+        : `${API_BASE}/api/v1/plan`;
+      const creditsUrl = defaultOrgId
+        ? `${API_BASE}/billing/credits?org_id=${encodeURIComponent(defaultOrgId)}`
+        : `${API_BASE}/billing/credits`;
+
+      const [usageResponse, planResponse, creditsResponse] = await Promise.all([
+        fetch(usageUrl, { credentials: "include" }),
+        fetch(planUrl, { credentials: "include" }),
+        fetch(creditsUrl, { credentials: "include" }),
+      ]);
+
+      if (usageResponse.ok) {
+        const usagePayload = (await usageResponse.json()) as DashboardUsageResponse;
+        setUsage(usagePayload);
+      } else {
+        setUsage(null);
+      }
+
+      if (planResponse.ok) {
+        const planPayload = (await planResponse.json()) as PlanUsageSummary;
+        setPlan(planPayload);
+      } else {
+        setPlan(null);
+      }
+
+      if (creditsResponse.ok) {
+        const creditsPayload = (await creditsResponse.json()) as BillingCreditsResponse;
+        setCredits(creditsPayload);
+      } else {
+        setCredits(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
@@ -156,30 +210,34 @@ export default function DashboardPage() {
   const activeProjectName = primaryProject?.name ?? "No active project";
   const recentProjects = projects.slice(0, 4);
 
-  const queryCounts = [12, 18, 9, 24, 20, 14, 28];
-  const queryLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const timeline = usage?.timeline ?? [];
+  const queryCounts = timeline.map((entry) => entry.total);
+  const queryLabels = timeline.map((entry) =>
+    new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(new Date(entry.date))
+  );
+  const hasUsage = timeline.length > 0;
   const maxQueryCount = Math.max(...queryCounts, 1);
-  const sampleMetrics: DashboardMetricsResponse = {
-    periodStart: new Date().toISOString(),
-    periodEnd: new Date().toISOString(),
-    analyses: queryCounts.reduce((sum, value) => sum + value, 0),
-    aiCalls: 0,
-    tokensEstimated: null,
-  };
-  const totalQueries = sampleMetrics.analyses;
-
-  const perfScores = [72, 68, 74, 70, 78, 82, 76];
-  const perfMax = Math.max(...perfScores, 1);
-  const perfMin = Math.min(...perfScores);
-  const perfRange = Math.max(perfMax - perfMin, 1);
-  const perfPoints = perfScores
-    .map((value, index) => {
-      const x = (index / (perfScores.length - 1)) * 100;
-      const y = 100 - ((value - perfMin) / perfRange) * 100;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const avgPerf = Math.round(perfScores.reduce((sum, value) => sum + value, 0) / perfScores.length);
+  const totalQueries = usage?.totalActions ?? 0;
+  const aiActions = usage?.aiActions ?? 0;
+  const ruleActions = usage?.ruleActions ?? 0;
+  const minutesSaved = usage?.valueMeter.minutesSaved ?? 0;
+  const costSavedUsd = usage?.valueMeter.costSavedUsd ?? 0;
+  const isProPlan = plan?.planId === "pro" || plan?.planName?.toLowerCase() === "pro";
+  const isFreePlan = plan?.planId === "free" || plan?.planName?.toLowerCase() === "free";
+  const creditSystemEnabled = plan?.creditSystemEnabled ?? isFreePlan;
+  const creditsRemaining = credits?.creditsRemaining ?? plan?.creditsRemaining ?? null;
+  const dailyCredits = credits?.dailyCredits ?? plan?.dailyCredits ?? null;
+  const softLimit70Reached =
+    credits?.softLimit70Reached ?? plan?.softLimit70Reached ?? false;
+  const softLimit90Reached =
+    credits?.softLimit90Reached ?? plan?.softLimit90Reached ?? false;
+  const creditNotice =
+    credits?.notice ??
+    (softLimit90Reached
+      ? "You have used 90% of your daily AI credits."
+      : softLimit70Reached
+        ? "You have used 70% of your daily AI credits."
+        : null);
 
   return (
     <div className="relative min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
@@ -602,22 +660,45 @@ export default function DashboardPage() {
                 {error}
               </div>
             ) : null}
+            {creditNotice && !loading ? (
+              <div className="mb-8 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+                {creditNotice}
+              </div>
+            ) : null}
 
             <div className="space-y-8">
               <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
-                    Queries (7d)
+                    Assisted actions (7d)
                   </p>
                   <p className="mt-2 text-2xl font-semibold text-black/90">{totalQueries}</p>
-                  <p className="text-xs text-black/50">Sample data</p>
+                  <p className="text-xs text-black/50">
+                    AI: {aiActions} · Rules: {ruleActions}
+                  </p>
                 </div>
                 <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
-                    Perf score
+                    Credits remaining
                   </p>
-                  <p className="mt-2 text-2xl font-semibold text-black/90">{avgPerf}</p>
-                  <p className="text-xs text-black/50">Avg over 7 days</p>
+                  <p className="mt-2 text-2xl font-semibold text-black/90">
+                    {plan
+                      ? creditSystemEnabled && creditsRemaining !== null && dailyCredits !== null
+                        ? `${creditsRemaining} / ${dailyCredits}`
+                        : isProPlan
+                          ? "Unlimited"
+                          : "-"
+                      : "-"}
+                  </p>
+                  <p className="text-xs text-black/50">
+                    {plan
+                      ? creditSystemEnabled
+                        ? creditsRemaining !== null && dailyCredits !== null
+                          ? "Daily credits (UTC reset)"
+                          : "Daily credits unavailable"
+                        : "Pro plan access"
+                      : "Plan details unavailable"}
+                  </p>
                 </div>
                 <div className="rounded-2xl border border-black/5 bg-white/70 p-4 shadow-sm shadow-black/5">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-black/40">
@@ -638,13 +719,13 @@ export default function DashboardPage() {
               <section className="grid gap-6 lg:grid-cols-[2fr_1fr]">
                 <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
                   <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-semibold">Query counts</h2>
+                    <h2 className="text-lg font-semibold">Usage timeline</h2>
                     <span className="rounded-full bg-cyan-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-700">
                       Last 7 days
                     </span>
                   </div>
                   <p className="mt-2 text-sm text-black/60">
-                    Daily query volume across your workspace.
+                    Daily AI assistance across your workspace.
                   </p>
                   <div className="mt-6 flex items-end gap-3">
                     {queryCounts.map((count, index) => (
@@ -662,53 +743,44 @@ export default function DashboardPage() {
                     ))}
                   </div>
                   <div className="mt-4 flex items-center justify-between text-xs text-black/50">
-                    <span>{totalQueries} total queries</span>
-                    <span>Sample data</span>
+                    <span>{totalQueries} total actions</span>
+                    <span>{hasUsage ? "Live data" : "No activity yet"}</span>
                   </div>
                 </div>
 
                 <div className="rounded-2xl border border-black/5 bg-white/60 p-5 shadow-sm shadow-black/5 backdrop-blur-sm">
                   <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-semibold">Performance</h2>
+                    <h2 className="text-lg font-semibold">AI value meter</h2>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-                      Avg {avgPerf}
+                      Estimated
                     </span>
                   </div>
                   <p className="mt-2 text-sm text-black/60">
-                    Query performance index (higher is better).
+                    Time and cost savings from AI-assisted analysis.
                   </p>
-                  <div className="mt-6 rounded-xl border border-black/5 bg-white px-4 py-4">
-                    <svg viewBox="0 0 100 100" className="h-32 w-full">
-                      <defs>
-                        <linearGradient id="perfLine" x1="0" y1="0" x2="1" y2="0">
-                          <stop offset="0%" stopColor="#22d3ee" />
-                          <stop offset="100%" stopColor="#38bdf8" />
-                        </linearGradient>
-                      </defs>
-                      <polyline
-                        points={perfPoints}
-                        fill="none"
-                        stroke="url(#perfLine)"
-                        strokeWidth="3"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <polyline
-                        points={`0,100 ${perfPoints} 100,100`}
-                        fill="rgba(56,189,248,0.12)"
-                        stroke="none"
-                      />
-                    </svg>
+                  <div className="mt-6 grid gap-3">
+                    <div className="rounded-xl border border-black/5 bg-white px-4 py-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-black/40">
+                        Minutes saved
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold text-black/90">{minutesSaved}</p>
+                    </div>
+                    <div className="rounded-xl border border-black/5 bg-white px-4 py-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-black/40">
+                        Cost saved (USD)
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold text-black/90">
+                        ${costSavedUsd.toFixed(2)}
+                      </p>
+                    </div>
                   </div>
-                  <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-black/60">
-                    <div>
-                      <p className="font-semibold text-black/70">Best</p>
-                      <p>{perfMax}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-black/70">Lowest</p>
-                      <p>{perfMin}</p>
-                    </div>
+                  <div className="mt-4">
+                    <Link
+                      className="inline-flex rounded-full bg-black px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:-translate-y-0.5 hover:bg-black/80"
+                      href="/dashboard/plan#upgrade"
+                    >
+                      Upgrade to Pro
+                    </Link>
                   </div>
                 </div>
               </section>

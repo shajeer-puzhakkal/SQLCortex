@@ -1,7 +1,9 @@
 export type {
   AnalyzeRequest,
   AnalyzeResponse,
+  BillingCreditsResponse,
   DashboardMetricsResponse,
+  DashboardUsageResponse,
   ExplainMode,
   MeterEvent,
   PlanUsageSummary,

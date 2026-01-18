@@ -12,6 +12,8 @@ import {
   AnalysisListResponse,
   AiInsight,
   AiSqlResponse,
+  BillingCreditsResponse,
+  DashboardUsageResponse,
   ErrorResponse,
   HealthResponse,
   ExplainMode,
@@ -65,6 +67,21 @@ import { createRateLimitMiddleware } from "./rateLimit";
 import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
 import { recordMeterEvent } from "./metering";
 import { evaluate } from "./rules";
+import {
+  applyGraceCredits,
+  buildCreditEstimate,
+  deductCredits,
+  ensureEntitlement,
+  getCreditState,
+  resolveModelTier,
+} from "./credits";
+import { recordAiValueDaily } from "./aiValue";
+import {
+  checkAiRateLimit,
+  checkDailyCap,
+  checkDuplicateRequest,
+  computeSqlHash,
+} from "./aiProtection";
 import { redactError } from "../../../packages/shared/src";
 
 dotenv.config();
@@ -273,6 +290,94 @@ function buildUpgradeUrl(subject: PlanSubject | null): string {
     return `${webOrigin}/dashboard/plan?org_id=${subject.orgId}#upgrade`;
   }
   return `${webOrigin}/dashboard/plan#upgrade`;
+}
+
+function resolveCreditActionForAnalyze(): "schema-analysis" {
+  return "schema-analysis";
+}
+
+function resolveCreditActionForAiSql(action: AiSqlAction): "explain" | "index-suggest" | "optimize" | "risk-check" {
+  switch (action) {
+    case "index-suggest":
+      return "index-suggest";
+    case "optimize":
+      return "optimize";
+    case "risk-check":
+      return "risk-check";
+    case "explain":
+    default:
+      return "explain";
+  }
+}
+
+function buildAiGuardKey(subject: PlanSubject): string {
+  return subject.subjectType === "ORG" ? `org:${subject.orgId}` : `user:${subject.userId}`;
+}
+
+async function resolvePlanSubject(
+  auth: NonNullable<AuthenticatedRequest["auth"]>,
+  orgIdParam: string | null
+): Promise<{ subject: PlanSubject } | { error: ErrorResponse; status: number }> {
+  if (orgIdParam) {
+    if (auth.orgId && auth.orgId === orgIdParam) {
+      return { subject: { subjectType: "ORG", orgId: orgIdParam } };
+    }
+    if (auth.userId) {
+      const membership = await fetchMembership(auth.userId, orgIdParam);
+      if (!membership) {
+        return { error: makeError("FORBIDDEN", "Access denied"), status: 403 };
+      }
+      return { subject: { subjectType: "ORG", orgId: orgIdParam } };
+    }
+    return { error: makeError("FORBIDDEN", "Access denied"), status: 403 };
+  }
+
+  if (auth.orgId) {
+    return { subject: { subjectType: "ORG", orgId: auth.orgId } };
+  }
+  if (auth.userId) {
+    return { subject: { subjectType: "USER", userId: auth.userId } };
+  }
+  return { error: makeError("FORBIDDEN", "Subject context required"), status: 403 };
+}
+
+async function buildPlanUsageSummary(
+  prismaClient: PrismaClient,
+  subject: PlanSubject
+): Promise<PlanUsageSummary> {
+  const planContext = await getPlanContext(prismaClient, subject);
+  const now = new Date();
+  await ensureEntitlement(prismaClient, subject, planContext.planCode, now);
+  const { start, end } = monthWindowUtc(now);
+  const usedThisPeriod = await getLlmCallsUsedThisMonth(prismaClient, subject, now);
+  const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+  const creditSystemEnabled = planContext.planCode === "FREE";
+  const creditState = creditSystemEnabled
+    ? await getCreditState(prismaClient, subject, now)
+    : null;
+  const monthlyAiActionsLimit =
+    creditSystemEnabled || planContext.planCode === "PRO"
+      ? null
+      : planContext.plan.llmEnabled
+        ? planContext.plan.monthlyLlmCallLimit
+        : null;
+
+  return {
+    planId: formatPlanId(planContext.planCode),
+    planName: planContext.plan.name,
+    aiEnabled: planContext.plan.llmEnabled,
+    monthlyAiActionsLimit,
+    usedAiActionsThisPeriod: usedThisPeriod,
+    periodStart: start.toISOString(),
+    periodEnd: end.toISOString(),
+    upgradeAvailable: Boolean(suggestedPlan),
+    creditSystemEnabled,
+    dailyCredits: creditState?.dailyCredits ?? null,
+    creditsRemaining: creditState?.creditsRemaining ?? null,
+    graceUsed: creditState?.graceUsed ?? null,
+    softLimit70Reached: creditState?.softLimit70Reached ?? false,
+    softLimit90Reached: creditState?.softLimit90Reached ?? false,
+  };
 }
 
 function resolveAiFeatureStatusFromProject(
@@ -1989,49 +2094,195 @@ app.get(
     }
 
     const orgIdParam = typeof req.query.org_id === "string" ? req.query.org_id : null;
-    let subject: PlanSubject | null = null;
-
-    if (orgIdParam) {
-      if (auth.orgId && auth.orgId === orgIdParam) {
-        subject = { subjectType: "ORG", orgId: orgIdParam };
-      } else if (auth.userId) {
-        const membership = await fetchMembership(auth.userId, orgIdParam);
-        if (!membership) {
-          return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
-        }
-        subject = { subjectType: "ORG", orgId: orgIdParam };
-      } else {
-        return res.status(403).json(makeError("FORBIDDEN", "Access denied"));
-      }
-    } else if (auth.orgId) {
-      subject = { subjectType: "ORG", orgId: auth.orgId };
-    } else if (auth.userId) {
-      subject = { subjectType: "USER", userId: auth.userId };
+    const resolved = await resolvePlanSubject(auth, orgIdParam);
+    if ("error" in resolved) {
+      return res.status(resolved.status).json(resolved.error);
     }
 
-    if (!subject) {
-      return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
+    const summary = await buildPlanUsageSummary(prisma, resolved.subject);
+    return res.json(summary);
+  }
+);
+
+app.get(
+  "/billing/plan",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, unknown, { org_id?: string }>,
+    res: Response<PlanUsageSummary | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
     }
 
-    const planContext = await getPlanContext(prisma, subject);
-    const now = new Date();
-    const { start, end } = monthWindowUtc(now);
-    const usedThisPeriod = await getLlmCallsUsedThisMonth(prisma, subject, now);
-    const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
-    const summary: PlanUsageSummary = {
-      planId: formatPlanId(planContext.planCode),
-      planName: planContext.plan.name,
-      aiEnabled: planContext.plan.llmEnabled,
-      monthlyAiActionsLimit: planContext.plan.llmEnabled
-        ? planContext.plan.monthlyLlmCallLimit
-        : null,
-      usedAiActionsThisPeriod: usedThisPeriod,
-      periodStart: start.toISOString(),
-      periodEnd: end.toISOString(),
-      upgradeAvailable: Boolean(suggestedPlan),
+    const orgIdParam = typeof req.query.org_id === "string" ? req.query.org_id : null;
+    const resolved = await resolvePlanSubject(auth, orgIdParam);
+    if ("error" in resolved) {
+      return res.status(resolved.status).json(resolved.error);
+    }
+
+    const summary = await buildPlanUsageSummary(prisma, resolved.subject);
+    return res.json(summary);
+  }
+);
+
+app.get(
+  "/billing/credits",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, unknown, { org_id?: string }>,
+    res: Response<BillingCreditsResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const orgIdParam = typeof req.query.org_id === "string" ? req.query.org_id : null;
+    const resolved = await resolvePlanSubject(auth, orgIdParam);
+    if ("error" in resolved) {
+      return res.status(resolved.status).json(resolved.error);
+    }
+
+    const planContext = await getPlanContext(prisma, resolved.subject);
+    await ensureEntitlement(prisma, resolved.subject, planContext.planCode, new Date());
+
+    const creditState = await getCreditState(prisma, resolved.subject);
+    const response: BillingCreditsResponse = {
+      dailyCredits: creditState.dailyCredits,
+      creditsRemaining: creditState.creditsRemaining,
+      graceUsed: creditState.graceUsed,
+      lastResetAt: creditState.lastResetAt.toISOString(),
+      softLimit70Reached: creditState.softLimit70Reached,
+      softLimit90Reached: creditState.softLimit90Reached,
+      notice: creditState.notice,
     };
 
-    return res.json(summary);
+    return res.json(response);
+  }
+);
+
+app.get(
+  "/dashboard/usage",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      unknown,
+      unknown,
+      unknown,
+      { org_id?: string; project_id?: string; range?: string }
+    >,
+    res: Response<DashboardUsageResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const orgIdParam = typeof req.query.org_id === "string" ? req.query.org_id : null;
+    const projectIdParam = typeof req.query.project_id === "string" ? req.query.project_id : null;
+    const resolved = await resolvePlanSubject(auth, orgIdParam);
+    if ("error" in resolved) {
+      return res.status(resolved.status).json(resolved.error);
+    }
+
+    let projectContext: ProjectContext | null = null;
+    if (projectIdParam) {
+      const resolvedProject = await resolveProjectContext(auth, projectIdParam);
+      if ("error" in resolvedProject) {
+        return res.status(resolvedProject.status ?? 400).json(resolvedProject.error);
+      }
+      projectContext = resolvedProject;
+    }
+
+    const rangeParam = typeof req.query.range === "string" ? req.query.range : "7d";
+    const rangeDays = rangeParam === "30d" ? 30 : 7;
+    const now = new Date();
+    const endDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const startDate = new Date(endDate);
+    startDate.setUTCDate(startDate.getUTCDate() - (rangeDays - 1));
+    const endExclusive = new Date(endDate);
+    endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+
+    const subjectFilter = projectContext?.project?.orgId
+      ? { orgId: projectContext.project.orgId }
+      : projectContext?.project?.ownerUserId
+        ? { userId: projectContext.project.ownerUserId }
+        : resolved.subject.subjectType === "ORG"
+          ? { orgId: resolved.subject.orgId }
+          : { userId: resolved.subject.userId };
+
+    const events = await prisma.meterEvent.findMany({
+      where: {
+        ...(projectIdParam ? { projectId: projectIdParam } : subjectFilter),
+        timestamp: { gte: startDate, lt: endExclusive },
+      },
+      select: { timestamp: true, eventType: true, aiUsed: true },
+    });
+
+    const actionCounts = new Map<string, number>();
+    const timelineMap = new Map<string, { total: number; ai: number; rules: number }>();
+    let aiActions = 0;
+
+    for (const event of events) {
+      const action = event.eventType;
+      actionCounts.set(action, (actionCounts.get(action) ?? 0) + 1);
+
+      const dateKey = event.timestamp.toISOString().slice(0, 10);
+      const bucket = timelineMap.get(dateKey) ?? { total: 0, ai: 0, rules: 0 };
+      bucket.total += 1;
+      if (event.aiUsed) {
+        bucket.ai += 1;
+        aiActions += 1;
+      } else {
+        bucket.rules += 1;
+      }
+      timelineMap.set(dateKey, bucket);
+    }
+
+    const timeline: Array<{ date: string; total: number; ai: number; rules: number }> = [];
+    for (let offset = 0; offset < rangeDays; offset += 1) {
+      const date = new Date(startDate);
+      date.setUTCDate(startDate.getUTCDate() + offset);
+      const dateKey = date.toISOString().slice(0, 10);
+      const bucket = timelineMap.get(dateKey) ?? { total: 0, ai: 0, rules: 0 };
+      timeline.push({ date: dateKey, ...bucket });
+    }
+
+    const byAction = Array.from(actionCounts.entries())
+      .map(([action, count]) => ({ action, count }))
+      .sort((a, b) => b.count - a.count);
+
+    const valueRows = await prisma.aiValueDaily.findMany({
+      where: {
+        ...subjectFilter,
+        date: { gte: startDate, lte: endDate },
+      },
+      select: { estimatedMinutesSaved: true, estimatedCostSavedUsd: true },
+    });
+
+    const minutesSaved = valueRows.reduce(
+      (sum, row) => sum + (row.estimatedMinutesSaved ?? 0),
+      0
+    );
+    const costSavedUsd = valueRows.reduce(
+      (sum, row) => sum + (row.estimatedCostSavedUsd ?? 0),
+      0
+    );
+
+    const response: DashboardUsageResponse = {
+      periodStart: startDate.toISOString(),
+      periodEnd: endDate.toISOString(),
+      totalActions: events.length,
+      aiActions,
+      ruleActions: events.length - aiActions,
+      byAction,
+      timeline,
+      valueMeter: { minutesSaved, costSavedUsd },
+    };
+
+    return res.json(response);
   }
 );
 
@@ -3516,7 +3767,7 @@ app.post(
     let aiInsight: AiInsight | null = null;
     let aiUsed = false;
     let tokensEstimated: number | null = null;
-    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | null = null;
+    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
     let requiredPlan: string | null = null;
     let upgradeUrl: string | null = null;
 
@@ -3529,13 +3780,58 @@ app.post(
           : null;
 
     if (quotaSubject) {
+      const guardKey = buildAiGuardKey(quotaSubject);
+      const requestHash = computeSqlHash(sql);
+      const rateLimit = checkAiRateLimit(guardKey);
+      if (rateLimit.limited) {
+        if (rateLimit.retryAfterSeconds) {
+          res.setHeader("Retry-After", rateLimit.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "AI request rate limit exceeded.", {
+            reason: "rate_limit",
+            retry_after_seconds: rateLimit.retryAfterSeconds ?? null,
+          })
+        );
+      }
+
+      const duplicateCheck = checkDuplicateRequest({
+        key: `${guardKey}:${resolveCreditActionForAnalyze()}`,
+        sqlHash: requestHash,
+      });
+      if (duplicateCheck.limited) {
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Repeated identical AI requests detected.", {
+            reason: "duplicate_request",
+          })
+        );
+      }
+
+      const dailyCap = checkDailyCap(guardKey, new Date());
+      if (dailyCap.limited) {
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Daily AI request cap reached.", {
+            reason: "daily_cap",
+          })
+        );
+      }
       const planContext = await getPlanContext(prisma, quotaSubject);
-      const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
       const now = new Date();
+      await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
+
+      const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
       const llmAccess = aiFeatureStatus.enabled
         ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
         : null;
       const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+      const creditSystemEnabled = planContext.planCode === "FREE";
+      const creditAction = resolveCreditActionForAnalyze();
+      const creditEstimate = creditSystemEnabled
+        ? buildCreditEstimate({ action: creditAction, sql, modelTier: resolveModelTier() })
+        : null;
+      let creditState = creditSystemEnabled
+        ? await getCreditState(prisma, quotaSubject, now)
+        : null;
 
       if (aiFeatureStatus.enabled && llmAccess && !llmAccess.enabled) {
         gateReason = llmAccess.reason === "limit_reached" ? "PLAN_LIMIT" : "AI_DISABLED";
@@ -3544,7 +3840,21 @@ app.post(
         upgradeUrl = buildUpgradeUrl(quotaSubject);
       }
 
-      if (llmEnabled) {
+      if (llmEnabled && creditSystemEnabled && creditState) {
+        if (creditState.creditsRemaining <= 0) {
+          if (!creditState.graceUsed) {
+            creditState = await applyGraceCredits(prisma, quotaSubject, creditState);
+          } else {
+            gateReason = "CREDITS_EXHAUSTED";
+            const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+            requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : "pro";
+            upgradeUrl = buildUpgradeUrl(quotaSubject);
+            warnings.push("Daily AI credits are exhausted. Upgrade to continue.");
+          }
+        }
+      }
+
+      if (llmEnabled && !gateReason) {
         const aiPayload: AiInsightsPayload = {
           plan_summary: planSummary,
           rule_findings: ruleFindings,
@@ -3566,6 +3876,18 @@ app.post(
             findings: ruleFindings,
           });
           await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+          if (creditSystemEnabled && creditEstimate) {
+            const updatedCredits = await deductCredits(prisma, quotaSubject, creditEstimate, {
+              action: creditAction,
+              modelTier: resolveModelTier(),
+            });
+            if (updatedCredits?.notice) {
+              warnings.push(updatedCredits.notice);
+            }
+          }
+          void recordAiValueDaily(prisma, quotaSubject, creditAction, now).catch((err) => {
+            console.error("Failed to record AI value meter", err);
+          });
         } catch (err) {
           console.error("Failed to fetch AI insights", err);
           warnings.push("AI explanation is temporarily unavailable.");
@@ -3699,13 +4021,58 @@ app.post(
       return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
     }
 
+    const guardKey = buildAiGuardKey(quotaSubject);
+    const requestHash = computeSqlHash(sql);
+    const rateLimit = checkAiRateLimit(guardKey);
+    if (rateLimit.limited) {
+      if (rateLimit.retryAfterSeconds) {
+        res.setHeader("Retry-After", rateLimit.retryAfterSeconds.toString());
+      }
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "AI request rate limit exceeded.", {
+          reason: "rate_limit",
+          retry_after_seconds: rateLimit.retryAfterSeconds ?? null,
+        })
+      );
+    }
+
+    const duplicateCheck = checkDuplicateRequest({
+      key: `${guardKey}:${resolveCreditActionForAiSql(action)}`,
+      sqlHash: requestHash,
+    });
+    if (duplicateCheck.limited) {
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "Repeated identical AI requests detected.", {
+          reason: "duplicate_request",
+        })
+      );
+    }
+
+    const dailyCap = checkDailyCap(guardKey, new Date());
+    if (dailyCap.limited) {
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "Daily AI request cap reached.", {
+          reason: "daily_cap",
+        })
+      );
+    }
+
     const planContext = await getPlanContext(prisma, quotaSubject);
-    const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
     const now = new Date();
+    await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
+    const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
     const llmAccess = aiFeatureStatus.enabled
       ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
       : null;
     const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+    const creditSystemEnabled = planContext.planCode === "FREE";
+    const creditAction = resolveCreditActionForAiSql(action);
+    const creditEstimate = creditSystemEnabled
+      ? buildCreditEstimate({ action: creditAction, sql, modelTier: resolveModelTier() })
+      : null;
+    let creditState = creditSystemEnabled
+      ? await getCreditState(prisma, quotaSubject, now)
+      : null;
 
     if (!llmEnabled) {
       const fallbackReason: AiSqlFallbackReason = aiFeatureStatus.enabled
@@ -3731,6 +4098,41 @@ app.post(
         latencyMs: fallback.meta.latency_ms,
       });
       return res.json(fallback);
+    }
+
+    if (creditSystemEnabled && creditState) {
+      if (creditState.creditsRemaining <= 0) {
+        if (!creditState.graceUsed) {
+          creditState = await applyGraceCredits(prisma, quotaSubject, creditState);
+        } else {
+          const requiredPlan = formatPlanId(suggestedUpgradeForPlan(planContext.planCode) ?? "PRO");
+          const gated: AiSqlResponse = {
+            status: "gated",
+            gateReason: "CREDITS_EXHAUSTED",
+            requiredPlan,
+            upgradeUrl: buildUpgradeUrl(quotaSubject),
+            summary: "Daily AI credits are exhausted.",
+            findings: [],
+            recommendations: ["Upgrade to Pro for unlimited AI usage."],
+            risk_level: "low",
+            meta: { provider: "disabled", model: "n/a", latency_ms: 0 },
+          };
+          logAiSqlTelemetry({
+            action,
+            projectId: connectionContext.projectId,
+            userId: auth.userId ?? null,
+            orgId: connectionContext.orgId ?? auth.orgId ?? null,
+            llmUsed: false,
+            blocked: true,
+            reason: "credits_exhausted",
+            errorCode: null,
+            provider: gated.meta.provider,
+            model: gated.meta.model,
+            latencyMs: gated.meta.latency_ms,
+          });
+          return res.json(gated);
+        }
+      }
     }
 
     const normalizedSql = normalizeSql(sql);
@@ -3835,6 +4237,15 @@ app.post(
         response.meta.provider !== "disabled" && response.meta.provider !== "mock";
       if (llmUsed) {
         await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+        if (creditSystemEnabled && creditEstimate) {
+          await deductCredits(prisma, quotaSubject, creditEstimate, {
+            action: creditAction,
+            modelTier: resolveModelTier(),
+          });
+        }
+        void recordAiValueDaily(prisma, quotaSubject, creditAction, now).catch((err) => {
+          console.error("Failed to record AI value meter", err);
+        });
       }
       logAiSqlTelemetry({
         action,

@@ -3,10 +3,12 @@ import type {
   AnalyzeRequest,
   AnalyzeResponse,
   DashboardMetricsResponse,
+  DashboardUsageResponse,
   ExplainMode,
   RuleFinding,
   AiInsight,
   AiSuggestion,
+  BillingCreditsResponse,
   MeterEvent,
   PlanSummary,
   PlanUsageSummary,
@@ -16,10 +18,12 @@ export type {
   AnalyzeRequest,
   AnalyzeResponse,
   DashboardMetricsResponse,
+  DashboardUsageResponse,
   ExplainMode,
   RuleFinding,
   AiInsight,
   AiSuggestion,
+  BillingCreditsResponse,
   MeterEvent,
   PlanSummary,
   PlanUsageSummary,
@@ -77,6 +81,10 @@ export type AiSqlRequest = {
 };
 
 export type AiSqlResponse = {
+  status?: "ok" | "gated";
+  gateReason?: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
+  requiredPlan?: string | null;
+  upgradeUrl?: string | null;
   summary: string;
   findings: string[];
   recommendations: string[];

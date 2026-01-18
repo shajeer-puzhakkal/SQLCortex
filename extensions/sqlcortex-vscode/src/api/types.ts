@@ -9,9 +9,12 @@ export type {
   AnalyzeResponse,
   AiInsight,
   AiSuggestion,
+  BillingCreditsResponse,
   DashboardMetricsResponse,
+  DashboardUsageResponse,
   ExplainMode,
   MeterEvent,
+  PlanUsageSummary,
   RuleFinding,
 } from "../../../../packages/shared/src/contracts";
 
