@@ -4,13 +4,39 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
 _PROMPT_DIR = Path(__file__).resolve().parent
+
+
+def _normalize(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        return value.dict()
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize(item) for key, item in value.items()}
+    return value
 
 
 def _stringify(value: Any) -> str:
     if isinstance(value, str):
         return value
-    return json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True)
+    normalized = _normalize(value)
+    try:
+        return json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True)
+    except TypeError:
+        return json.dumps(
+            normalized,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
 
 
 def render_prompt(

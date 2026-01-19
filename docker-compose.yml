@@ -28,6 +28,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       PORT: ${API_PORT:-4000}
+      ANALYZER_BASE_URL: http://ai-services:8000
     ports:
       - "${API_PORT:-4000}:4000"
     depends_on:
