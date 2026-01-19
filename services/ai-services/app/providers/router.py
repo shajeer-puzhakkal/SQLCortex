@@ -24,16 +24,27 @@ class ProviderResult:
 
 
 def _read_timeout_ms() -> int:
-    raw = (os.getenv("AI_TIMEOUT_MS") or "30000").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        value = 30000
-    return max(100, value)
+    raw = (os.getenv("AI_TIMEOUT_MS") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 30000
+        return max(100, value)
+
+    legacy_seconds = (os.getenv("LLM_TIMEOUT_SECONDS") or "").strip()
+    if legacy_seconds:
+        try:
+            value = int(float(legacy_seconds) * 1000)
+        except ValueError:
+            value = 30000
+        return max(100, value)
+
+    return 30000
 
 
 def _resolve_provider() -> str:
-    provider = (os.getenv("AI_PROVIDER") or "disabled").strip().lower()
+    provider = (os.getenv("AI_PROVIDER") or os.getenv("LLM_PROVIDER") or "disabled").strip().lower()
     if provider not in {"openai", "ollama", "mock", "disabled"}:
         return "disabled"
     return provider
@@ -42,7 +53,7 @@ def _resolve_provider() -> str:
 def _resolve_model(provider: str, model_override: Optional[str]) -> str:
     if model_override:
         return model_override.strip()
-    env_model = (os.getenv("AI_MODEL") or "").strip()
+    env_model = (os.getenv("AI_MODEL") or os.getenv("LLM_MODEL") or "").strip()
     if env_model:
         return env_model
     return DEFAULT_MODELS.get(provider, "unknown")
