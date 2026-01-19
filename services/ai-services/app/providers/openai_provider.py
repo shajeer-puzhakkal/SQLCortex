@@ -12,11 +12,11 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 def generate_text(system_prompt: str, user_prompt: str, *, model: str, timeout_ms: int) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
     if not api_key:
         raise ProviderUnavailableError("OPENAI_API_KEY is not set")
 
-    base_url = os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL") or DEFAULT_BASE_URL
     endpoint = base_url.rstrip("/") + "/chat/completions"
 
     payload = {

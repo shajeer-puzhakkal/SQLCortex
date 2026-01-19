@@ -36,16 +36,24 @@ export type AiServiceError = {
   payload: ErrorResponse;
 };
 
+function normalizeAiServicesBaseUrl(raw: string): string {
+  let base = raw.trim().replace(/\/+$/, "");
+  if (base.endsWith("/ai")) {
+    base = base.slice(0, -3);
+  }
+  return base || raw.trim();
+}
+
 function resolveAiServicesBaseUrl(): string {
   const defaultAiPortRaw = Number(process.env.ANALYZER_PORT ?? 8000);
   const defaultAiPort =
     Number.isFinite(defaultAiPortRaw) && defaultAiPortRaw > 0 ? defaultAiPortRaw : 8000;
-  return (
+  const raw =
     process.env.AI_SERVICES_BASE_URL ??
     process.env.ANALYZER_BASE_URL ??
     process.env.ANALYZER_URL ??
-    `http://ai-services:${defaultAiPort}`
-  );
+    `http://ai-services:${defaultAiPort}`;
+  return normalizeAiServicesBaseUrl(raw);
 }
 
 function resolveAiServicesTimeoutMs(): number {

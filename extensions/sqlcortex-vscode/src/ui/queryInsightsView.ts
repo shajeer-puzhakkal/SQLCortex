@@ -617,12 +617,12 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           return;
         }
         confirmEl.classList.remove("hidden");
-        const baseCopy = `Daily credits: ${confirm.dailyCredits}.`;
+        const baseCopy = "Daily credits: " + confirm.dailyCredits + ".";
         confirmDescriptionEl.textContent = confirm.notice
-          ? `${confirm.notice} ${baseCopy}`
+          ? confirm.notice + " " + baseCopy
           : baseCopy;
-        confirmEstimatedEl.textContent = `${confirm.estimatedCredits} credits`;
-        confirmRemainingEl.textContent = `${confirm.remainingCredits} credits`;
+        confirmEstimatedEl.textContent = confirm.estimatedCredits + " credits";
+        confirmRemainingEl.textContent = confirm.remainingCredits + " credits";
       }
 
       if (gateButtonEl) {
