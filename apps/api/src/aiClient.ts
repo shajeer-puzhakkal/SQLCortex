@@ -38,10 +38,29 @@ export type AiServiceError = {
 
 function normalizeAiServicesBaseUrl(raw: string): string {
   let base = raw.trim().replace(/\/+$/, "");
-  if (base.endsWith("/ai")) {
-    base = base.slice(0, -3);
+  if (!base) {
+    return raw.trim();
   }
-  return base || raw.trim();
+
+  const normalized = base.toLowerCase();
+  const suffixes = [
+    "/health",
+    "/version",
+    "/ai/insights",
+    "/ai/sql/index-suggest",
+    "/ai/sql/risk-check",
+    "/ai/sql/optimize",
+    "/ai/sql/explain",
+    "/ai/sql",
+    "/ai",
+  ];
+
+  const match = suffixes.find((suffix) => normalized.endsWith(suffix));
+  if (match) {
+    base = base.slice(0, base.length - match.length);
+  }
+
+  return base.replace(/\/+$/, "");
 }
 
 function resolveAiServicesBaseUrl(): string {
