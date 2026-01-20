@@ -2,7 +2,7 @@
   "name": "sqlcortex-vscode",
   "displayName": "SQLCortex",
   "description": "SQLCortex VS Code extension",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "sqlcortex",
   "engines": {
     "vscode": "^1.85.0"
@@ -11,7 +11,30 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:sql"
+    "onLanguage:sql",
+    "onLanguage:pgsql",
+    "onLanguage:mssql",
+    "onView:sqlcortex.overview",
+    "onView:sqlcortex.databaseExplorer",
+    "onView:sqlcortex.queryInsights",
+    "onView:sqlcortex.chatView",
+    "onCommand:sqlcortex.login",
+    "onCommand:sqlcortex.logout",
+    "onCommand:sqlcortex.selectOrg",
+    "onCommand:sqlcortex.selectProject",
+    "onCommand:sqlcortex.selectConnection",
+    "onCommand:sqlcortex.setExplainMode",
+    "onCommand:sqlcortex.refreshExplorer",
+    "onCommand:sqlcortex.searchTable",
+    "onCommand:sqlcortex.copyTableName",
+    "onCommand:sqlcortex.copyColumnName",
+    "onCommand:sqlcortex.runTableQuery",
+    "onCommand:sqlcortex.runQuery",
+    "onCommand:sqlcortex.runSelection",
+    "onCommand:sqlcortex.analyzeSelection",
+    "onCommand:sqlcortex.analyzeSelectionWithAnalyze",
+    "onCommand:sqlcortex.analyzeDocument",
+    "onCommand:sqlcortex.analyzeDocumentWithAnalyze"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -194,6 +217,16 @@
       "editor/context": [
         {
           "command": "sqlcortex.analyzeSelection",
+          "when": "editorTextFocus && editorHasSelection && (resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql)",
+          "group": "navigation"
+        },
+        {
+          "command": "sqlcortex.analyzeSelectionWithAnalyze",
+          "when": "editorTextFocus && editorHasSelection && (resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql)",
+          "group": "navigation"
+        },
+        {
+          "command": "sqlcortex.runSelection",
           "when": "editorTextFocus && editorHasSelection && (resourceLangId == sql || resourceLangId == mssql || resourceLangId == pgsql)",
           "group": "navigation"
         }
