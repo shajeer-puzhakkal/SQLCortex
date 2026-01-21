@@ -109,6 +109,13 @@ const QUERY_TIMEOUT_MS =
   Number.isFinite(queryTimeoutMsEnv) && queryTimeoutMsEnv > 0
     ? queryTimeoutMsEnv
     : 10000;
+const explainTimeoutMsEnv = Number(
+  process.env.EXPLAIN_TIMEOUT_MS ?? process.env.EXPLAIN_TIMEOUT ?? QUERY_TIMEOUT_MS
+);
+const EXPLAIN_TIMEOUT_MS =
+  Number.isFinite(explainTimeoutMsEnv) && explainTimeoutMsEnv > 0
+    ? explainTimeoutMsEnv
+    : QUERY_TIMEOUT_MS;
 const QUERY_ROW_LIMIT = Number(process.env.QUERY_ROW_LIMIT ?? 1000) || 1000;
 const queryDatabaseUrl = process.env.QUERY_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
 const queryPrisma =
@@ -176,6 +183,21 @@ type ProjectContext =
       };
     }
   | { error: ErrorResponse; status: number };
+
+type ResolvedProjectConnection =
+  | { error: ErrorResponse; status: number }
+  | {
+      projectId: string;
+      orgId: string | null;
+      project: NonNullable<ProjectContext["project"]>;
+      connection: {
+        id: string;
+        projectId: string;
+        type: string;
+        sslMode: string;
+      };
+      connectionString: string;
+    };
 
 type AnalyzerResultPayload = {
   analysis: {
@@ -280,6 +302,32 @@ type AiSqlFallbackReason =
   | "plan_disabled"
   | "limit_reached"
   | "service_unavailable";
+
+type RunConnectionQueryFn = <T>(
+  connectionString: string,
+  sql: string,
+  timeoutMs?: number
+) => Promise<T>;
+
+type ResolveProjectConnectionFn = (
+  auth: NonNullable<AuthenticatedRequest["auth"]>,
+  projectId: string,
+  connectionId: string
+) => Promise<ResolvedProjectConnection>;
+
+const apiOverrides: {
+  runConnectionQuery?: RunConnectionQueryFn;
+  resolveProjectConnection?: ResolveProjectConnectionFn;
+} = {};
+
+export function setApiOverrides(overrides: Partial<typeof apiOverrides>) {
+  Object.assign(apiOverrides, overrides);
+}
+
+export function clearApiOverrides() {
+  apiOverrides.runConnectionQuery = undefined;
+  apiOverrides.resolveProjectConnection = undefined;
+}
 
 function formatPlanId(planCode: PlanCode): string {
   return planCode.toLowerCase();
@@ -885,13 +933,19 @@ async function runSchemaQuery<T>(
 
 async function runConnectionQuery<T>(
   connectionString: string,
-  sql: string
+  sql: string,
+  timeoutMs: number = QUERY_TIMEOUT_MS
 ): Promise<T> {
+  if (apiOverrides.runConnectionQuery) {
+    return apiOverrides.runConnectionQuery(connectionString, sql, timeoutMs) as Promise<T>;
+  }
+
   const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : QUERY_TIMEOUT_MS;
   try {
     await client.$connect();
     return await client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeout}`);
       await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
       return tx.$queryRawUnsafe(sql) as Promise<T>;
     });
@@ -904,21 +958,11 @@ async function resolveProjectConnection(
   auth: NonNullable<AuthenticatedRequest["auth"]>,
   projectId: string,
   connectionId: string
-): Promise<
-  | { error: ErrorResponse; status: number }
-  | {
-      projectId: string;
-      orgId: string | null;
-      project: NonNullable<ProjectContext["project"]>;
-      connection: {
-        id: string;
-        projectId: string;
-        type: string;
-        sslMode: string;
-      };
-      connectionString: string;
-    }
-> {
+): Promise<ResolvedProjectConnection> {
+  if (apiOverrides.resolveProjectConnection) {
+    return apiOverrides.resolveProjectConnection(auth, projectId, connectionId);
+  }
+
   const projectContext = await resolveProjectContext(auth, projectId);
   if ("error" in projectContext) {
     return { error: projectContext.error, status: projectContext.status };
@@ -3684,7 +3728,8 @@ app.post(
     try {
       const explainRows = await runConnectionQuery<unknown[]>(
         connectionContext.connectionString,
-        `${explainClause} ${normalizedSql}`
+        `${explainClause} ${normalizedSql}`,
+        EXPLAIN_TIMEOUT_MS
       );
       explainJson = extractExplainJson(explainRows);
     } catch (err) {
@@ -4144,7 +4189,8 @@ app.post(
     try {
       const explainRows = await runConnectionQuery<unknown[]>(
         connectionContext.connectionString,
-        `${explainClause} ${normalizedSql}`
+        `${explainClause} ${normalizedSql}`,
+        EXPLAIN_TIMEOUT_MS
       );
       explainJson = extractExplainJson(explainRows);
     } catch (err) {
@@ -4928,8 +4974,12 @@ async function start() {
   app.listen(port, () => console.log(`api listening on :${port}`));
 }
 
-start().catch((err) => {
-  console.error("Failed to start API", err);
-  process.exitCode = 1;
-});
+if (process.env.NODE_ENV !== "test") {
+  start().catch((err) => {
+    console.error("Failed to start API", err);
+    process.exitCode = 1;
+  });
+}
+
+export { app, prisma, start };
 

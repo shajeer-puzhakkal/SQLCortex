@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { randomUUID } from "crypto";
 import { hashSql, normalizeSql, redactError } from "../../../packages/shared/src";
 import type { ExplainMode, MeterEvent } from "../../../packages/shared/src/contracts";
 
@@ -23,9 +24,11 @@ export async function recordMeterEvent(
   input: MeterEventInput
 ): Promise<string | null> {
   const sqlHash = hashSql(normalizeSql(input.sql));
+  const eventId = randomUUID();
   try {
-    const record = await prisma.meterEvent.create({
+    const createPromise = prisma.meterEvent.create({
       data: {
+        id: eventId,
         timestamp: new Date(),
         orgId: input.orgId,
         projectId: input.projectId,
@@ -42,7 +45,10 @@ export async function recordMeterEvent(
         explainMode: input.explainMode ?? null,
       },
     });
-    return record.id;
+    createPromise.catch((err) => {
+      console.error("Failed to record meter event", redactError(err));
+    });
+    return eventId;
   } catch (err) {
     console.error("Failed to record meter event", redactError(err));
     return null;
