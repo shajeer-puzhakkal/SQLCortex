@@ -13,9 +13,13 @@ export type DbExplorerNode =
   | SchemaSectionNode
   | TableNode
   | ColumnsRootNode
+  | RelationshipsRootNode
+  | IndexesRootNode
   | ConstraintsRootNode
   | ColumnNode
   | ConstraintNode
+  | RelationshipNode
+  | IndexNode
   | InfoNode
   | ErrorNode
   | LoadingNode;
@@ -30,9 +34,13 @@ type NodeKind =
   | "schemaSection"
   | "table"
   | "columnsRoot"
+  | "relationshipsRoot"
+  | "indexesRoot"
   | "constraintsRoot"
   | "column"
   | "constraint"
+  | "relationship"
+  | "index"
   | "info"
   | "error"
   | "loading";
@@ -198,6 +206,48 @@ export class ConstraintsRootNode extends BaseNode<"constraintsRoot"> {
   }
 }
 
+export class RelationshipsRootNode extends BaseNode<"relationshipsRoot"> {
+  readonly connectionId: string;
+  readonly schemaName: string;
+  readonly tableName: string;
+
+  constructor(
+    connectionId: string,
+    schemaName: string,
+    tableName: string,
+    parent?: DbExplorerNode
+  ) {
+    super("relationshipsRoot", "Relationships", vscode.TreeItemCollapsibleState.Collapsed, parent);
+    this.connectionId = connectionId;
+    this.schemaName = schemaName;
+    this.tableName = tableName;
+    this.id = `sqlcortex.relationshipsRoot.${connectionId}.${schemaName}.${tableName}`;
+    this.contextValue = "sqlcortex.relationshipsRoot";
+    this.iconPath = new vscode.ThemeIcon("link");
+  }
+}
+
+export class IndexesRootNode extends BaseNode<"indexesRoot"> {
+  readonly connectionId: string;
+  readonly schemaName: string;
+  readonly tableName: string;
+
+  constructor(
+    connectionId: string,
+    schemaName: string,
+    tableName: string,
+    parent?: DbExplorerNode
+  ) {
+    super("indexesRoot", "Indexes", vscode.TreeItemCollapsibleState.Collapsed, parent);
+    this.connectionId = connectionId;
+    this.schemaName = schemaName;
+    this.tableName = tableName;
+    this.id = `sqlcortex.indexesRoot.${connectionId}.${schemaName}.${tableName}`;
+    this.contextValue = "sqlcortex.indexesRoot";
+    this.iconPath = new vscode.ThemeIcon("list-tree");
+  }
+}
+
 export class ColumnNode extends BaseNode<"column"> {
   readonly connectionId: string;
   readonly schemaName: string;
@@ -242,6 +292,48 @@ export class ConstraintNode extends BaseNode<"constraint"> {
     this.tooltip = constraint.tooltip ?? constraint.summary ?? constraint.type;
     if (constraint.icon) {
       this.iconPath = new vscode.ThemeIcon(constraint.icon);
+    }
+  }
+}
+
+type RelationshipInfo = {
+  name: string;
+  summary?: string;
+  tooltip?: string;
+  icon?: string;
+};
+
+export class RelationshipNode extends BaseNode<"relationship"> {
+  readonly relationship: RelationshipInfo;
+
+  constructor(relationship: RelationshipInfo, parent?: DbExplorerNode) {
+    super("relationship", relationship.name, vscode.TreeItemCollapsibleState.None, parent);
+    this.relationship = relationship;
+    this.contextValue = "sqlcortex.relationship";
+    this.description = relationship.summary;
+    this.tooltip = relationship.tooltip ?? relationship.summary ?? "Relationship";
+    this.iconPath = new vscode.ThemeIcon(relationship.icon ?? "link");
+  }
+}
+
+type IndexNodeInfo = {
+  name: string;
+  summary?: string;
+  tooltip?: string;
+  icon?: string;
+};
+
+export class IndexNode extends BaseNode<"index"> {
+  readonly index: IndexNodeInfo;
+
+  constructor(index: IndexNodeInfo, parent?: DbExplorerNode) {
+    super("index", index.name, vscode.TreeItemCollapsibleState.None, parent);
+    this.index = index;
+    this.contextValue = "sqlcortex.index";
+    this.description = index.summary;
+    this.tooltip = index.tooltip ?? index.summary ?? "Index";
+    if (index.icon) {
+      this.iconPath = new vscode.ThemeIcon(index.icon);
     }
   }
 }

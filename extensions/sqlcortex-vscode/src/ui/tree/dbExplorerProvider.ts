@@ -3,15 +3,20 @@ import type { ApiClient } from "../../api/client";
 import { formatApiError } from "../../api/client";
 import {
   executeQuery,
+  getSchemaMetadata,
   listColumns,
   listConnections,
   listSchemas,
   listTables,
 } from "../../api/endpoints";
 import type {
+  ForeignKeyInfo,
+  IndexInfo,
   SchemaColumnResource,
+  SchemaMetadataResponse,
   SchemaResource,
   SchemaTableResource,
+  TableInfo,
 } from "../../api/types";
 import { getWorkspaceContext } from "../../state/workspaceState";
 import type { TokenStore } from "../../auth/tokenStore";
@@ -24,7 +29,11 @@ import {
   ConstraintsRootNode,
   ErrorNode,
   InfoNode,
+  IndexNode,
+  IndexesRootNode,
   type DbExplorerNode,
+  RelationshipNode,
+  RelationshipsRootNode,
   SchemaNode,
   SchemaSectionNode,
   SchemasRootNode,
@@ -50,6 +59,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
   private readonly cache = new Map<string, { expiresAt: number; value: unknown }>();
+  private readonly schemaMetadataPromises = new Map<string, Promise<SchemaMetadataResponse>>();
   private treeView?: vscode.TreeView<DbExplorerNode>;
 
   constructor(private readonly deps: ProviderDependencies) {}
@@ -64,6 +74,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
 
   clearCache(): void {
     this.cache.clear();
+    this.schemaMetadataPromises.clear();
   }
 
   getParent(element: DbExplorerNode): DbExplorerNode | undefined {
@@ -96,6 +107,10 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
         return this.getTableChildren(element);
       case "columnsRoot":
         return this.loadColumns(element);
+      case "relationshipsRoot":
+        return this.loadRelationships(element);
+      case "indexesRoot":
+        return this.loadIndexes(element);
       case "constraintsRoot":
         return this.loadConstraints(element);
       default:
@@ -279,6 +294,12 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       const tables = await this.withProgress(`Loading ${label}...`, () =>
         this.fetchTables(client, projectId, element.connectionId, element.schemaName)
       );
+      this.prefetchSchemaMetadata(
+        client,
+        projectId,
+        element.connectionId,
+        element.schemaName
+      );
       const filtered = tables.filter((table) => table.type === tableType);
       if (filtered.length === 0) {
         return [new InfoNode(`No ${label} found.`, element)];
@@ -351,6 +372,88 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     }
   }
 
+  private async loadRelationships(
+    element: RelationshipsRootNode
+  ): Promise<DbExplorerNode[]> {
+    const workspace = getWorkspaceContext(this.deps.context);
+    if (!workspace.projectId) {
+      return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
+    }
+
+    const projectId = workspace.projectId;
+    const auth = await this.deps.resolveAuthContext();
+    if (!auth) {
+      return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
+    }
+
+    const client = this.deps.createAuthorizedClient(auth);
+    try {
+      const relationships = await this.withProgress("Loading relationships...", () =>
+        this.fetchRelationships(
+          client,
+          projectId,
+          element.connectionId,
+          element.schemaName,
+          element.tableName
+        )
+      );
+
+      if (relationships.length === 0) {
+        return [new InfoNode("No relationships found.", element)];
+      }
+
+      return relationships.map((relationship) => {
+        const info = this.formatRelationshipInfo(relationship);
+        return new RelationshipNode(info, element);
+      });
+    } catch (err) {
+      this.logError("Failed to load relationships", err);
+      return [
+        new ErrorNode("Failed to load. Click to retry.", "sqlcortex.refreshExplorer", element),
+      ];
+    }
+  }
+
+  private async loadIndexes(element: IndexesRootNode): Promise<DbExplorerNode[]> {
+    const workspace = getWorkspaceContext(this.deps.context);
+    if (!workspace.projectId) {
+      return [new ActionNode("Select Project", "sqlcortex.selectProject", element)];
+    }
+
+    const projectId = workspace.projectId;
+    const auth = await this.deps.resolveAuthContext();
+    if (!auth) {
+      return [new ActionNode("Sign in to SQLCortex", "sqlcortex.login", element)];
+    }
+
+    const client = this.deps.createAuthorizedClient(auth);
+    try {
+      const indexes = await this.withProgress("Loading indexes...", () =>
+        this.fetchIndexes(
+          client,
+          projectId,
+          element.connectionId,
+          element.schemaName,
+          element.tableName
+        )
+      );
+
+      if (indexes.length === 0) {
+        return [new InfoNode("No indexes found.", element)];
+      }
+
+      return indexes.map((index) => {
+        const info = this.formatIndexInfo(index);
+        return new IndexNode(info, element);
+      });
+    } catch (err) {
+      this.logError("Failed to load indexes", err);
+      return [
+        new ErrorNode("Failed to load. Click to retry.", "sqlcortex.refreshExplorer", element),
+      ];
+    }
+  }
+
   private getTableChildren(element: TableNode): DbExplorerNode[] {
     const nodes: DbExplorerNode[] = [
       new ColumnsRootNode(
@@ -363,6 +466,18 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
 
     if (element.table.type !== "view") {
       nodes.push(
+        new RelationshipsRootNode(
+          element.connectionId,
+          element.schemaName,
+          element.table.name,
+          element
+        ),
+        new IndexesRootNode(
+          element.connectionId,
+          element.schemaName,
+          element.table.name,
+          element
+        ),
         new ConstraintsRootNode(
           element.connectionId,
           element.schemaName,
@@ -433,6 +548,49 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     );
   }
 
+  private async fetchSchemaMetadata(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string
+  ): Promise<SchemaMetadataResponse> {
+    const cacheKey = this.cacheKey(connectionId, "schemaMetadata", { schema: schemaName });
+    const cached = this.getCachedValue<SchemaMetadataResponse>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const pending = this.schemaMetadataPromises.get(cacheKey);
+    if (pending) {
+      return pending;
+    }
+
+    const promise = getSchemaMetadata(client, projectId, connectionId, schemaName)
+      .then((metadata) => {
+        this.setCachedValue(cacheKey, metadata);
+        return metadata;
+      })
+      .finally(() => {
+        this.schemaMetadataPromises.delete(cacheKey);
+      });
+
+    this.schemaMetadataPromises.set(cacheKey, promise);
+    return promise;
+  }
+
+  private prefetchSchemaMetadata(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string
+  ): void {
+    void this.fetchSchemaMetadata(client, projectId, connectionId, schemaName).catch(
+      (err) => {
+        this.logError("Failed to preload schema metadata", err);
+      }
+    );
+  }
+
   private async fetchColumns(
     client: ApiClient,
     projectId: string,
@@ -444,9 +602,69 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
       schema: schemaName,
       table: tableName,
     });
-    return this.fetchWithCache(cacheKey, () =>
-      listColumns(client, projectId, connectionId, schemaName, tableName)
+    return this.fetchWithCache(cacheKey, async () => {
+      const metadata = await this.fetchSchemaMetadata(
+        client,
+        projectId,
+        connectionId,
+        schemaName
+      ).catch(() => null);
+      const tableInfo = metadata?.tables.find((table) => table.name === tableName);
+      if (tableInfo) {
+        return tableInfo.columns;
+      }
+      return listColumns(client, projectId, connectionId, schemaName, tableName);
+    });
+  }
+
+  private async fetchTableInfo(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ): Promise<TableInfo | null> {
+    const metadata = await this.fetchSchemaMetadata(
+      client,
+      projectId,
+      connectionId,
+      schemaName
     );
+    return metadata.tables.find((table) => table.name === tableName) ?? null;
+  }
+
+  private async fetchRelationships(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ): Promise<ForeignKeyInfo[]> {
+    const tableInfo = await this.fetchTableInfo(
+      client,
+      projectId,
+      connectionId,
+      schemaName,
+      tableName
+    );
+    return tableInfo?.foreignKeys ?? [];
+  }
+
+  private async fetchIndexes(
+    client: ApiClient,
+    projectId: string,
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ): Promise<IndexInfo[]> {
+    const tableInfo = await this.fetchTableInfo(
+      client,
+      projectId,
+      connectionId,
+      schemaName,
+      tableName
+    );
+    return tableInfo?.indexes ?? [];
   }
 
   private async fetchConstraints(
@@ -490,6 +708,56 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
 
       return this.parseConstraintRows(response.columns, response.rows);
     });
+  }
+
+  private formatRelationshipInfo(foreignKey: ForeignKeyInfo): {
+    name: string;
+    summary: string;
+    tooltip?: string;
+    icon?: string;
+  } {
+    const localColumns =
+      foreignKey.columns.length > 0 ? `(${foreignKey.columns.join(", ")})` : "";
+    const foreignColumns =
+      foreignKey.foreignColumns.length > 0
+        ? `(${foreignKey.foreignColumns.join(", ")})`
+        : "";
+    const foreignTable = `${foreignKey.foreignSchema}.${foreignKey.foreignTable}${foreignColumns}`;
+    const direction = localColumns ? `${localColumns} -> ${foreignTable}` : `-> ${foreignTable}`;
+    const onDelete = foreignKey.onDelete?.trim() || "NO ACTION";
+    const onUpdate = foreignKey.onUpdate?.trim() || "NO ACTION";
+    const summary = `${direction} | ON DELETE ${onDelete}, ON UPDATE ${onUpdate}`;
+    return { name: foreignKey.name, summary, tooltip: summary, icon: "link" };
+  }
+
+  private formatIndexInfo(index: IndexInfo): {
+    name: string;
+    summary: string;
+    tooltip?: string;
+    icon?: string;
+  } {
+    const summaryParts: string[] = [];
+    if (index.primary) {
+      summaryParts.push("primary");
+    } else if (index.unique) {
+      summaryParts.push("unique");
+    } else {
+      summaryParts.push("index");
+    }
+    const method = index.method?.trim();
+    if (method) {
+      summaryParts.push(method);
+    }
+    let summary = summaryParts.join(" ");
+    if (index.columns.length > 0) {
+      summary = `${summary} (${index.columns.join(", ")})`;
+    }
+    const predicate = index.predicate?.trim();
+    if (predicate) {
+      summary = `${summary} WHERE ${predicate}`;
+    }
+    const icon = index.primary || index.unique ? "key" : undefined;
+    return { name: index.name, summary, tooltip: summary, icon };
   }
 
   private cacheKey(
