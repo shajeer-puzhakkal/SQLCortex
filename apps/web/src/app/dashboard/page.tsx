@@ -234,9 +234,9 @@ export default function DashboardPage() {
   const creditNotice =
     credits?.notice ??
     (softLimit90Reached
-      ? "You have used 90% of your daily AI credits."
+      ? "Avoid interruptions - upgrade to Pro"
       : softLimit70Reached
-        ? "You have used 70% of your daily AI credits."
+        ? "You are getting strong value from SQLCortex"
         : null);
 
   return (

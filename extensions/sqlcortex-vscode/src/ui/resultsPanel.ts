@@ -209,18 +209,25 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         color-scheme: light dark;
       }
 
+      html,
+      body {
+        height: 100%;
+      }
+
       body {
         margin: 0;
         padding: 24px;
         font-family: var(--vscode-font-family);
         color: var(--vscode-editor-foreground);
         background: var(--vscode-editor-background);
+        box-sizing: border-box;
       }
 
       .shell {
         display: flex;
         flex-direction: column;
         gap: 16px;
+        height: 100%;
       }
 
       .header {
@@ -282,13 +289,16 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         display: grid;
         grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
         gap: 16px;
-        align-items: start;
+        align-items: stretch;
+        flex: 1;
+        min-height: 0;
       }
 
       .summary {
         display: flex;
         flex-direction: column;
         gap: 16px;
+        min-height: 0;
       }
 
       .meta {
@@ -322,7 +332,8 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         border: 1px solid var(--vscode-panel-border);
         overflow: auto;
         background: var(--vscode-editorWidget-background);
-        max-height: calc(100vh - 220px);
+        height: 100%;
+        max-height: none;
       }
 
       table {
@@ -390,10 +401,12 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         .content {
           display: flex;
           flex-direction: column;
+          flex: initial;
+          min-height: initial;
         }
 
         .table-wrap {
-          max-height: none;
+          height: auto;
         }
       }
     </style>

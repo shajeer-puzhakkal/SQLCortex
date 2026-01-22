@@ -194,7 +194,7 @@ function mapErrorMessage(status: number, apiError: ApiError | null): string {
     return "Rate limit exceeded. Try again later.";
   }
   if (apiError?.code === "PLAN_LIMIT_EXCEEDED") {
-    return "Plan limit exceeded. Upgrade to run more queries.";
+    return "You have reached today's AI limit. Upgrade to Pro for uninterrupted usage.";
   }
   if (apiError?.code === "ANALYZER_TIMEOUT") {
     return "Analyzer timed out. Try again with a simpler query.";

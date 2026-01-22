@@ -596,7 +596,8 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           return;
         }
         gateEl.classList.remove("hidden");
-        gateTitleEl.textContent = gate.title || "AI is gated.";
+        gateTitleEl.textContent =
+          gate.title || "You have reached today's AI limit. Upgrade to Pro for uninterrupted usage.";
         gateDescriptionEl.textContent = gate.description || "";
         gateButtonEl.textContent = gate.ctaLabel || "Open dashboard to upgrade";
         upgradeUrl = gate.upgradeUrl || "";
@@ -726,7 +727,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         }
 
         const gated = state.kind === "gated";
-        subtitle.textContent = gated ? "Analysis complete (AI gated)." : "Analysis complete.";
+        subtitle.textContent = gated ? state.data.gate.title : "Analysis complete.";
         setMeta(state.data.hash, state.data.mode);
         setStatus(gated ? state.data.gate.title : "Analysis complete.", false);
         setGate(gated ? state.data.gate : null);

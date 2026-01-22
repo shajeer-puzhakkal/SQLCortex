@@ -235,9 +235,7 @@ export default function PlanPage() {
   const planName = plan?.planName ?? fallbackPlanLabel;
   const planId = plan?.planId ?? "-";
   const isFreePlan = planId === "free" || planName.toLowerCase() === "free";
-  const aiEnabled = plan?.aiEnabled ?? isFreePlan;
-  const limit = plan?.monthlyAiActionsLimit ?? null;
-  const used = plan?.usedAiActionsThisPeriod ?? 0;
+  const isProPlan = planId === "pro" || planName.toLowerCase() === "pro";
   const creditSystemEnabled = plan?.creditSystemEnabled ?? isFreePlan;
   const dailyCredits = credits?.dailyCredits ?? plan?.dailyCredits ?? null;
   const creditsRemaining = credits?.creditsRemaining ?? plan?.creditsRemaining ?? null;
@@ -246,49 +244,65 @@ export default function PlanPage() {
     credits?.softLimit70Reached ?? plan?.softLimit70Reached ?? false;
   const softLimit90Reached =
     credits?.softLimit90Reached ?? plan?.softLimit90Reached ?? false;
-  const planPeriodStart = plan?.periodStart ? new Date(plan.periodStart) : null;
-  const planPeriodEnd = plan?.periodEnd ? new Date(plan.periodEnd) : null;
-  const usageLimitLabel = hasPlan
-    ? creditSystemEnabled && dailyCredits !== null && creditsRemaining !== null
-      ? `${creditsRemaining} / ${dailyCredits} credits`
-      : creditSystemEnabled
-        ? "Daily credits unavailable"
-      : limit === null
-        ? aiEnabled
-          ? `${used} / Unlimited`
-          : "Not included"
-        : `${used} / ${limit}`
-    : needsPlanSelection
-      ? "Select a workspace"
-      : "Unavailable";
-  const aiStatusLabel = hasPlan ? (aiEnabled ? "Enabled" : "Disabled") : "Select a workspace";
-  const aiStatusClass = hasPlan
-    ? aiEnabled
-      ? "text-emerald-600"
-      : "text-rose-500"
+  const aiUsageState = plan?.aiUsageState ?? null;
+  const fallbackUsageLevel =
+    creditSystemEnabled &&
+    creditsRemaining !== null &&
+    dailyCredits !== null
+      ? creditsRemaining <= 0 && graceUsed
+        ? "blocked"
+        : softLimit90Reached
+          ? "critical"
+          : softLimit70Reached
+            ? "warning"
+            : "normal"
+      : "normal";
+  const aiUsageLevel = aiUsageState?.level ?? fallbackUsageLevel;
+  const aiUsageLabel = hasPlan
+    ? aiUsageLevel.charAt(0).toUpperCase() + aiUsageLevel.slice(1)
+    : "Select a workspace";
+  const aiUsageClass = hasPlan
+    ? aiUsageLevel === "blocked"
+      ? "text-rose-600"
+      : aiUsageLevel === "critical"
+        ? "text-amber-700"
+        : aiUsageLevel === "warning"
+          ? "text-amber-600"
+          : "text-emerald-600"
     : "text-black/40";
+  const planDisplayName = hasPlan
+    ? isProPlan
+      ? "Pro ($20/month)"
+      : planName
+    : fallbackPlanLabel;
   const upgradeAvailable = plan?.upgradeAvailable ?? false;
   const upgradeStatusLabel = hasPlan
     ? upgradeAvailable
       ? "Upgrade available"
       : "Top tier"
     : "Select a workspace";
-  const isLimitReached = limit !== null && used >= limit;
-  const creditExhausted =
-    creditSystemEnabled &&
-    creditsRemaining !== null &&
-    creditsRemaining <= 0 &&
-    graceUsed === true;
-  const isGated = hasPlan ? !aiEnabled || isLimitReached || creditExhausted : false;
-  const creditNotice =
-    credits?.notice ??
-    (creditSystemEnabled
-      ? softLimit90Reached
-        ? "You have used 90% of your daily AI credits. Upgrade to Pro for unlimited usage."
-        : softLimit70Reached
-          ? "You have used 70% of your daily AI credits. Consider upgrading to Pro."
-          : null
-      : null);
+  const usageCtaMessage =
+    aiUsageLevel === "warning"
+      ? "You are getting strong value from SQLCortex"
+      : aiUsageLevel === "critical"
+        ? "Avoid interruptions - upgrade to Pro"
+        : aiUsageLevel === "blocked"
+          ? "Daily AI credits exhausted. Upgrade to Pro for unlimited access."
+          : null;
+  const usageCtaTone =
+    aiUsageLevel === "blocked"
+      ? "border-rose-200 bg-rose-50 text-rose-700 shadow-rose-100/60"
+      : aiUsageLevel === "critical"
+        ? "border-amber-200 bg-amber-50 text-amber-800 shadow-amber-100/60"
+        : "border-sky-200 bg-sky-50 text-sky-800 shadow-sky-100/60";
+  const usageCtaLabel =
+    aiUsageLevel === "warning"
+      ? "Usage signal"
+      : aiUsageLevel === "critical"
+        ? "Upgrade recommended"
+        : "Upgrade required";
+  const showUsageCta = Boolean(usageCtaMessage) && !needsPlanSelection;
+  const showUpgradeButton = upgradeAvailable && aiUsageLevel !== "warning";
   const selectionLink = (
     <Link
       className="text-xs font-semibold text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-800"
@@ -298,13 +312,10 @@ export default function PlanPage() {
     </Link>
   );
 
-  const formatDate = (value: Date | null) => {
-    if (!value) return "Unknown";
-    return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(value);
+  const formatCredits = (value: number | null) => {
+    if (value === null) return "-";
+    return value.toString();
   };
-  const periodLabel = planPeriodStart && planPeriodEnd
-    ? `${formatDate(planPeriodStart)} - ${formatDate(planPeriodEnd)}`
-    : "Unknown";
 
   return (
     <div className="relative min-h-screen bg-[#f8f4ee] text-[#1b1b1b]">
@@ -384,37 +395,20 @@ export default function PlanPage() {
           </div>
         ) : null}
 
-        {isGated ? (
-          <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800 shadow-sm shadow-amber-100/60">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-amber-700">
-              AI gated
+        {showUsageCta ? (
+          <div className={`mt-6 rounded-2xl border px-4 py-3 shadow-sm ${usageCtaTone}`}>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] opacity-80">
+              {usageCtaLabel}
             </p>
-            <p className="mt-1 text-sm font-semibold">AI analyzer is limited on your current plan.</p>
-            <p className="mt-1 text-xs text-amber-700/80">
-              {!aiEnabled
-                ? "AI is disabled for this workspace."
-                : creditExhausted
-                  ? "Daily AI credits are exhausted."
-                  : isLimitReached
-                    ? "Your AI usage has reached the monthly limit for this period."
-                    : "Upgrade to unlock AI analyzer features."}
-            </p>
-            {upgradeAvailable ? (
+            <p className="mt-1 text-sm font-semibold">{usageCtaMessage}</p>
+            {showUpgradeButton ? (
               <a
                 href="#upgrade"
-                className="mt-3 inline-flex items-center rounded-full bg-amber-700 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-amber-600"
+                className="mt-3 inline-flex items-center rounded-full bg-black px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-black/80"
               >
                 Upgrade
               </a>
             ) : null}
-          </div>
-        ) : null}
-        {creditNotice && !creditExhausted && !needsPlanSelection ? (
-          <div className="mt-6 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sky-800 shadow-sm shadow-sky-100/60">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-700">
-              Credit notice
-            </p>
-            <p className="mt-1 text-sm font-semibold">{creditNotice}</p>
           </div>
         ) : null}
 
@@ -433,7 +427,7 @@ export default function PlanPage() {
                     Select a workspace
                   </Link>
                 ) : (
-                  <p className="mt-2 text-xl font-semibold text-black/90">{planName}</p>
+                  <p className="mt-2 text-xl font-semibold text-black/90">{planDisplayName}</p>
                 )}
               </div>
               <span className="rounded-full bg-black/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-black/60">
@@ -442,11 +436,11 @@ export default function PlanPage() {
             </div>
             <div className="mt-4 grid gap-3 text-sm text-black/70">
               <div className="flex items-center justify-between rounded-xl border border-black/10 bg-white/80 px-3 py-2">
-                <span>AI analyzer</span>
+                <span>AI usage state</span>
                 {needsPlanSelection ? (
                   selectionLink
                 ) : (
-                  <span className={`text-xs font-semibold ${aiStatusClass}`}>{aiStatusLabel}</span>
+                  <span className={`text-xs font-semibold ${aiUsageClass}`}>{aiUsageLabel}</span>
                 )}
               </div>
               <div className="flex items-center justify-between rounded-xl border border-black/10 bg-white/80 px-3 py-2">
@@ -467,29 +461,44 @@ export default function PlanPage() {
               Usage
             </p>
             <p className="mt-2 text-sm font-semibold text-black/80">
-              {creditSystemEnabled ? "Daily AI credits remaining" : "AI-assisted actions"}
+              {creditSystemEnabled ? "Daily AI credits" : "AI usage"}
             </p>
-            <p className="mt-2 text-2xl font-semibold text-black/90">
-              {needsPlanSelection ? (
+            {needsPlanSelection ? (
+              <p className="mt-2 text-base font-semibold text-black/90">
                 <Link
                   className="text-base font-semibold text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-800"
                   href="#workspace-selection"
                 >
                   Select a workspace
                 </Link>
-              ) : (
-                usageLimitLabel
-              )}
-            </p>
+              </p>
+            ) : creditSystemEnabled ? (
+              <div className="mt-3 grid gap-3 text-sm text-black/70">
+                <div className="flex items-center justify-between rounded-xl border border-black/10 bg-white/80 px-3 py-2">
+                  <span>Daily AI Credits</span>
+                  <span className="text-sm font-semibold text-black/80">
+                    {formatCredits(dailyCredits)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between rounded-xl border border-black/10 bg-white/80 px-3 py-2">
+                  <span>Remaining Today</span>
+                  <span className="text-sm font-semibold text-black/80">
+                    {formatCredits(creditsRemaining)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-2 text-2xl font-semibold text-black/90">Unlimited</p>
+            )}
             <p className="mt-1 text-xs text-black/50">
-              {creditSystemEnabled
-                ? `Grace credits used: ${graceUsed === null ? "Unknown" : graceUsed ? "Yes" : "No"}`
-                : `Period: ${periodLabel}`}
+              {needsPlanSelection
+                ? "Select a workspace to view usage."
+                : creditSystemEnabled
+                  ? `Grace credits used: ${graceUsed === null ? "Unknown" : graceUsed ? "Yes" : "No"}`
+                  : "AI usage is unlimited on Pro."}
             </p>
             <div className="mt-4 rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-xs text-black/60">
-              {creditSystemEnabled
-                ? "Credits reset daily (UTC)."
-                : "Counts only. No token or cost details yet."}
+              {creditSystemEnabled ? "Credits reset daily (UTC)." : "Unlimited AI usage on Pro."}
             </div>
           </div>
         </section>
