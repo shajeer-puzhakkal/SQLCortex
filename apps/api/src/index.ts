@@ -73,6 +73,7 @@ import {
   deductCredits,
   ensureEntitlement,
   getCreditState,
+  resolveAiUsageState,
   resolveModelTier,
 } from "./credits";
 import { recordAiValueDaily } from "./aiValue";
@@ -403,6 +404,7 @@ async function buildPlanUsageSummary(
   const creditState = creditSystemEnabled
     ? await getCreditState(prismaClient, subject, now)
     : null;
+  const aiUsageState = resolveAiUsageState({ creditSystemEnabled, creditState });
   const monthlyAiActionsLimit =
     creditSystemEnabled || planContext.planCode === "PRO"
       ? null
@@ -425,6 +427,7 @@ async function buildPlanUsageSummary(
     graceUsed: creditState?.graceUsed ?? null,
     softLimit70Reached: creditState?.softLimit70Reached ?? false,
     softLimit90Reached: creditState?.softLimit90Reached ?? false,
+    aiUsageState,
   };
 }
 
@@ -3865,10 +3868,7 @@ app.post(
       await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
 
       const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
-      const llmAccess = aiFeatureStatus.enabled
-        ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
-        : null;
-      const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+      const llmEnabled = aiFeatureStatus.enabled;
       const creditSystemEnabled = planContext.planCode === "FREE";
       const creditAction = resolveCreditActionForAnalyze();
       const creditEstimate = creditSystemEnabled
@@ -3877,13 +3877,6 @@ app.post(
       let creditState = creditSystemEnabled
         ? await getCreditState(prisma, quotaSubject, now)
         : null;
-
-      if (aiFeatureStatus.enabled && llmAccess && !llmAccess.enabled) {
-        gateReason = llmAccess.reason === "limit_reached" ? "PLAN_LIMIT" : "AI_DISABLED";
-        const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
-        requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : null;
-        upgradeUrl = buildUpgradeUrl(quotaSubject);
-      }
 
       if (llmEnabled && creditSystemEnabled && creditState) {
         if (creditState.creditsRemaining <= 0) {
@@ -3894,7 +3887,9 @@ app.post(
             const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
             requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : "pro";
             upgradeUrl = buildUpgradeUrl(quotaSubject);
-            warnings.push("Daily AI credits are exhausted. Upgrade to continue.");
+            warnings.push(
+              "Daily AI credits exhausted. Upgrade to Pro for unlimited access."
+            );
           }
         }
       }
@@ -3943,16 +3938,6 @@ app.post(
             aiFeatureStatus.reason === "org_disabled"
               ? "AI is disabled for this organization."
               : "AI is disabled for this project."
-          );
-        } else if (llmAccess?.reason === "plan_disabled") {
-          warnings.push("AI is disabled for your current plan.");
-        } else if (llmAccess?.reason === "limit_reached") {
-          const limit = typeof llmAccess.limit === "number" ? llmAccess.limit : null;
-          const used = typeof llmAccess.used === "number" ? llmAccess.used : null;
-          warnings.push(
-            limit !== null && used !== null
-              ? `AI usage limit reached (${used}/${limit}) for this period.`
-              : "AI usage limit reached for this period."
           );
         }
       }
@@ -4106,10 +4091,7 @@ app.post(
     const now = new Date();
     await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
     const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
-    const llmAccess = aiFeatureStatus.enabled
-      ? await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now)
-      : null;
-    const llmEnabled = aiFeatureStatus.enabled && Boolean(llmAccess?.enabled);
+    const llmEnabled = aiFeatureStatus.enabled;
     const creditSystemEnabled = planContext.planCode === "FREE";
     const creditAction = resolveCreditActionForAiSql(action);
     const creditEstimate = creditSystemEnabled
@@ -4120,14 +4102,10 @@ app.post(
       : null;
 
     if (!llmEnabled) {
-      const fallbackReason: AiSqlFallbackReason = aiFeatureStatus.enabled
-        ? llmAccess?.reason ?? "plan_disabled"
-        : aiFeatureStatus.reason ?? "project_disabled";
+      const fallbackReason: AiSqlFallbackReason =
+        aiFeatureStatus.reason ?? "project_disabled";
       const fallback = buildAiSqlFallbackResponse({
         reason: fallbackReason,
-        planCode: planContext.planCode,
-        used: llmAccess?.used ?? null,
-        limit: llmAccess?.limit ?? null,
       });
       logAiSqlTelemetry({
         action,
@@ -4156,9 +4134,9 @@ app.post(
             gateReason: "CREDITS_EXHAUSTED",
             requiredPlan,
             upgradeUrl: buildUpgradeUrl(quotaSubject),
-            summary: "Daily AI credits are exhausted.",
+            summary: "Daily AI credits exhausted. Upgrade to Pro for unlimited access.",
             findings: [],
-            recommendations: ["Upgrade to Pro for unlimited AI usage."],
+            recommendations: ["Upgrade to Pro for unlimited access."],
             risk_level: "low",
             meta: { provider: "disabled", model: "n/a", latency_ms: 0 },
           };

@@ -85,6 +85,10 @@ const MAX_SQL_LENGTH_SETTING = "maxSqlLength";
 const DIAGNOSTICS_ENABLED_SETTING = "diagnostics.enabled";
 const DEFAULT_MAX_SQL_LENGTH = 20000;
 const EXPLAIN_ANALYZE_WARNING = "May execute query; use only on safe environments.";
+const AI_LIMIT_MESSAGE =
+  "You have reached today's AI limit. Upgrade to Pro for uninterrupted usage.";
+const CREDIT_WARNING_MESSAGE = "You are getting strong value from SQLCortex";
+const CREDIT_CRITICAL_MESSAGE = "Avoid interruptions - upgrade to Pro";
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -879,10 +883,10 @@ function resolveOrgId(
 
 function buildCreditNotice(plan: { softLimit90Reached: boolean; softLimit70Reached: boolean }): string | null {
   if (plan.softLimit90Reached) {
-    return "You have used 90% of your daily AI credits. Upgrade to Pro for unlimited usage.";
+    return CREDIT_CRITICAL_MESSAGE;
   }
   if (plan.softLimit70Reached) {
-    return "You have used 70% of your daily AI credits. Consider upgrading to Pro for unlimited usage.";
+    return CREDIT_WARNING_MESSAGE;
   }
   return null;
 }
@@ -1357,24 +1361,14 @@ async function analyzeSelectionFlow(
       ...normalizeStringList(ai?.warnings),
     ];
     const assumptions = normalizeStringList(ai?.assumptions);
-    const requiredPlan = response.requiredPlan
-      ? response.requiredPlan.charAt(0).toUpperCase() + response.requiredPlan.slice(1)
-      : null;
-    const gateTitle = "AI suggestions are unavailable on your current plan.";
-    const gateDescription =
-      response.gateReason === "PLAN_LIMIT"
-        ? `AI usage limit reached for this period.${requiredPlan ? ` Upgrade to ${requiredPlan} for more capacity.` : ""}`
-        : response.gateReason === "CREDITS_EXHAUSTED"
-          ? `Daily AI credits exhausted.${requiredPlan ? ` Upgrade to ${requiredPlan} for unlimited usage.` : ""}`
-          : requiredPlan
-            ? `Upgrade to ${requiredPlan} to unlock AI analyzer features.`
-            : "Upgrade to unlock AI analyzer features.";
+    const gateTitle = AI_LIMIT_MESSAGE;
+    const gateDescription = AI_LIMIT_MESSAGE;
     const gate =
       response.status === "gated"
         ? {
             title: gateTitle,
             description: gateDescription,
-            ctaLabel: requiredPlan ? `Upgrade to ${requiredPlan}` : "Open dashboard to upgrade",
+            ctaLabel: "Upgrade to Pro",
             upgradeUrl: response.upgradeUrl ?? null,
           }
         : null;
@@ -1412,7 +1406,7 @@ async function analyzeSelectionFlow(
       output.appendLine(`SQLCortex: Analysis event ${response.metering.eventId}.`);
     }
     if (gate) {
-      vscode.window.showWarningMessage("SQLCortex: AI suggestions are gated for your plan.");
+      vscode.window.showWarningMessage(AI_LIMIT_MESSAGE);
     } else {
       vscode.window.showInformationMessage("SQLCortex: Analysis complete.");
     }

@@ -50,6 +50,12 @@ export type AiInsight = {
   assumptions: string[];
 };
 
+export type AiUsageState = {
+  level: "normal" | "warning" | "critical" | "blocked";
+  creditsRemaining?: number;
+  dailyCredits?: number;
+};
+
 export type AnalyzeResponse = {
   status: "ok" | "gated";
   gateReason?: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
@@ -81,6 +87,7 @@ export type PlanUsageSummary = {
   graceUsed: boolean | null;
   softLimit70Reached: boolean;
   softLimit90Reached: boolean;
+  aiUsageState: AiUsageState;
 };
 
 export type BillingCreditsResponse = {

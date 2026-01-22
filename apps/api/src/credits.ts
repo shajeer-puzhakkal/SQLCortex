@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import type { PlanCode, PlanSubject } from "./plans";
+import type { AiUsageState } from "../../../packages/shared/src/contracts";
 import {
   CreditAction,
   CreditEstimate,
@@ -46,10 +47,10 @@ function startOfUtcDay(now: Date): Date {
 
 function buildCreditNotice(usageRatio: number): string | null {
   if (usageRatio >= 0.9) {
-    return "You have used 90% of your daily AI credits. Upgrade to Pro for unlimited usage.";
+    return "Avoid interruptions - upgrade to Pro";
   }
   if (usageRatio >= 0.7) {
-    return "You have used 70% of your daily AI credits. Consider upgrading to Pro for unlimited usage.";
+    return "You are getting strong value from SQLCortex";
   }
   return null;
 }
@@ -65,6 +66,36 @@ function deriveUsageFlags(state: {
   const softLimit90Reached = ratio >= 0.9;
   const notice = buildCreditNotice(ratio);
   return { softLimit70Reached, softLimit90Reached, notice };
+}
+
+export function resolveAiUsageState(input: {
+  creditSystemEnabled: boolean;
+  creditState: CreditState | null;
+}): AiUsageState {
+  if (!input.creditSystemEnabled || !input.creditState) {
+    return { level: "normal" };
+  }
+
+  const { dailyCredits, creditsRemaining, graceUsed } = input.creditState;
+  let level: AiUsageState["level"] = "normal";
+
+  if (creditsRemaining <= 0 && graceUsed) {
+    level = "blocked";
+  } else {
+    const used = Math.min(dailyCredits, Math.max(0, dailyCredits - creditsRemaining));
+    const ratio = dailyCredits > 0 ? used / dailyCredits : 1;
+    if (ratio >= 0.9) {
+      level = "critical";
+    } else if (ratio >= 0.7) {
+      level = "warning";
+    }
+  }
+
+  return {
+    level,
+    creditsRemaining,
+    dailyCredits,
+  };
 }
 
 function resolveSubjectFields(subject: PlanSubject) {
