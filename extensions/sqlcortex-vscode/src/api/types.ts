@@ -63,6 +63,39 @@ export type SchemaColumnResource = {
   default: string | null;
 };
 
+export type ForeignKeyInfo = {
+  name: string;
+  columns: string[];
+  foreignSchema: string;
+  foreignTable: string;
+  foreignColumns: string[];
+  onUpdate: string;
+  onDelete: string;
+};
+
+export type IndexInfo = {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+  method: string;
+  predicate: string | null;
+};
+
+export type TableInfo = {
+  schema: string;
+  name: string;
+  type: "table" | "view";
+  columns: SchemaColumnResource[];
+  foreignKeys: ForeignKeyInfo[];
+  indexes: IndexInfo[];
+};
+
+export type SchemaMetadataResponse = {
+  schema: string;
+  tables: TableInfo[];
+};
+
 export type ExecuteQueryRequest = {
   projectId: string;
   connectionId?: string | null;

@@ -282,6 +282,31 @@ type SchemaColumnResource = {
   nullable: boolean;
   default: string | null;
 };
+type ForeignKeyResource = {
+  name: string;
+  columns: string[];
+  foreignSchema: string;
+  foreignTable: string;
+  foreignColumns: string[];
+  onUpdate: string;
+  onDelete: string;
+};
+type IndexResource = {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+  method: string;
+  predicate: string | null;
+};
+type TableInfo = {
+  schema: string;
+  name: string;
+  type: "table" | "view";
+  columns: SchemaColumnResource[];
+  foreignKeys: ForeignKeyResource[];
+  indexes: IndexResource[];
+};
 
 type AnalysisResultValue = Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
 
@@ -932,6 +957,196 @@ async function runSchemaQuery<T>(
   } finally {
     await client.$disconnect();
   }
+}
+
+function mapFkAction(value: string | null): string {
+  switch (value) {
+    case "a":
+      return "NO ACTION";
+    case "r":
+      return "RESTRICT";
+    case "c":
+      return "CASCADE";
+    case "n":
+      return "SET NULL";
+    case "d":
+      return "SET DEFAULT";
+    default:
+      return "NO ACTION";
+  }
+}
+
+async function fetchSchemaMetadata(
+  connectionString: string,
+  schemaName: string
+): Promise<{ schema: string; tables: TableInfo[] }> {
+  return runSchemaQuery(connectionString, async (tx) => {
+    const tables = await tx.$queryRaw<SchemaTableResource[]>`
+      SELECT
+        c.relname AS name,
+        CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END AS type
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = ${schemaName}
+        AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      ORDER BY c.relname
+    `;
+
+    const columns = await tx.$queryRaw<
+      Array<SchemaColumnResource & { table_name: string }>
+    >`
+      SELECT
+        table_name AS table_name,
+        column_name AS name,
+        udt_name AS type,
+        is_nullable = 'YES' AS nullable,
+        column_default AS "default"
+      FROM information_schema.columns
+      WHERE table_schema = ${schemaName}
+      ORDER BY table_name, ordinal_position
+    `;
+
+    const foreignKeys = await tx.$queryRaw<
+      Array<{
+        table_name: string;
+        name: string;
+        foreign_schema: string;
+        foreign_table: string;
+        columns: string[];
+        foreign_columns: string[];
+        on_update: string | null;
+        on_delete: string | null;
+      }>
+    >`
+      SELECT
+        c.relname AS table_name,
+        con.conname AS name,
+        fn.nspname AS foreign_schema,
+        fc.relname AS foreign_table,
+        array_agg(att.attname ORDER BY cols.ordinality) AS columns,
+        array_agg(fatt.attname ORDER BY cols.ordinality) AS foreign_columns,
+        con.confupdtype AS on_update,
+        con.confdeltype AS on_delete
+      FROM pg_constraint con
+      JOIN pg_class c ON c.oid = con.conrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_class fc ON fc.oid = con.confrelid
+      JOIN pg_namespace fn ON fn.oid = fc.relnamespace
+      JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS cols(attnum, ordinality)
+        ON true
+      JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = cols.attnum
+      JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fcols(attnum, ordinality)
+        ON fcols.ordinality = cols.ordinality
+      JOIN pg_attribute fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fcols.attnum
+      WHERE con.contype = 'f'
+        AND n.nspname = ${schemaName}
+      GROUP BY
+        n.nspname,
+        c.relname,
+        con.conname,
+        fn.nspname,
+        fc.relname,
+        con.confupdtype,
+        con.confdeltype
+      ORDER BY c.relname, con.conname
+    `;
+
+    const indexes = await tx.$queryRaw<
+      Array<{
+        table_name: string;
+        name: string;
+        method: string;
+        unique: boolean;
+        primary: boolean;
+        predicate: string | null;
+        columns: string[];
+      }>
+    >`
+      SELECT
+        t.relname AS table_name,
+        idx.relname AS name,
+        am.amname AS method,
+        i.indisunique AS unique,
+        i.indisprimary AS primary,
+        pg_get_expr(i.indpred, i.indrelid) AS predicate,
+        array_agg(pg_get_indexdef(i.indexrelid, k, true) ORDER BY k) AS columns
+      FROM pg_index i
+      JOIN pg_class t ON t.oid = i.indrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      JOIN pg_class idx ON idx.oid = i.indexrelid
+      JOIN pg_am am ON am.oid = idx.relam
+      JOIN generate_subscripts(i.indkey, 1) AS k ON true
+      WHERE n.nspname = ${schemaName}
+      GROUP BY
+        n.nspname,
+        t.relname,
+        idx.relname,
+        am.amname,
+        i.indisunique,
+        i.indisprimary,
+        i.indpred,
+        i.indrelid
+      ORDER BY t.relname, idx.relname
+    `;
+
+    const tableInfos: TableInfo[] = tables.map((table) => ({
+      schema: schemaName,
+      name: table.name,
+      type: table.type,
+      columns: [],
+      foreignKeys: [],
+      indexes: [],
+    }));
+    const tableByName = new Map<string, TableInfo>(
+      tableInfos.map((table) => [table.name, table])
+    );
+
+    for (const column of columns) {
+      const table = tableByName.get(column.table_name);
+      if (!table) {
+        continue;
+      }
+      table.columns.push({
+        name: column.name,
+        type: column.type,
+        nullable: column.nullable,
+        default: column.default,
+      });
+    }
+
+    for (const fk of foreignKeys) {
+      const table = tableByName.get(fk.table_name);
+      if (!table) {
+        continue;
+      }
+      table.foreignKeys.push({
+        name: fk.name,
+        columns: fk.columns ?? [],
+        foreignSchema: fk.foreign_schema,
+        foreignTable: fk.foreign_table,
+        foreignColumns: fk.foreign_columns ?? [],
+        onUpdate: mapFkAction(fk.on_update),
+        onDelete: mapFkAction(fk.on_delete),
+      });
+    }
+
+    for (const index of indexes) {
+      const table = tableByName.get(index.table_name);
+      if (!table) {
+        continue;
+      }
+      table.indexes.push({
+        name: index.name,
+        columns: index.columns ?? [],
+        unique: Boolean(index.unique),
+        primary: Boolean(index.primary),
+        method: index.method,
+        predicate: index.predicate,
+      });
+    }
+
+    return { schema: schemaName, tables: tableInfos };
+  });
 }
 
 async function runConnectionQuery<T>(
@@ -3276,6 +3491,76 @@ app.get(
           makeError(
             "SCHEMA_FETCH_FAILED",
             "Unable to fetch tables. Check connection or permissions."
+          )
+        );
+    }
+  }
+);
+
+app.get(
+  "/api/v1/projects/:projectId/connections/:connectionId/schema/metadata",
+  requireAuth(prisma),
+  async (
+    req: Request<
+      { projectId: string; connectionId: string },
+      unknown,
+      unknown,
+      { schema?: string }
+    >,
+    res: Response
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const schemaName =
+      typeof req.query.schema === "string" ? req.query.schema.trim() : "";
+    if (!schemaName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`schema` is required"));
+    }
+
+    const connectionContext = await resolveProjectConnection(
+      auth,
+      req.params.projectId,
+      req.params.connectionId
+    );
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status).json(connectionContext.error);
+    }
+
+    const rateLimit = checkSchemaRateLimit({
+      auth,
+      projectId: connectionContext.projectId,
+      connectionId: connectionContext.connection.id,
+    });
+    if (handleSchemaRateLimit(res, rateLimit)) {
+      return;
+    }
+
+    const cacheKey = schemaCacheKey(connectionContext.connection.id, "schema-metadata", [
+      schemaName,
+    ]);
+    const cached = readSchemaCache<{ schema: string; tables: TableInfo[] }>(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    try {
+      const response = await fetchSchemaMetadata(
+        connectionContext.connectionString,
+        schemaName
+      );
+      writeSchemaCache(cacheKey, response);
+      return res.json(response);
+    } catch (err) {
+      console.error("Failed to fetch schema metadata", err);
+      return res
+        .status(500)
+        .json(
+          makeError(
+            "SCHEMA_FETCH_FAILED",
+            "Unable to fetch schema metadata. Check connection or permissions."
           )
         );
     }

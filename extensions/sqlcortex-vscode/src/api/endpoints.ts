@@ -9,6 +9,7 @@ import type {
   Org,
   PlanUsageSummary,
   Project,
+  SchemaMetadataResponse,
   SchemaColumnResource,
   SchemaResource,
   SchemaTableResource,
@@ -40,6 +41,8 @@ type ColumnListResponse = {
   table: string;
   columns: SchemaColumnResource[];
 };
+
+type SchemaMetadataListResponse = SchemaMetadataResponse;
 
 export async function listOrgs(client: ApiClient): Promise<Org[]> {
   const payload = await client.get<OrgListResponse>("/api/v1/orgs");
@@ -100,6 +103,18 @@ export async function listColumns(
     `/api/v1/projects/${projectId}/connections/${connectionId}/schema/columns?schema=${encodedSchema}&table=${encodedTable}`
   );
   return payload.columns ?? [];
+}
+
+export async function getSchemaMetadata(
+  client: ApiClient,
+  projectId: string,
+  connectionId: string,
+  schemaName: string
+): Promise<SchemaMetadataResponse> {
+  const encodedSchema = encodeURIComponent(schemaName);
+  return client.get<SchemaMetadataListResponse>(
+    `/api/v1/projects/${projectId}/connections/${connectionId}/schema/metadata?schema=${encodedSchema}`
+  );
 }
 
 export async function executeQuery(
