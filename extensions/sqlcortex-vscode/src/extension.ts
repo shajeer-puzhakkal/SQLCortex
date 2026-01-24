@@ -5,6 +5,7 @@ import {
   analyzeQuery,
   getBillingPlan,
   executeQuery,
+  getSchemaMetadata,
   listConnections,
   listOrgs,
   listProjects,
@@ -49,6 +50,10 @@ import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
 import { validateReadOnlySql } from "./sql/validator";
+import {
+  analyzeSchemaMetadata,
+  buildSchemaErdMarkdown,
+} from "./schema/schemaAnalysis";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -68,6 +73,8 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.analyzeSelectionWithAnalyze", label: "Analyze Selection (EXPLAIN ANALYZE)" },
   { id: "sqlcortex.analyzeDocument", label: "Analyze Query" },
   { id: "sqlcortex.analyzeDocumentWithAnalyze", label: "Analyze Query (EXPLAIN ANALYZE)" },
+  { id: "sqlcortex.analyzeSchema", label: "Analyze Schema" },
+  { id: "sqlcortex.drawSchemaErd", label: "Draw ERD Diagram" },
 ];
 
 const API_BASE_URL_KEY = "sqlcortex.apiBaseUrl";
@@ -308,6 +315,28 @@ export function activate(context: vscode.ExtensionContext) {
         mode: "smart",
         forcedMode: "EXPLAIN_ANALYZE",
       });
+    },
+    "sqlcortex.analyzeSchema": async (...args) => {
+      await analyzeSchemaFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider,
+        dbExplorerProvider,
+        args[0]
+      );
+    },
+    "sqlcortex.drawSchemaErd": async (...args) => {
+      await drawSchemaErdFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider,
+        dbExplorerProvider,
+        args[0]
+      );
     },
   };
 
@@ -1419,6 +1448,230 @@ async function analyzeSelectionFlow(
     });
     reportRequestError(output, "Analysis failed", err);
   }
+}
+
+async function analyzeSchemaFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbExplorerProvider: DbExplorerProvider,
+  node?: unknown
+): Promise<void> {
+  const actionContext = await resolveSchemaActionContext(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider,
+    dbExplorerProvider,
+    node
+  );
+  if (!actionContext) {
+    return;
+  }
+
+  const { auth, projectId, connectionId, schemaName } = actionContext;
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  const insightsView = QueryInsightsView.show(context);
+  insightsView.update({
+    kind: "loading",
+    data: { hash: schemaName, mode: "SCHEMA" },
+  });
+
+  try {
+    const metadata = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: `Loading schema ${schemaName}...`,
+      },
+      () =>
+        getSchemaMetadata(
+          client,
+          projectId,
+          connectionId,
+          schemaName
+        )
+    );
+    const analysis = analyzeSchemaMetadata(metadata);
+    insightsView.update({
+      kind: "success",
+      data: {
+        hash: schemaName,
+        mode: "SCHEMA",
+        findings: analysis.findings,
+        suggestions: analysis.suggestions,
+        warnings: analysis.warnings,
+        assumptions: analysis.assumptions,
+        explanation: analysis.explanation,
+        eventId: null,
+      },
+    });
+    vscode.window.showInformationMessage(
+      `SQLCortex: Schema analysis complete for ${schemaName}.`
+    );
+  } catch (err) {
+    const message = formatRequestError(err);
+    insightsView.update({
+      kind: "error",
+      error: { message },
+      data: { hash: schemaName, mode: "SCHEMA" },
+    });
+    reportRequestError(output, "Schema analysis failed", err);
+  }
+}
+
+async function drawSchemaErdFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbExplorerProvider: DbExplorerProvider,
+  node?: unknown
+): Promise<void> {
+  const actionContext = await resolveSchemaActionContext(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider,
+    dbExplorerProvider,
+    node
+  );
+  if (!actionContext) {
+    return;
+  }
+
+  const { auth, projectId, connectionId, schemaName } = actionContext;
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  try {
+    const metadata = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: `Generating ERD for ${schemaName}...`,
+      },
+      () =>
+        getSchemaMetadata(
+          client,
+          projectId,
+          connectionId,
+          schemaName
+        )
+    );
+    const analysis = analyzeSchemaMetadata(metadata);
+    const markdown = buildSchemaErdMarkdown(metadata, analysis);
+    const document = await vscode.workspace.openTextDocument({
+      language: "markdown",
+      content: markdown,
+    });
+    await vscode.window.showTextDocument(document, {
+      preview: false,
+      viewColumn: vscode.ViewColumn.Active,
+    });
+    vscode.window.showInformationMessage(`SQLCortex: ERD generated for ${schemaName}.`);
+  } catch (err) {
+    reportRequestError(output, "ERD generation failed", err);
+  }
+}
+
+async function resolveSchemaActionContext(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbExplorerProvider: DbExplorerProvider,
+  node?: unknown
+): Promise<{
+  auth: { baseUrl: string; token: string; session: SessionSnapshot };
+  projectId: string;
+  connectionId: string;
+  schemaName: string;
+} | null> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return null;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return null;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "SQLCortex: Select a connection before analyzing schemas."
+    );
+    return null;
+  }
+
+  const projectId = workspaceContext.projectId;
+  const connectionId = workspaceContext.connectionId;
+  const schemaName = await resolveSchemaNameFromNode(dbExplorerProvider, node);
+  if (!schemaName) {
+    return null;
+  }
+
+  return { auth, projectId, connectionId, schemaName };
+}
+
+async function resolveSchemaNameFromNode(
+  dbExplorerProvider: DbExplorerProvider,
+  node?: unknown
+): Promise<string | null> {
+  if (node instanceof SchemaNode) {
+    return node.schemaName;
+  }
+  if (node instanceof TableNode) {
+    return node.schemaName;
+  }
+  if (node instanceof ColumnNode) {
+    return node.schemaName;
+  }
+
+  const schemas = await dbExplorerProvider.getSchemasForSearch();
+  if (!schemas) {
+    return null;
+  }
+  if (schemas.length === 0) {
+    vscode.window.showInformationMessage("SQLCortex: No schemas available.");
+    return null;
+  }
+
+  const schemaItems: SchemaPickItem[] = schemas.map((schema) => ({
+    label: schema.name,
+    schemaName: schema.name,
+  }));
+
+  const schemaSelection = await vscode.window.showQuickPick(schemaItems, {
+    placeHolder: "Select a schema",
+    ignoreFocusOut: true,
+  });
+
+  return schemaSelection?.schemaName ?? null;
 }
 
 async function runSqlFlow(

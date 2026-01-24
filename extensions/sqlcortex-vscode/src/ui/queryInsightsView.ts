@@ -8,14 +8,16 @@ type QueryInsightsGate = {
   upgradeUrl: string | null;
 };
 
+type InsightsMode = ExplainMode | "SCHEMA";
+
 export type QueryInsightsState =
   | { kind: "idle" }
-  | { kind: "loading"; data: { hash: string; mode: ExplainMode } }
+  | { kind: "loading"; data: { hash: string; mode: InsightsMode } }
   | {
       kind: "confirm";
       data: {
         hash: string;
-        mode: ExplainMode;
+        mode: InsightsMode;
         estimatedCredits: number;
         remainingCredits: number;
         dailyCredits: number;
@@ -26,7 +28,7 @@ export type QueryInsightsState =
       kind: "success";
       data: {
         hash: string;
-        mode: ExplainMode;
+        mode: InsightsMode;
         findings: string[];
         suggestions: string[];
         warnings: string[];
@@ -39,7 +41,7 @@ export type QueryInsightsState =
       kind: "gated";
       data: {
         hash: string;
-        mode: ExplainMode;
+        mode: InsightsMode;
         findings: string[];
         suggestions: string[];
         warnings: string[];
@@ -52,7 +54,7 @@ export type QueryInsightsState =
   | {
       kind: "error";
       error: { message: string };
-      data?: { hash?: string; mode?: ExplainMode };
+      data?: { hash?: string; mode?: InsightsMode };
     };
 
 type WebviewMessage =
@@ -222,7 +224,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     <meta charset="UTF-8" />
     <meta http-equiv="Content-Security-Policy" content="${csp}" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SQLCortex Query Insights</title>
+    <title>SQLCortex Insights</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -473,8 +475,8 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       <header class="header">
         <div class="header-top">
           <div>
-            <h1>Query Insights</h1>
-            <p class="subtitle" id="subtitle">Analyze a SQL selection to see results here.</p>
+            <h1>SQLCortex Insights</h1>
+            <p class="subtitle" id="subtitle">Analyze a SQL selection or schema to see results here.</p>
           </div>
           <div class="meta">
             <span id="hash" class="pill">-</span>
@@ -567,12 +569,16 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       let upgradeUrl = "";
 
       function formatMode(value) {
+        if (value === "SCHEMA") {
+          return "SCHEMA";
+        }
         return value === "EXPLAIN_ANALYZE" ? "EXPLAIN ANALYZE" : "EXPLAIN";
       }
 
       function setMeta(hash, mode) {
         if (hash) {
-          const shortHash = hash.length > 8 ? hash.slice(0, 8) : hash;
+          const shouldShorten = mode !== "SCHEMA";
+          const shortHash = shouldShorten && hash.length > 8 ? hash.slice(0, 8) : hash;
           hashEl.textContent = shortHash;
           hashEl.title = hash;
         } else {
@@ -580,6 +586,14 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           hashEl.title = "";
         }
         modeEl.textContent = mode ? formatMode(mode) : "-";
+      }
+
+      function isSchemaMode(mode) {
+        return mode === "SCHEMA";
+      }
+
+      function targetLabel(mode) {
+        return isSchemaMode(mode) ? "schema" : "query";
       }
 
       function setStatus(text, isError) {
@@ -667,7 +681,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
 
       function render(state) {
         if (!state || state.kind === "idle") {
-          subtitle.textContent = "Analyze a SQL selection to see results here.";
+          subtitle.textContent = "Analyze a SQL selection or schema to see results here.";
           setMeta(null, null);
           setStatus("Waiting for analysis...", false);
           setGate(null);
@@ -682,9 +696,10 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         }
 
         if (state.kind === "loading") {
-          subtitle.textContent = "Analyzing selection...";
+          const target = targetLabel(state.data.mode);
+          subtitle.textContent = "Analyzing " + target + "...";
           setMeta(state.data.hash, state.data.mode);
-          setStatus("Analyzing query insights...", false);
+          setStatus("Analyzing " + target + " insights...", false);
           setGate(null);
           setConfirm(null);
           renderList(findingsEl, [], "Analyzing...");
@@ -712,7 +727,8 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         }
 
         if (state.kind === "error") {
-          subtitle.textContent = "Analysis failed.";
+          const isSchema = isSchemaMode(state.data?.mode);
+          subtitle.textContent = isSchema ? "Schema analysis failed." : "Analysis failed.";
           setMeta(state.data?.hash || null, state.data?.mode || null);
           setStatus(state.error.message || "Analysis failed.", true);
           setGate(null);
@@ -727,9 +743,20 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         }
 
         const gated = state.kind === "gated";
-        subtitle.textContent = gated ? state.data.gate.title : "Analysis complete.";
+        subtitle.textContent = gated
+          ? state.data.gate.title
+          : isSchemaMode(state.data.mode)
+            ? "Schema analysis complete."
+            : "Analysis complete.";
         setMeta(state.data.hash, state.data.mode);
-        setStatus(gated ? state.data.gate.title : "Analysis complete.", false);
+        setStatus(
+          gated
+            ? state.data.gate.title
+            : isSchemaMode(state.data.mode)
+              ? "Schema analysis complete."
+              : "Analysis complete.",
+          false
+        );
         setGate(gated ? state.data.gate : null);
         setConfirm(null);
         renderList(findingsEl, state.data.findings, "No findings.");
