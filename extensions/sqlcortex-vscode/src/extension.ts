@@ -50,10 +50,7 @@ import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
 import { validateReadOnlySql } from "./sql/validator";
-import {
-  analyzeSchemaMetadata,
-  buildSchemaErdMarkdown,
-} from "./schema/schemaAnalysis";
+import { analyzeSchemaMetadata, buildSchemaErdHtml } from "./schema/schemaAnalysis";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -96,6 +93,7 @@ const AI_LIMIT_MESSAGE =
   "You have reached today's AI limit. Upgrade to Pro for uninterrupted usage.";
 const CREDIT_WARNING_MESSAGE = "You are getting strong value from SQLCortex";
 const CREDIT_CRITICAL_MESSAGE = "Avoid interruptions - upgrade to Pro";
+let schemaErdPanel: vscode.WebviewPanel | undefined;
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -1577,15 +1575,24 @@ async function drawSchemaErdFlow(
         )
     );
     const analysis = analyzeSchemaMetadata(metadata);
-    const markdown = buildSchemaErdMarkdown(metadata, analysis);
-    const document = await vscode.workspace.openTextDocument({
-      language: "markdown",
-      content: markdown,
-    });
-    await vscode.window.showTextDocument(document, {
-      preview: false,
-      viewColumn: vscode.ViewColumn.Active,
-    });
+    const nonce = createNonce();
+    const html = buildSchemaErdHtml(metadata, analysis, nonce);
+    const title = `Schema ERD: ${schemaName}`;
+    if (!schemaErdPanel) {
+      schemaErdPanel = vscode.window.createWebviewPanel(
+        "sqlcortex.schemaErd",
+        title,
+        { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+        { enableScripts: true, retainContextWhenHidden: true }
+      );
+      schemaErdPanel.onDidDispose(() => {
+        schemaErdPanel = undefined;
+      });
+    } else {
+      schemaErdPanel.title = title;
+      schemaErdPanel.reveal(vscode.ViewColumn.Active, true);
+    }
+    schemaErdPanel.webview.html = html;
     vscode.window.showInformationMessage(`SQLCortex: ERD generated for ${schemaName}.`);
   } catch (err) {
     reportRequestError(output, "ERD generation failed", err);
@@ -1930,4 +1937,14 @@ function quoteIdentifier(value: string): string {
 function getExtensionVersion(context: vscode.ExtensionContext): string {
   const version = context.extension.packageJSON?.version;
   return typeof version === "string" ? version : "0.0.0";
+}
+
+function createNonce(): string {
+  const possible =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let value = "";
+  for (let index = 0; index < 32; index += 1) {
+    value += possible.charAt(Math.floor(Math.random() * possible.length));
+  }
+  return value;
 }
