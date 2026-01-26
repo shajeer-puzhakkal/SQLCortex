@@ -20,6 +20,9 @@ import {
   PlanUsageSummary,
   PlanSummary,
   RuleFinding,
+  SchemaInsightsRequest,
+  SchemaInsightsResponse,
+  SchemaInsightsStats,
   makeError,
   mapAnalysisToResource,
 } from "./contracts";
@@ -1312,6 +1315,71 @@ function normalizeExplainMode(value: unknown): ExplainMode {
   return EXPLAIN_MODE_VALUES.includes(normalized as ExplainMode)
     ? (normalized as ExplainMode)
     : "EXPLAIN";
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+}
+
+function buildSchemaRuleFindings(
+  findings: string[],
+  suggestions: string[]
+): RuleFinding[] {
+  const results: RuleFinding[] = [];
+  let index = 0;
+  for (const message of findings) {
+    results.push({
+      code: `SCHEMA_FINDING_${index + 1}`,
+      severity: "warn",
+      message,
+      recommendation: message,
+      rationale: "Derived from schema analysis heuristics.",
+    });
+    index += 1;
+  }
+  index = 0;
+  for (const message of suggestions) {
+    results.push({
+      code: `SCHEMA_SUGGESTION_${index + 1}`,
+      severity: "info",
+      message,
+      recommendation: message,
+      rationale: "Derived from schema analysis heuristics.",
+    });
+    index += 1;
+  }
+  return results;
+}
+
+function buildSchemaPlanSummary(
+  schemaName: string,
+  stats: SchemaInsightsStats,
+  findingsCount: number,
+  suggestionsCount: number
+): PlanSummary {
+  return {
+    totalCost: null,
+    planRows: null,
+    actualRows: null,
+    nodeTypes: [],
+    hasSeqScan: false,
+    hasNestedLoop: false,
+    hasSort: false,
+    hasHashJoin: false,
+    hasBitmapHeapScan: false,
+    hasMisestimation: false,
+    schemaSummary: {
+      schemaName,
+      stats,
+      findingsCount,
+      suggestionsCount,
+    },
+  };
 }
 
 function estimateAiTokens(input: {
@@ -4257,6 +4325,224 @@ app.post(
       warnings,
       metering: {
         eventId,
+        aiUsed,
+        tokensEstimated,
+      },
+    };
+
+    return res.json(response);
+  }
+);
+
+app.post(
+  "/api/v1/schema/insights",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, SchemaInsightsRequest>,
+    res: Response<SchemaInsightsResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const projectId = typeof req.body?.projectId === "string" ? req.body.projectId : null;
+    const schemaName =
+      typeof req.body?.schemaName === "string" ? req.body.schemaName.trim() : "";
+    if (!projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`projectId` is required"));
+    }
+    if (!schemaName) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`schemaName` is required"));
+    }
+
+    const stats = req.body?.stats;
+    const statsValid =
+      stats &&
+      typeof stats.tableCount === "number" &&
+      typeof stats.viewCount === "number" &&
+      typeof stats.columnCount === "number" &&
+      typeof stats.foreignKeyCount === "number" &&
+      typeof stats.indexCount === "number";
+    if (!statsValid) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`stats` is invalid"));
+    }
+
+    const findings = normalizeStringList(req.body?.findings);
+    const suggestions = normalizeStringList(req.body?.suggestions);
+    const ruleFindings = buildSchemaRuleFindings(findings, suggestions);
+    const planSummary = buildSchemaPlanSummary(
+      schemaName,
+      stats,
+      findings.length,
+      suggestions.length
+    );
+
+    const projectContext = await resolveProjectContext(auth, projectId);
+    if ("error" in projectContext) {
+      return res.status(projectContext.status).json(projectContext.error);
+    }
+
+    const aiFeatureStatus = await resolveAiFeatureStatusForContext(prisma, projectContext);
+    const warnings: string[] = [];
+    const assumptions: string[] = [];
+
+    let aiInsight: AiInsight | null = null;
+    let aiUsed = false;
+    let tokensEstimated: number | null = null;
+    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
+    let requiredPlan: string | null = null;
+    let upgradeUrl: string | null = null;
+
+    const quotaSubject = projectContext.orgId
+      ? ({ subjectType: "ORG", orgId: projectContext.orgId } as const)
+      : auth.userId
+        ? ({ subjectType: "USER", userId: auth.userId } as const)
+        : auth.orgId
+          ? ({ subjectType: "ORG", orgId: auth.orgId } as const)
+          : null;
+
+    if (quotaSubject) {
+      const guardKey = buildAiGuardKey(quotaSubject);
+      const payloadHash = computeSqlHash(
+        JSON.stringify({
+          schemaName,
+          stats,
+          findings,
+          suggestions,
+        })
+      );
+      const rateLimit = checkAiRateLimit(guardKey);
+      if (rateLimit.limited) {
+        if (rateLimit.retryAfterSeconds) {
+          res.setHeader("Retry-After", rateLimit.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "AI request rate limit exceeded.", {
+            reason: "rate_limit",
+            retry_after_seconds: rateLimit.retryAfterSeconds ?? null,
+          })
+        );
+      }
+
+      const duplicateCheck = checkDuplicateRequest({
+        key: `${guardKey}:${resolveCreditActionForAnalyze()}`,
+        sqlHash: payloadHash,
+      });
+      if (duplicateCheck.limited) {
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Repeated identical AI requests detected.", {
+            reason: "duplicate_request",
+          })
+        );
+      }
+
+      const dailyCap = checkDailyCap(guardKey, new Date());
+      if (dailyCap.limited) {
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Daily AI request cap reached.", {
+            reason: "daily_cap",
+          })
+        );
+      }
+
+      const planContext = await getPlanContext(prisma, quotaSubject);
+      const now = new Date();
+      await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
+
+      const llmEnabled = aiFeatureStatus.enabled;
+      const creditSystemEnabled = planContext.planCode === "FREE";
+      const creditAction = resolveCreditActionForAnalyze();
+      const creditPayload = JSON.stringify({
+        schemaName,
+        stats,
+        findings,
+        suggestions,
+      });
+      const creditEstimate = creditSystemEnabled
+        ? buildCreditEstimate({ action: creditAction, sql: creditPayload, modelTier: resolveModelTier() })
+        : null;
+      let creditState = creditSystemEnabled
+        ? await getCreditState(prisma, quotaSubject, now)
+        : null;
+
+      if (llmEnabled && creditSystemEnabled && creditState) {
+        if (creditState.creditsRemaining <= 0) {
+          if (!creditState.graceUsed) {
+            creditState = await applyGraceCredits(prisma, quotaSubject, creditState);
+          } else {
+            gateReason = "CREDITS_EXHAUSTED";
+            const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+            requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : "pro";
+            upgradeUrl = buildUpgradeUrl(quotaSubject);
+            warnings.push(
+              "Daily AI credits exhausted. Upgrade to Pro for unlimited access."
+            );
+          }
+        }
+      }
+
+      if (llmEnabled && !gateReason) {
+        const aiPayload: AiInsightsPayload = {
+          plan_summary: planSummary,
+          rule_findings: ruleFindings,
+          user_intent: req.body?.userIntent ?? null,
+        };
+
+        try {
+          const aiResponse = await callAiInsightsService(aiPayload);
+          aiInsight = {
+            explanation: aiResponse.explanation,
+            suggestions: aiResponse.suggestions,
+            warnings: aiResponse.warnings,
+            assumptions: aiResponse.assumptions,
+          };
+          aiUsed = true;
+          tokensEstimated = estimateAiTokens({
+            sql: creditPayload,
+            planSummary,
+            findings: ruleFindings,
+          });
+          await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+          if (creditSystemEnabled && creditEstimate) {
+            const updatedCredits = await deductCredits(prisma, quotaSubject, creditEstimate, {
+              action: creditAction,
+              modelTier: resolveModelTier(),
+            });
+            if (updatedCredits?.notice) {
+              warnings.push(updatedCredits.notice);
+            }
+          }
+          void recordAiValueDaily(prisma, quotaSubject, creditAction, now).catch((err) => {
+            console.error("Failed to record AI value meter", err);
+          });
+        } catch (err) {
+          console.error("Failed to fetch AI insights", err);
+          warnings.push("AI explanation is temporarily unavailable.");
+        }
+      } else {
+        if (!aiFeatureStatus.enabled) {
+          warnings.push(
+            aiFeatureStatus.reason === "org_disabled"
+              ? "AI is disabled for this organization."
+              : "AI is disabled for this project."
+          );
+        }
+      }
+    } else {
+      warnings.push("AI is unavailable for this request.");
+    }
+
+    const response: SchemaInsightsResponse = {
+      status: gateReason ? "gated" : "ok",
+      gateReason: gateReason ?? undefined,
+      requiredPlan,
+      upgradeUrl,
+      ai: aiInsight,
+      warnings,
+      assumptions: aiInsight?.assumptions ?? assumptions,
+      metering: {
+        eventId: null,
         aiUsed,
         tokensEstimated,
       },

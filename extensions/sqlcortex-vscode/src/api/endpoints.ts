@@ -13,6 +13,8 @@ import type {
   SchemaColumnResource,
   SchemaResource,
   SchemaTableResource,
+  SchemaInsightsRequest,
+  SchemaInsightsResponse,
 } from "./types";
 
 type OrgListResponse = {
@@ -129,6 +131,13 @@ export async function analyzeQuery(
   request: AnalyzeRequest
 ): Promise<AnalyzeResponse> {
   return client.post<AnalyzeResponse>("/analyze", request);
+}
+
+export async function getSchemaInsights(
+  client: ApiClient,
+  request: SchemaInsightsRequest
+): Promise<SchemaInsightsResponse> {
+  return client.post<SchemaInsightsResponse>("/api/v1/schema/insights", request);
 }
 
 export async function getBillingPlan(

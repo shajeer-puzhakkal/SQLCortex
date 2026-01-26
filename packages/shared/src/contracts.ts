@@ -26,6 +26,18 @@ export type PlanSummary = {
   hasHashJoin: boolean;
   hasBitmapHeapScan: boolean;
   hasMisestimation: boolean;
+  schemaSummary?: {
+    schemaName: string;
+    stats: {
+      tableCount: number;
+      viewCount: number;
+      columnCount: number;
+      foreignKeyCount: number;
+      indexCount: number;
+    };
+    findingsCount?: number;
+    suggestionsCount?: number;
+  };
 };
 
 export type RuleFinding = {
@@ -65,6 +77,39 @@ export type AnalyzeResponse = {
   findings: RuleFinding[];
   ai: AiInsight | null;
   warnings: string[];
+  metering: {
+    eventId: string | null;
+    aiUsed: boolean;
+    tokensEstimated: number | null;
+  };
+};
+
+export type SchemaInsightsStats = {
+  tableCount: number;
+  viewCount: number;
+  columnCount: number;
+  foreignKeyCount: number;
+  indexCount: number;
+};
+
+export type SchemaInsightsRequest = {
+  projectId: string;
+  schemaName: string;
+  stats: SchemaInsightsStats;
+  findings: string[];
+  suggestions: string[];
+  source: "vscode";
+  userIntent?: string | null;
+};
+
+export type SchemaInsightsResponse = {
+  status: "ok" | "gated";
+  gateReason?: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
+  requiredPlan?: string | null;
+  upgradeUrl?: string | null;
+  ai: AiInsight | null;
+  warnings: string[];
+  assumptions: string[];
   metering: {
     eventId: string | null;
     aiUsed: boolean;
