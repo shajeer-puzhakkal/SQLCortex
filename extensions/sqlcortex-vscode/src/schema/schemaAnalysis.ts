@@ -140,10 +140,13 @@ export function buildSchemaErdMarkdown(
 export function buildSchemaErdHtml(
   metadata: SchemaMetadataResponse,
   analysis: SchemaAnalysis,
-  nonce: string
+  nonce: string,
+  options?: { improvements?: string[] }
 ): string {
   const diagram = buildSchemaDiagramSvg(metadata);
-  const improvements = dedupeList([...analysis.findings, ...analysis.suggestions]);
+  const improvements = dedupeList(
+    options?.improvements ?? [...analysis.findings, ...analysis.suggestions]
+  );
   if (improvements.length === 0) {
     improvements.push("No immediate improvements detected based on current heuristics.");
   }

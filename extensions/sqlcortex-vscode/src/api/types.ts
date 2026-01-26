@@ -16,6 +16,9 @@ export type {
   MeterEvent,
   PlanUsageSummary,
   RuleFinding,
+  SchemaInsightsRequest,
+  SchemaInsightsResponse,
+  SchemaInsightsStats,
 } from "../../../../packages/shared/src/contracts";
 
 export type Org = {

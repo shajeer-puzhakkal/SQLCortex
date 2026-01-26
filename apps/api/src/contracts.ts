@@ -13,6 +13,9 @@ import type {
   MeterEvent,
   PlanSummary,
   PlanUsageSummary,
+  SchemaInsightsRequest,
+  SchemaInsightsResponse,
+  SchemaInsightsStats,
 } from "../../../packages/shared/src/contracts";
 
 export type {
@@ -29,6 +32,9 @@ export type {
   MeterEvent,
   PlanSummary,
   PlanUsageSummary,
+  SchemaInsightsRequest,
+  SchemaInsightsResponse,
+  SchemaInsightsStats,
 };
 
 export type ErrorCode =

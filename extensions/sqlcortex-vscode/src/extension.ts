@@ -4,6 +4,7 @@ import { createApiClient, formatApiError } from "./api/client";
 import {
   analyzeQuery,
   getBillingPlan,
+  getSchemaInsights,
   executeQuery,
   getSchemaMetadata,
   listConnections,
@@ -1501,19 +1502,82 @@ async function analyzeSchemaFlow(
         )
     );
     const analysis = analyzeSchemaMetadata(metadata);
-    insightsView.update({
-      kind: "success",
-      data: {
-        hash: schemaName,
-        mode: "SCHEMA",
+    let aiSuggestions: string[] | null = null;
+    let aiExplanation: string | null = null;
+    let aiWarnings: string[] = [];
+    let aiAssumptions: string[] = [];
+    let gate:
+      | {
+          title: string;
+          description: string;
+          ctaLabel: string;
+          upgradeUrl: string | null;
+        }
+      | null = null;
+    let eventId: string | null = null;
+
+    try {
+      const aiResponse = await getSchemaInsights(client, {
+        projectId,
+        schemaName,
+        stats: analysis.stats,
         findings: analysis.findings,
         suggestions: analysis.suggestions,
-        warnings: analysis.warnings,
-        assumptions: analysis.assumptions,
-        explanation: analysis.explanation,
-        eventId: null,
-      },
-    });
+        source: "vscode",
+        userIntent: "Schema improvement recommendations.",
+      });
+      const ai = aiResponse.ai;
+      const aiSuggestionList = normalizeAiSuggestions(ai?.suggestions);
+      if (aiSuggestionList.length > 0) {
+        aiSuggestions = aiSuggestionList.map(formatAiSuggestion);
+      }
+      aiExplanation = ai?.explanation?.trim() ? ai.explanation.trim() : null;
+      aiWarnings = normalizeStringList(ai?.warnings);
+      aiAssumptions = normalizeStringList(ai?.assumptions);
+      eventId = aiResponse.metering?.eventId ?? null;
+      if (aiResponse.status === "gated") {
+        gate = {
+          title: AI_LIMIT_MESSAGE,
+          description: AI_LIMIT_MESSAGE,
+          ctaLabel: "Upgrade to Pro",
+          upgradeUrl: aiResponse.upgradeUrl ?? null,
+        };
+      }
+    } catch (err) {
+      output.appendLine(
+        `SQLCortex: Unable to load AI schema insights: ${formatRequestError(err)}`
+      );
+    }
+
+    const suggestions = aiSuggestions ?? analysis.suggestions;
+    const explanation = aiExplanation ?? analysis.explanation;
+    const warnings = [...analysis.warnings, ...aiWarnings];
+    const assumptions = [...analysis.assumptions, ...aiAssumptions];
+    const payload = {
+      hash: schemaName,
+      mode: "SCHEMA",
+      findings: analysis.findings,
+      suggestions,
+      warnings,
+      assumptions,
+      explanation,
+      eventId,
+    };
+
+    insightsView.update(
+      gate
+        ? {
+            kind: "gated",
+            data: {
+              ...payload,
+              gate,
+            },
+          }
+        : {
+            kind: "success",
+            data: payload,
+          }
+    );
     vscode.window.showInformationMessage(
       `SQLCortex: Schema analysis complete for ${schemaName}.`
     );
@@ -1575,8 +1639,33 @@ async function drawSchemaErdFlow(
         )
     );
     const analysis = analyzeSchemaMetadata(metadata);
+    let improvements: string[] | null = null;
+    try {
+      const aiResponse = await getSchemaInsights(client, {
+        projectId,
+        schemaName,
+        stats: analysis.stats,
+        findings: analysis.findings,
+        suggestions: analysis.suggestions,
+        source: "vscode",
+        userIntent: "Schema ERD improvement recommendations.",
+      });
+      const aiSuggestionList = normalizeAiSuggestions(aiResponse.ai?.suggestions);
+      if (aiSuggestionList.length > 0) {
+        improvements = aiSuggestionList.map(formatAiSuggestion);
+      }
+      if (aiResponse.status === "gated") {
+        vscode.window.showWarningMessage(AI_LIMIT_MESSAGE);
+      }
+    } catch (err) {
+      output.appendLine(
+        `SQLCortex: Unable to load AI schema insights: ${formatRequestError(err)}`
+      );
+    }
     const nonce = createNonce();
-    const html = buildSchemaErdHtml(metadata, analysis, nonce);
+    const html = buildSchemaErdHtml(metadata, analysis, nonce, {
+      improvements: improvements ?? undefined,
+    });
     const title = `Schema ERD: ${schemaName}`;
     if (!schemaErdPanel) {
       schemaErdPanel = vscode.window.createWebviewPanel(
