@@ -81,9 +81,9 @@ function resolveAiServicesTimeoutMs(): number {
       process.env.AI_TIMEOUT_MS ??
       process.env.ANALYZER_TIMEOUT_MS ??
       process.env.ANALYZER_TIMEOUT ??
-      8000
+      30000
   );
-  return Number.isFinite(aiTimeoutMsEnv) && aiTimeoutMsEnv > 0 ? aiTimeoutMsEnv : 8000;
+  return Number.isFinite(aiTimeoutMsEnv) && aiTimeoutMsEnv > 0 ? aiTimeoutMsEnv : 30000;
 }
 
 function normalizeStringArray(value: unknown): string[] {
@@ -176,13 +176,15 @@ function extractAiServiceDetail(
   if (detail && typeof detail === "object") {
     const detailRecord = detail as Record<string, unknown>;
     return {
-      code: typeof detailRecord.code === "string" ? detailRecord.code : undefined,
-      message: typeof detailRecord.message === "string" ? detailRecord.message : undefined,
+      ...(typeof detailRecord.code === "string" ? { code: detailRecord.code } : {}),
+      ...(typeof detailRecord.message === "string"
+        ? { message: detailRecord.message }
+        : {}),
     };
   }
   return {
-    code: typeof record.code === "string" ? record.code : undefined,
-    message: typeof record.message === "string" ? record.message : undefined,
+    ...(typeof record.code === "string" ? { code: record.code } : {}),
+    ...(typeof record.message === "string" ? { message: record.message } : {}),
   };
 }
 

@@ -1553,9 +1553,10 @@ async function analyzeSchemaFlow(
     const explanation = aiExplanation ?? analysis.explanation;
     const warnings = [...analysis.warnings, ...aiWarnings];
     const assumptions = [...analysis.assumptions, ...aiAssumptions];
+    const schemaMode: "SCHEMA" = "SCHEMA";
     const payload = {
       hash: schemaName,
-      mode: "SCHEMA",
+      mode: schemaMode,
       findings: analysis.findings,
       suggestions,
       warnings,

@@ -4377,13 +4377,25 @@ app.post(
       findings.length,
       suggestions.length
     );
+    console.log(
+      "Schema insights request:",
+      JSON.stringify({
+        schemaName,
+        projectId,
+        stats,
+        findings: findings.length,
+        suggestions: suggestions.length,
+      })
+    );
 
     const projectContext = await resolveProjectContext(auth, projectId);
     if ("error" in projectContext) {
+      console.warn("Schema insights project context error:", projectContext.error);
       return res.status(projectContext.status).json(projectContext.error);
     }
 
     const aiFeatureStatus = await resolveAiFeatureStatusForContext(prisma, projectContext);
+    console.log("Schema insights AI feature status:", aiFeatureStatus);
     const warnings: string[] = [];
     const assumptions: string[] = [];
 
@@ -4412,6 +4424,7 @@ app.post(
           suggestions,
         })
       );
+      console.log("Schema insights quota subject:", quotaSubject);
       const rateLimit = checkAiRateLimit(guardKey);
       if (rateLimit.limited) {
         if (rateLimit.retryAfterSeconds) {
@@ -4459,6 +4472,13 @@ app.post(
         findings,
         suggestions,
       });
+      console.log("Schema insights credit context:", {
+        planCode: planContext.planCode,
+        llmEnabled,
+        creditSystemEnabled,
+        creditAction,
+        payloadBytes: creditPayload.length,
+      });
       const creditEstimate = creditSystemEnabled
         ? buildCreditEstimate({ action: creditAction, sql: creditPayload, modelTier: resolveModelTier() })
         : null;
@@ -4490,6 +4510,7 @@ app.post(
         };
 
         try {
+          console.log("Schema insights calling AI service...");
           const aiResponse = await callAiInsightsService(aiPayload);
           aiInsight = {
             explanation: aiResponse.explanation,
@@ -4498,6 +4519,11 @@ app.post(
             assumptions: aiResponse.assumptions,
           };
           aiUsed = true;
+          console.log("Schema insights AI response received:", {
+            suggestions: aiResponse.suggestions?.length ?? 0,
+            warnings: aiResponse.warnings?.length ?? 0,
+            assumptions: aiResponse.assumptions?.length ?? 0,
+          });
           tokensEstimated = estimateAiTokens({
             sql: creditPayload,
             planSummary,
