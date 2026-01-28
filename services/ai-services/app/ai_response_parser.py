@@ -126,3 +126,20 @@ def parse_insights_response(text: str) -> Dict[str, Any]:
         "warnings": warnings,
         "assumptions": assumptions,
     }
+
+
+def parse_chat_response(text: str) -> Dict[str, Any]:
+    blob = _extract_json_blob(text)
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"AI response JSON parse error: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("AI response JSON was not an object")
+
+    answer = payload.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Missing or empty answer")
+
+    return {"answer": answer.strip()}

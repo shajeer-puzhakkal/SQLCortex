@@ -101,6 +101,27 @@ class AiSqlResponse(BaseModel):
     meta: AiSqlResponseMeta
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class QueryChatRequest(BaseModel):
+    sql_text: str
+    schema: Dict[str, Any]
+    indexes: Dict[str, Any]
+    explain_output: str
+    db_engine: str
+    project_id: str
+    messages: List[ChatMessage] = Field(default_factory=list)
+    user_intent: Optional[str] = None
+
+
+class QueryChatResponse(BaseModel):
+    answer: str
+    meta: AiSqlResponseMeta
+
+
 class RuleFindingPayload(BaseModel):
     code: str
     severity: Literal["info", "warn", "high"]

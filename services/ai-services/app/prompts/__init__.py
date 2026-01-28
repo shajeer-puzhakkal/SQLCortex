@@ -76,3 +76,44 @@ def render_insights_prompt(
         rule_findings=_stringify(rule_findings),
         user_intent=user_intent or "None",
     )
+
+
+def _format_messages(messages: Any) -> str:
+    if not isinstance(messages, list) or not messages:
+        return "None"
+    lines = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            continue
+        cleaned = content.strip()
+        if not cleaned:
+            continue
+        lines.append(f"{role.upper()}: {cleaned}")
+    return "\n".join(lines) if lines else "None"
+
+
+def render_query_chat_prompt(
+    *,
+    sql_text: str,
+    schema: Any,
+    indexes: Any,
+    explain_output: Any,
+    db_engine: str,
+    project_id: str,
+    messages: Any,
+) -> str:
+    template_path = _PROMPT_DIR / "query_chat.md"
+    template = template_path.read_text(encoding="utf-8")
+    return template.format(
+        sql_text=sql_text,
+        schema=_stringify(schema),
+        indexes=_stringify(indexes),
+        explain_output=_stringify(explain_output),
+        db_engine=db_engine,
+        project_id=project_id,
+        conversation=_format_messages(messages),
+    )
