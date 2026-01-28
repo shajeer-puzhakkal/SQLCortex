@@ -76,6 +76,7 @@ export type AnalyzeResponse = {
   planSummary: PlanSummary;
   findings: RuleFinding[];
   ai: AiInsight | null;
+  explainJson?: unknown;
   warnings: string[];
   metering: {
     eventId: string | null;
@@ -110,6 +111,34 @@ export type SchemaInsightsResponse = {
   ai: AiInsight | null;
   warnings: string[];
   assumptions: string[];
+  metering: {
+    eventId: string | null;
+    aiUsed: boolean;
+    tokensEstimated: number | null;
+  };
+};
+
+export type QueryChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type QueryChatRequest = {
+  projectId: string;
+  connectionId: string;
+  sql: string;
+  explainJson: unknown;
+  messages: QueryChatMessage[];
+  source: "vscode";
+};
+
+export type QueryChatResponse = {
+  status: "ok" | "gated";
+  gateReason?: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
+  requiredPlan?: string | null;
+  upgradeUrl?: string | null;
+  answer: string;
+  warnings: string[];
   metering: {
     eventId: string | null;
     aiUsed: boolean;

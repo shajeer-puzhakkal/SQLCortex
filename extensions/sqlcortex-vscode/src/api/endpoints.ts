@@ -9,6 +9,8 @@ import type {
   Org,
   PlanUsageSummary,
   Project,
+  QueryChatRequest,
+  QueryChatResponse,
   SchemaMetadataResponse,
   SchemaColumnResource,
   SchemaResource,
@@ -138,6 +140,13 @@ export async function getSchemaInsights(
   request: SchemaInsightsRequest
 ): Promise<SchemaInsightsResponse> {
   return client.post<SchemaInsightsResponse>("/api/v1/schema/insights", request);
+}
+
+export async function askQueryInsightsChat(
+  client: ApiClient,
+  request: QueryChatRequest
+): Promise<QueryChatResponse> {
+  return client.post<QueryChatResponse>("/api/v1/query/insights/chat", request);
 }
 
 export async function getBillingPlan(

@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { createApiClient, formatApiError } from "./api/client";
 import {
   analyzeQuery,
+  askQueryInsightsChat,
   getBillingPlan,
   getSchemaInsights,
   executeQuery,
@@ -106,6 +107,18 @@ type TablePickItem = vscode.QuickPickItem & {
   tableType: "table" | "view";
 };
 
+type InsightsChatContext = {
+  sql: string;
+  explainJson: unknown;
+  projectId: string;
+  connectionId: string;
+};
+
+type InsightsChatMessage = {
+  role: "user" | "assistant";
+  text: string;
+};
+
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("SQLCortex");
   output.appendLine("SQLCortex extension activated.");
@@ -114,7 +127,7 @@ export function activate(context: vscode.ExtensionContext) {
   void migrateApiBaseUrl(context, output);
 
   ResultsPanel.register(context);
-  QueryInsightsView.register(context);
+  const queryInsightsView = QueryInsightsView.register(context);
   QueryInsightsView.show(context);
 
   const diagnostics = createSqlDiagnosticsCollection();
@@ -144,6 +157,17 @@ export function activate(context: vscode.ExtensionContext) {
     showCollapseAll: false,
   });
   context.subscriptions.push(sidebarView);
+
+  queryInsightsView.setChatHandler((input) =>
+    handleQueryInsightsChat(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      sidebarProvider,
+      input
+    )
+  );
 
   void refreshContext(context, tokenStore, statusBars, sidebarProvider);
 
@@ -1366,6 +1390,7 @@ async function analyzeSelectionFlow(
     kind: "loading",
     data: { hash: sqlHash, mode: explainMode },
   });
+  insightsView.setChatContext(null);
 
   output.show(true);
   output.appendLine(
@@ -1428,7 +1453,18 @@ async function analyzeSelectionFlow(
             eventId: response.metering?.eventId ?? null,
           },
         };
-    QueryInsightsView.show(context).update(insightsState);
+    insightsView.update(insightsState);
+    const explainJson = response.explainJson ?? null;
+    if (explainJson && workspaceContext.connectionId) {
+      insightsView.setChatContext({
+        sql: extracted.sql,
+        explainJson,
+        projectId: workspaceContext.projectId,
+        connectionId: workspaceContext.connectionId,
+      });
+    } else {
+      insightsView.setChatContext(null);
+    }
 
     if (response.metering?.eventId) {
       output.appendLine(`SQLCortex: Analysis event ${response.metering.eventId}.`);
@@ -1440,13 +1476,59 @@ async function analyzeSelectionFlow(
     }
   } catch (err) {
     const message = formatRequestError(err);
-    QueryInsightsView.show(context).update({
+    insightsView.update({
       kind: "error",
       error: { message },
       data: { hash: sqlHash, mode: explainMode },
     });
+    insightsView.setChatContext(null);
     reportRequestError(output, "Analysis failed", err);
   }
+}
+
+async function handleQueryInsightsChat(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  input: { text: string; context: InsightsChatContext; history: InsightsChatMessage[] }
+): Promise<{ answer: string }> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    throw new Error("Authentication required.");
+  }
+
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  const messages = input.history.map((message) => ({
+    role: message.role,
+    content: message.text,
+  }));
+
+  const response = await askQueryInsightsChat(client, {
+    projectId: input.context.projectId,
+    connectionId: input.context.connectionId,
+    sql: input.context.sql,
+    explainJson: input.context.explainJson,
+    messages,
+    source: "vscode",
+  });
+
+  if (response.status === "gated") {
+    const fallback = response.answer?.trim() || AI_LIMIT_MESSAGE;
+    return { answer: fallback };
+  }
+
+  const answer = response.answer?.trim() || "AI response is unavailable.";
+  return { answer };
 }
 
 async function analyzeSchemaFlow(
@@ -1486,6 +1568,7 @@ async function analyzeSchemaFlow(
     kind: "loading",
     data: { hash: schemaName, mode: "SCHEMA" },
   });
+  insightsView.setChatContext(null);
 
   try {
     const metadata = await vscode.window.withProgress(

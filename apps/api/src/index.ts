@@ -19,6 +19,8 @@ import {
   ExplainMode,
   PlanUsageSummary,
   PlanSummary,
+  QueryChatRequest,
+  QueryChatResponse,
   RuleFinding,
   SchemaInsightsRequest,
   SchemaInsightsResponse,
@@ -31,6 +33,7 @@ import {
   AiServiceError,
   AiSqlAction,
   AiSqlPayload,
+  callAiQueryChatService,
   callAiInsightsService,
   callAiSqlService,
 } from "./aiClient";
@@ -106,6 +109,8 @@ const ANALYZER_TIMEOUT_MS =
     ? analyzerTimeoutMsEnv
     : 8000;
 const ANALYSIS_HISTORY_LIMIT = 50;
+const CHAT_HISTORY_LIMIT = 12;
+const CHAT_MESSAGE_MAX_LENGTH = 2000;
 const queryTimeoutMsEnv = Number(
   process.env.QUERY_TIMEOUT_MS ?? process.env.QUERY_TIMEOUT ?? 10000
 );
@@ -574,6 +579,38 @@ function buildAiSqlFallbackResponse(params: {
     risk_level: "low",
     meta: { provider, model: "n/a", latency_ms: 0 },
   };
+}
+
+function buildChatFallbackAnswer(params: {
+  reason: AiSqlFallbackReason;
+  planCode?: PlanCode | null;
+  used?: number | null;
+  limit?: number | null;
+}): string {
+  const suggestedPlan = params.planCode ? suggestedUpgradeForPlan(params.planCode) : null;
+
+  switch (params.reason) {
+    case "org_disabled":
+      return "AI is disabled for this organization. Ask an org admin to enable AI.";
+    case "project_disabled":
+      return "AI is disabled for this project. Enable AI in the project settings to use this feature.";
+    case "plan_disabled":
+      return suggestedPlan
+        ? `AI is disabled for your plan. Upgrade to ${suggestedPlan} to enable AI chat.`
+        : "AI is disabled for your plan. Upgrade to enable AI chat.";
+    case "limit_reached": {
+      const limit = typeof params.limit === "number" ? params.limit : null;
+      const used = typeof params.used === "number" ? params.used : null;
+      if (limit !== null && used !== null) {
+        return `AI usage limit reached (${used}/${limit}). Try again after the limit resets.`;
+      }
+      return "AI usage limit reached for this period. Try again later.";
+    }
+    case "service_unavailable":
+      return "AI service is temporarily unavailable. Please retry in a few minutes.";
+    default:
+      return "AI response is unavailable right now.";
+  }
 }
 
 function toJsonResult(value: unknown): AnalysisResultValue {
@@ -1326,6 +1363,41 @@ function normalizeStringList(value: unknown): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+function normalizeChatMessages(
+  value: unknown
+): Array<{ role: "user" | "assistant"; content: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized = value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const record = entry as Record<string, unknown>;
+      const role = record.role;
+      const content = typeof record.content === "string" ? record.content.trim() : "";
+      if ((role !== "user" && role !== "assistant") || !content) {
+        return null;
+      }
+      const trimmed =
+        content.length > CHAT_MESSAGE_MAX_LENGTH
+          ? `${content.slice(0, CHAT_MESSAGE_MAX_LENGTH)}...`
+          : content;
+      return { role, content: trimmed };
+    })
+    .filter(
+      (
+        entry
+      ): entry is { role: "user" | "assistant"; content: string } =>
+        Boolean(entry)
+    );
+  if (normalized.length <= CHAT_HISTORY_LIMIT) {
+    return normalized;
+  }
+  return normalized.slice(-CHAT_HISTORY_LIMIT);
+}
+
 function buildSchemaRuleFindings(
   findings: string[],
   suggestions: string[]
@@ -1391,6 +1463,23 @@ function estimateAiTokens(input: {
     sql: input.sql,
     planSummary: input.planSummary,
     findings: input.findings,
+  });
+  return Math.max(1, Math.ceil(payload.length / 4));
+}
+
+function estimateChatTokens(input: {
+  sql: string;
+  explainJson: unknown;
+  schema: unknown;
+  indexes: unknown;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+}): number {
+  const payload = JSON.stringify({
+    sql: input.sql,
+    explainJson: input.explainJson,
+    schema: input.schema,
+    indexes: input.indexes,
+    messages: input.messages,
   });
   return Math.max(1, Math.ceil(payload.length / 4));
 }
@@ -4322,6 +4411,7 @@ app.post(
       planSummary,
       findings: ruleFindings,
       ai: aiInsight,
+      explainJson,
       warnings,
       metering: {
         eventId,
@@ -4567,6 +4657,292 @@ app.post(
       ai: aiInsight,
       warnings,
       assumptions: aiInsight?.assumptions ?? assumptions,
+      metering: {
+        eventId: null,
+        aiUsed,
+        tokensEstimated,
+      },
+    };
+
+    return res.json(response);
+  }
+);
+
+app.post(
+  "/api/v1/query/insights/chat",
+  requireAuth(prisma),
+  async (
+    req: Request<unknown, unknown, QueryChatRequest>,
+    res: Response<QueryChatResponse | ErrorResponse>
+  ) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    if (!auth) {
+      return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+    }
+
+    const sql = typeof req.body?.sql === "string" ? req.body.sql.trim() : "";
+    const projectId = typeof req.body?.projectId === "string" ? req.body.projectId : null;
+    const connectionId =
+      typeof req.body?.connectionId === "string" ? req.body.connectionId : null;
+    if (!projectId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`projectId` is required"));
+    }
+    if (!connectionId) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`connectionId` is required"));
+    }
+    if (!sql) {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
+    }
+    if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
+      return res
+        .status(400)
+        .json(makeError("SQL_NOT_READ_ONLY", "Only SELECT or WITH statements are permitted"));
+    }
+
+    if (typeof req.body?.explainJson === "undefined") {
+      return res
+        .status(400)
+        .json(makeError("INVALID_EXPLAIN_JSON", "`explainJson` must be provided"));
+    }
+
+    let explainJsonParsed: unknown;
+    let explainSerialized: string;
+    try {
+      explainSerialized = JSON.stringify(req.body.explainJson);
+      explainJsonParsed = JSON.parse(explainSerialized);
+    } catch (err) {
+      return res
+        .status(400)
+        .json(
+          makeError(
+            "INVALID_EXPLAIN_JSON",
+            "Invalid JSON for `explainJson`",
+            err instanceof Error ? { reason: err.message } : undefined
+          )
+        );
+    }
+
+    const messages = normalizeChatMessages(req.body?.messages);
+    if (messages.length === 0) {
+      return res.status(400).json(makeError("INVALID_INPUT", "`messages` is required"));
+    }
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "user") {
+      return res
+        .status(400)
+        .json(makeError("INVALID_INPUT", "Last chat message must be from the user"));
+    }
+
+    const connectionContext = await resolveProjectConnection(auth, projectId, connectionId);
+    if ("error" in connectionContext) {
+      return res.status(connectionContext.status ?? 400).json(connectionContext.error);
+    }
+
+    const warnings: string[] = [];
+    let answer = "AI response is unavailable.";
+    let aiUsed = false;
+    let tokensEstimated: number | null = null;
+    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
+    let requiredPlan: string | null = null;
+    let upgradeUrl: string | null = null;
+
+    const quotaSubject = connectionContext.orgId
+      ? ({ subjectType: "ORG", orgId: connectionContext.orgId } as const)
+      : auth.userId
+        ? ({ subjectType: "USER", userId: auth.userId } as const)
+        : auth.orgId
+          ? ({ subjectType: "ORG", orgId: auth.orgId } as const)
+          : null;
+
+    if (!quotaSubject) {
+      return res.status(403).json(makeError("FORBIDDEN", "Subject context required"));
+    }
+
+    const guardKey = buildAiGuardKey(quotaSubject);
+    const payloadHash = computeSqlHash(
+      JSON.stringify({
+        sql,
+        messages,
+        explainJson: explainSerialized,
+      })
+    );
+    const rateLimit = checkAiRateLimit(guardKey);
+    if (rateLimit.limited) {
+      if (rateLimit.retryAfterSeconds) {
+        res.setHeader("Retry-After", rateLimit.retryAfterSeconds.toString());
+      }
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "AI request rate limit exceeded.", {
+          reason: "rate_limit",
+          retry_after_seconds: rateLimit.retryAfterSeconds ?? null,
+        })
+      );
+    }
+
+    const duplicateCheck = checkDuplicateRequest({
+      key: `${guardKey}:${resolveCreditActionForAnalyze()}`,
+      sqlHash: payloadHash,
+    });
+    if (duplicateCheck.limited) {
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "Repeated identical AI requests detected.", {
+          reason: "duplicate_request",
+        })
+      );
+    }
+
+    const dailyCap = checkDailyCap(guardKey, new Date());
+    if (dailyCap.limited) {
+      return res.status(429).json(
+        makeError("RATE_LIMITED", "Daily AI request cap reached.", {
+          reason: "daily_cap",
+        })
+      );
+    }
+
+    const planContext = await getPlanContext(prisma, quotaSubject);
+    const now = new Date();
+    await ensureEntitlement(prisma, quotaSubject, planContext.planCode, now);
+
+    const aiFeatureStatus = resolveAiFeatureStatusFromProject(connectionContext.project);
+    const llmAccess = await resolveLlmAccess(prisma, quotaSubject, planContext.plan, now);
+    const llmEnabled = aiFeatureStatus.enabled && llmAccess.enabled;
+    const creditSystemEnabled = planContext.planCode === "FREE";
+    const creditAction = resolveCreditActionForAnalyze();
+    const creditPayload = JSON.stringify({ sql, messages, explainJson: explainSerialized });
+    const creditEstimate = creditSystemEnabled
+      ? buildCreditEstimate({
+          action: creditAction,
+          sql: creditPayload,
+          modelTier: resolveModelTier(),
+        })
+      : null;
+    let creditState = creditSystemEnabled
+      ? await getCreditState(prisma, quotaSubject, now)
+      : null;
+
+    if (aiFeatureStatus.enabled && !llmAccess.enabled) {
+      gateReason = "PLAN_LIMIT";
+      const fallbackReason: AiSqlFallbackReason =
+        llmAccess.reason === "plan_disabled" ? "plan_disabled" : "limit_reached";
+      answer = buildChatFallbackAnswer({
+        reason: fallbackReason,
+        planCode: planContext.planCode,
+        used: llmAccess.used ?? null,
+        limit: llmAccess.limit ?? null,
+      });
+      const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+      requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : null;
+      upgradeUrl = buildUpgradeUrl(quotaSubject);
+    }
+
+    if (!aiFeatureStatus.enabled) {
+      gateReason = "AI_DISABLED";
+      const fallbackReason: AiSqlFallbackReason =
+        aiFeatureStatus.reason ?? "project_disabled";
+      answer = buildChatFallbackAnswer({ reason: fallbackReason, planCode: planContext.planCode });
+    }
+
+    if (llmEnabled && creditSystemEnabled && creditState) {
+      if (creditState.creditsRemaining <= 0) {
+        if (!creditState.graceUsed) {
+          creditState = await applyGraceCredits(prisma, quotaSubject, creditState);
+        } else {
+          gateReason = "CREDITS_EXHAUSTED";
+          const suggestedPlan = suggestedUpgradeForPlan(planContext.planCode);
+          requiredPlan = suggestedPlan ? formatPlanId(suggestedPlan) : "pro";
+          upgradeUrl = buildUpgradeUrl(quotaSubject);
+          warnings.push(
+            "Daily AI credits exhausted. Upgrade to Pro for uninterrupted usage."
+          );
+          answer = buildChatFallbackAnswer({
+            reason: "limit_reached",
+            planCode: planContext.planCode,
+            used: creditState.dailyCredits ?? null,
+            limit: creditState.dailyCredits ?? null,
+          });
+        }
+      }
+    }
+
+    if (llmEnabled && !gateReason) {
+      let metadata: Awaited<ReturnType<typeof collectAiMetadata>>;
+      try {
+        metadata = await collectAiMetadata(connectionContext.connectionString, sql);
+      } catch (err) {
+        console.error("Failed to collect AI metadata");
+        return res
+          .status(500)
+          .json(
+            makeError(
+              "SCHEMA_FETCH_FAILED",
+              "Unable to fetch schema metadata. Check connection or permissions."
+            )
+          );
+      }
+
+      try {
+        const aiResponse = await callAiQueryChatService({
+          sql_text: redactSqlForLlm(sql),
+          schema: metadata.schema,
+          indexes: metadata.indexes,
+          explain_output: JSON.stringify(explainJsonParsed, null, 2),
+          db_engine: connectionContext.connection.type ?? "postgres",
+          project_id: connectionContext.projectId ?? "",
+          messages,
+          user_intent: null,
+        });
+        answer = aiResponse.answer?.trim() || "AI response is unavailable.";
+        aiUsed = aiResponse.meta.provider !== "disabled" && aiResponse.meta.provider !== "mock";
+        tokensEstimated = estimateChatTokens({
+          sql,
+          explainJson: explainJsonParsed,
+          schema: metadata.schema,
+          indexes: metadata.indexes,
+          messages,
+        });
+
+        if (aiUsed) {
+          await incrementLlmCallsThisMonth(prisma, quotaSubject, now);
+          if (creditSystemEnabled && creditEstimate) {
+            const updatedCredits = await deductCredits(prisma, quotaSubject, creditEstimate, {
+              action: creditAction,
+              modelTier: resolveModelTier(),
+            });
+            if (updatedCredits?.notice) {
+              warnings.push(updatedCredits.notice);
+            }
+          }
+          void recordAiValueDaily(prisma, quotaSubject, creditAction, now).catch((err) => {
+            console.error("Failed to record AI value meter", err);
+          });
+        }
+      } catch (err) {
+        const aiErr = err as AiServiceError;
+        if (aiErr?.payload?.code === "INVALID_INPUT") {
+          return res.status(aiErr.status ?? 400).json(aiErr.payload);
+        }
+        console.error("Failed to fetch AI chat response", err);
+        warnings.push("AI response is temporarily unavailable.");
+        answer = buildChatFallbackAnswer({ reason: "service_unavailable" });
+      }
+    } else if (!aiFeatureStatus.enabled && !warnings.length) {
+      warnings.push(
+        aiFeatureStatus.reason === "org_disabled"
+          ? "AI is disabled for this organization."
+          : "AI is disabled for this project."
+      );
+    }
+
+    const response: QueryChatResponse = {
+      status: gateReason ? "gated" : "ok",
+      gateReason: gateReason ?? undefined,
+      requiredPlan,
+      upgradeUrl,
+      answer,
+      warnings,
       metering: {
         eventId: null,
         aiUsed,

@@ -10,6 +10,32 @@ type QueryInsightsGate = {
 
 type InsightsMode = ExplainMode | "SCHEMA";
 
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+};
+
+type ChatState = {
+  messages: ChatMessage[];
+  pending: boolean;
+  disabledReason: string | null;
+};
+
+type ChatContext = {
+  sql: string;
+  explainJson: unknown;
+  projectId: string;
+  connectionId: string;
+};
+
+type ChatHandler = (input: {
+  text: string;
+  context: ChatContext;
+  history: ChatMessage[];
+}) => Promise<{ answer: string }>;
+
 export type QueryInsightsState =
   | { kind: "idle" }
   | { kind: "loading"; data: { hash: string; mode: InsightsMode } }
@@ -61,7 +87,8 @@ type WebviewMessage =
   | { type: "ready" }
   | { type: "openUpgrade"; url?: string | null }
   | { type: "confirmRun" }
-  | { type: "cancelRun" };
+  | { type: "cancelRun" }
+  | { type: "askChat"; text: string };
 
 export class QueryInsightsView implements vscode.WebviewViewProvider {
   private static currentProvider: QueryInsightsView | undefined;
@@ -71,6 +98,13 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
   private lastState: QueryInsightsState = { kind: "idle" };
   private movedToSecondary = false;
   private pendingConfirmation: ((value: boolean) => void) | null = null;
+  private chatState: ChatState = {
+    messages: [],
+    pending: false,
+    disabledReason: "Run a query analysis to unlock chat.",
+  };
+  private chatContext: ChatContext | null = null;
+  private chatHandler: ChatHandler | null = null;
 
   static register(context: vscode.ExtensionContext): QueryInsightsView {
     const provider = new QueryInsightsView(context);
@@ -117,6 +151,35 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     this.postState();
   }
 
+  setChatHandler(handler: ChatHandler | null): void {
+    this.chatHandler = handler;
+  }
+
+  setChatContext(context: ChatContext | null): void {
+    const contextChanged =
+      !this.chatContext ||
+      !context ||
+      this.chatContext.projectId !== context.projectId ||
+      this.chatContext.connectionId !== context.connectionId ||
+      this.chatContext.sql !== context.sql;
+    this.chatContext = context;
+    this.chatState.pending = false;
+    if (contextChanged) {
+      this.chatState.messages = [];
+    }
+    this.chatState.disabledReason = context ? null : "Run a query analysis to unlock chat.";
+    this.postChatState();
+  }
+
+  resetChat(): void {
+    this.chatState = {
+      messages: [],
+      pending: false,
+      disabledReason: this.chatContext ? null : "Run a query analysis to unlock chat.",
+    };
+    this.postChatState();
+  }
+
   async requestConfirmation(
     data: Extract<QueryInsightsState, { kind: "confirm" }>["data"]
   ): Promise<boolean> {
@@ -145,6 +208,13 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     void this.view.webview.postMessage({ type: "state", state: this.lastState });
   }
 
+  private postChatState(): void {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+    void this.view.webview.postMessage({ type: "chat", chat: this.chatState });
+  }
+
   private async handleMessage(message: unknown): Promise<void> {
     const payload = message as WebviewMessage | undefined;
     if (!payload || typeof payload !== "object") {
@@ -154,6 +224,7 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
     if (payload.type === "ready") {
       this.isReady = true;
       this.postState();
+      this.postChatState();
       return;
     }
 
@@ -178,7 +249,71 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         this.pendingConfirmation(false);
         this.pendingConfirmation = null;
       }
+      return;
     }
+
+    if (payload.type === "askChat") {
+      await this.handleChatRequest(payload.text);
+    }
+  }
+
+  private async handleChatRequest(text: string): Promise<void> {
+    const trimmed = typeof text === "string" ? text.trim() : "";
+    if (!trimmed) {
+      return;
+    }
+    if (!this.chatContext) {
+      this.chatState.messages.push(
+        this.createChatMessage(
+          "assistant",
+          "Run a query analysis to unlock follow-up questions."
+        )
+      );
+      this.postChatState();
+      return;
+    }
+    if (this.chatState.pending) {
+      return;
+    }
+
+    this.chatState.messages.push(this.createChatMessage("user", trimmed));
+    this.chatState.pending = true;
+    this.postChatState();
+
+    if (!this.chatHandler) {
+      this.chatState.pending = false;
+      this.chatState.messages.push(
+        this.createChatMessage("assistant", "Chat is unavailable right now.")
+      );
+      this.postChatState();
+      return;
+    }
+
+    try {
+      const response = await this.chatHandler({
+        text: trimmed,
+        context: this.chatContext,
+        history: this.chatState.messages,
+      });
+      const answer = response.answer?.trim() || "AI response is unavailable.";
+      this.chatState.messages.push(this.createChatMessage("assistant", answer));
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message ? err.message : "Unable to fetch a response.";
+      this.chatState.messages.push(this.createChatMessage("assistant", message));
+    } finally {
+      this.chatState.pending = false;
+      this.postChatState();
+    }
+  }
+
+  private createChatMessage(role: "user" | "assistant", text: string): ChatMessage {
+    return {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+      role,
+      text,
+      timestamp: new Date().toISOString(),
+    };
   }
 
   private dispose(): void {
@@ -191,6 +326,12 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       this.pendingConfirmation(false);
       this.pendingConfirmation = null;
     }
+    this.chatContext = null;
+    this.chatState = {
+      messages: [],
+      pending: false,
+      disabledReason: "Run a query analysis to unlock chat.",
+    };
     while (this.disposables.length) {
       const disposable = this.disposables.pop();
       if (disposable) {
@@ -444,6 +585,95 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         color: var(--vscode-sideBarTitle-foreground);
       }
 
+      .chat-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .chat-thread {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 240px;
+        overflow-y: auto;
+        padding-right: 2px;
+      }
+
+      .chat-message {
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        line-height: 1.5;
+        background: var(--vscode-editorWidget-background);
+        border: 1px solid var(--vscode-panel-border);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .chat-message.user {
+        align-self: flex-end;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border-color: transparent;
+      }
+
+      .chat-placeholder {
+        border: 1px dashed var(--vscode-panel-border);
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+        background: var(--vscode-editorWidget-background);
+      }
+
+      .chat-input {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+      }
+
+      .chat-input textarea {
+        flex: 1;
+        min-height: 42px;
+        max-height: 120px;
+        resize: vertical;
+        border-radius: 6px;
+        border: 1px solid var(--vscode-input-border);
+        padding: 8px;
+        background: var(--vscode-input-background);
+        color: var(--vscode-input-foreground);
+        font-family: var(--vscode-font-family);
+        font-size: 12px;
+      }
+
+      .chat-send {
+        border: none;
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+      }
+
+      .chat-send:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .chat-hint {
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+        margin: 0;
+      }
+
+      .chat-pending {
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+      }
+
       ul {
         margin: 0;
         padding-left: 18px;
@@ -537,6 +767,20 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           <h2>Assumptions</h2>
           <div id="assumptions"></div>
         </section>
+        <section class="section">
+          <h2>Ask SQLCortex</h2>
+          <div class="chat-shell">
+            <div id="chatMessages" class="chat-thread"></div>
+            <div id="chatPending" class="chat-pending"></div>
+            <div id="chatInputShell" class="chat-input">
+              <textarea id="chatInput" placeholder="Ask a follow-up question"></textarea>
+              <button id="chatSend" class="chat-send" type="button">Ask</button>
+            </div>
+            <p id="chatHint" class="chat-hint">
+              Responses stay scoped to the current query, schema, and EXPLAIN plan.
+            </p>
+          </div>
+        </section>
       </div>
 
       <div class="footer">
@@ -566,6 +810,10 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
       const warningsEl = document.getElementById("warnings");
       const assumptionsEl = document.getElementById("assumptions");
       const eventIdEl = document.getElementById("eventId");
+      const chatMessagesEl = document.getElementById("chatMessages");
+      const chatPendingEl = document.getElementById("chatPending");
+      const chatInput = document.getElementById("chatInput");
+      const chatSend = document.getElementById("chatSend");
       let upgradeUrl = "";
 
       function formatMode(value) {
@@ -679,6 +927,62 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         container.appendChild(list);
       }
 
+      let chatState = { messages: [], pending: false, disabledReason: null };
+
+      function renderChat(chat) {
+        if (!chatMessagesEl) {
+          return;
+        }
+        chatState = chat || { messages: [], pending: false, disabledReason: null };
+        chatMessagesEl.innerHTML = "";
+        if (!chatState.messages || !chatState.messages.length) {
+          const placeholder = document.createElement("div");
+          placeholder.className = "chat-placeholder";
+          placeholder.textContent = chatState.disabledReason
+            ? chatState.disabledReason
+            : "Ask a follow-up question about this query.";
+          chatMessagesEl.appendChild(placeholder);
+        } else {
+          chatState.messages.forEach((message) => {
+            const bubble = document.createElement("div");
+            bubble.className = "chat-message " + message.role;
+            bubble.textContent = message.text;
+            chatMessagesEl.appendChild(bubble);
+          });
+          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+        }
+
+        if (chatPendingEl) {
+          chatPendingEl.textContent = chatState.pending ? "SQLCortex is thinking..." : "";
+        }
+
+        const disabled = Boolean(chatState.disabledReason);
+        if (chatInput) {
+          chatInput.disabled = disabled || chatState.pending;
+          chatInput.placeholder = disabled
+            ? chatState.disabledReason
+            : "Ask a follow-up question";
+        }
+        if (chatSend) {
+          chatSend.disabled = disabled || chatState.pending;
+        }
+      }
+
+      function sendChat() {
+        if (!chatInput || !chatSend) {
+          return;
+        }
+        if (chatSend.disabled) {
+          return;
+        }
+        const text = chatInput.value.trim();
+        if (!text) {
+          return;
+        }
+        vscode.postMessage({ type: "askChat", text });
+        chatInput.value = "";
+      }
+
       function render(state) {
         if (!state || state.kind === "idle") {
           subtitle.textContent = "Analyze a SQL selection or schema to see results here.";
@@ -771,12 +1075,29 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         eventIdEl.textContent = state.data.eventId || "-";
       }
 
+      if (chatSend) {
+        chatSend.addEventListener("click", sendChat);
+      }
+      if (chatInput) {
+        chatInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            sendChat();
+          }
+        });
+      }
+
       window.addEventListener("message", (event) => {
         const message = event.data;
-        if (!message || message.type !== "state") {
+        if (!message || !message.type) {
           return;
         }
-        render(message.state);
+        if (message.type === "state") {
+          render(message.state);
+        }
+        if (message.type === "chat") {
+          renderChat(message.chat);
+        }
       });
 
       vscode.postMessage({ type: "ready" });

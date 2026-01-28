@@ -21,6 +21,27 @@ export type AiSqlResponse = {
   meta: { provider: string; model: string; latency_ms: number };
 };
 
+export type AiQueryChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type AiQueryChatPayload = {
+  sql_text: string;
+  schema: Record<string, unknown>;
+  indexes: Record<string, unknown>;
+  explain_output: string;
+  db_engine: string;
+  project_id: string;
+  messages: AiQueryChatMessage[];
+  user_intent?: string | null;
+};
+
+export type AiQueryChatResponse = {
+  answer: string;
+  meta: { provider: string; model: string; latency_ms: number };
+};
+
 export type AiInsightsPayload = {
   plan_summary: PlanSummary;
   rule_findings: RuleFinding[];
@@ -51,6 +72,7 @@ function normalizeAiServicesBaseUrl(raw: string): string {
     "/ai/sql/risk-check",
     "/ai/sql/optimize",
     "/ai/sql/explain",
+    "/ai/query/chat",
     "/ai/sql",
     "/ai",
   ];
@@ -117,6 +139,25 @@ function normalizeAiSqlResponse(payload: unknown): AiSqlResponse {
     findings,
     recommendations,
     risk_level: risk,
+    meta: { provider, model, latency_ms: latencyMs },
+  };
+}
+
+function normalizeAiQueryChatResponse(payload: unknown): AiQueryChatResponse {
+  const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const answer = typeof record.answer === "string" ? record.answer : "";
+
+  const metaRecord =
+    record.meta && typeof record.meta === "object" ? (record.meta as Record<string, unknown>) : {};
+  const provider = typeof metaRecord.provider === "string" ? metaRecord.provider : "unknown";
+  const model = typeof metaRecord.model === "string" ? metaRecord.model : "unknown";
+  const latencyMs =
+    typeof metaRecord.latency_ms === "number" && Number.isFinite(metaRecord.latency_ms)
+      ? metaRecord.latency_ms
+      : 0;
+
+  return {
+    answer,
     meta: { provider, model, latency_ms: latencyMs },
   };
 }
@@ -282,6 +323,56 @@ export async function callAiInsightsService(
     }
 
     return normalizeAiInsightsResponse(responsePayload);
+  } catch (err) {
+    if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      throw err as AiServiceError;
+    }
+
+    if ((err as Error)?.name === "AbortError") {
+      throw {
+        status: 504,
+        payload: makeError("ANALYZER_TIMEOUT", "AI request timed out.", {
+          timeout_ms: timeoutMs,
+        }),
+      } satisfies AiServiceError;
+    }
+
+    throw {
+      status: 502,
+      payload: makeError("ANALYZER_ERROR", "Could not reach AI service.", {
+        reason: err instanceof Error ? err.message : "unknown",
+      }),
+    } satisfies AiServiceError;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function callAiQueryChatService(
+  payload: AiQueryChatPayload
+): Promise<AiQueryChatResponse> {
+  const controller = new AbortController();
+  const timeoutMs = resolveAiServicesTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const aiServicesBaseUrl = resolveAiServicesBaseUrl();
+
+  try {
+    const response = await fetch(`${aiServicesBaseUrl}/ai/query/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const responsePayload = (await response.json().catch(() => null)) as unknown;
+    if (!response.ok) {
+      throw {
+        status: response.status,
+        payload: mapAiServiceError(response.status, responsePayload),
+      } satisfies AiServiceError;
+    }
+
+    return normalizeAiQueryChatResponse(responsePayload);
   } catch (err) {
     if (err && typeof err === "object" && "status" in err && "payload" in err) {
       throw err as AiServiceError;
