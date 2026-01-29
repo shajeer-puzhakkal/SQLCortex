@@ -231,10 +231,9 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
       }
 
       .header {
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
         align-items: center;
-        justify-content: space-between;
         gap: 12px;
       }
 
@@ -242,6 +241,7 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         display: flex;
         flex-direction: column;
         gap: 4px;
+        justify-self: start;
       }
 
       h1 {
@@ -262,6 +262,7 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
+        justify-self: end;
       }
 
       button {
@@ -286,25 +287,20 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
       }
 
       .content {
-        display: grid;
-        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+        display: flex;
+        flex-direction: column;
         gap: 16px;
         align-items: stretch;
         flex: 1;
         min-height: 0;
       }
 
-      .summary {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        min-height: 0;
-      }
-
       .meta {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+        justify-self: center;
       }
 
       .meta-card {
@@ -312,6 +308,7 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
         border: 1px solid var(--vscode-panel-border);
         padding: 12px;
         background: var(--vscode-editorWidget-background);
+        min-width: 120px;
       }
 
       .meta-label {
@@ -398,9 +395,21 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
       }
 
       @media (max-width: 980px) {
+        .header {
+          grid-template-columns: 1fr;
+          align-items: flex-start;
+        }
+
+        .meta {
+          justify-content: flex-start;
+          justify-self: start;
+        }
+
+        .actions {
+          justify-self: start;
+        }
+
         .content {
-          display: flex;
-          flex-direction: column;
           flex: initial;
           min-height: initial;
         }
@@ -418,30 +427,28 @@ export class ResultsPanel implements vscode.WebviewViewProvider {
           <h1>Query Results</h1>
           <p class="subtitle">SQLCortex execution snapshot</p>
         </div>
+        <section class="meta">
+          <div class="meta-card">
+            <div class="meta-label">Execution</div>
+            <div class="meta-value" id="execTime">-</div>
+          </div>
+          <div class="meta-card">
+            <div class="meta-label">Rows</div>
+            <div class="meta-value" id="rowCount">-</div>
+          </div>
+          <div class="meta-card">
+            <div class="meta-label">Columns</div>
+            <div class="meta-value" id="colCount">-</div>
+          </div>
+        </section>
         <div class="actions">
           <button id="copyCsv">Copy CSV</button>
           <button id="exportCsv" class="secondary">Export CSV</button>
         </div>
       </div>
       <div class="content">
-        <section class="summary">
-          <section class="meta">
-            <div class="meta-card">
-              <div class="meta-label">Execution</div>
-              <div class="meta-value" id="execTime">-</div>
-            </div>
-            <div class="meta-card">
-              <div class="meta-label">Rows</div>
-              <div class="meta-value" id="rowCount">-</div>
-            </div>
-            <div class="meta-card">
-              <div class="meta-label">Columns</div>
-              <div class="meta-value" id="colCount">-</div>
-            </div>
-          </section>
-          <section id="error" class="error hidden"></section>
-          <section id="empty" class="empty hidden">No rows returned.</section>
-        </section>
+        <section id="error" class="error hidden"></section>
+        <section id="empty" class="empty hidden">No rows returned.</section>
         <div class="table-wrap">
           <table id="resultsTable"></table>
         </div>

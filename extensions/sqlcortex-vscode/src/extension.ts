@@ -44,6 +44,7 @@ import { createStatusBarItems, updateStatusBar, type StatusBarItems } from "./ui
 import { ResultsPanel } from "./ui/resultsPanel";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
+import { AgentViewProvider } from "./ui/agentView";
 import { AnalyzeCodeLensProvider } from "./ui/analyzeCodeLens";
 import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
@@ -129,6 +130,8 @@ export function activate(context: vscode.ExtensionContext) {
   ResultsPanel.register(context);
   const queryInsightsView = QueryInsightsView.register(context);
   QueryInsightsView.show(context);
+  AgentViewProvider.register(context);
+  AgentViewProvider.show(context);
 
   const diagnostics = createSqlDiagnosticsCollection();
   context.subscriptions.push(diagnostics);
