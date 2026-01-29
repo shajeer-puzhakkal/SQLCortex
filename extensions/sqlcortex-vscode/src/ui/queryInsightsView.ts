@@ -627,35 +627,116 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         background: var(--vscode-editorWidget-background);
       }
 
+      .chat-card {
+        border-radius: 14px;
+        border: 1px solid var(--vscode-panel-border);
+        padding: 10px 12px;
+        background: color-mix(
+          in srgb,
+          var(--vscode-editorWidget-background) 92%,
+          var(--vscode-editor-background)
+        );
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        box-shadow: inset 0 1px 0
+          color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent);
+      }
+
+      .chat-card-title {
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+      }
+
       .chat-input {
         display: flex;
         gap: 8px;
-        align-items: flex-end;
+        align-items: center;
+        border-radius: 10px;
+        border: 1px solid var(--vscode-panel-border);
+        padding: 6px 8px;
+        background: color-mix(
+          in srgb,
+          var(--vscode-input-background) 70%,
+          transparent
+        );
       }
 
       .chat-input textarea {
         flex: 1;
-        min-height: 42px;
-        max-height: 120px;
-        resize: vertical;
-        border-radius: 6px;
-        border: 1px solid var(--vscode-input-border);
-        padding: 8px;
-        background: var(--vscode-input-background);
+        min-height: 28px;
+        max-height: 72px;
+        resize: none;
+        border: none;
+        padding: 2px 0;
+        background: transparent;
         color: var(--vscode-input-foreground);
         font-family: var(--vscode-font-family);
         font-size: 12px;
+        outline: none;
+      }
+
+      .chat-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .chat-tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .chat-tool {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        border: 1px solid var(--vscode-panel-border);
+        background: color-mix(
+          in srgb,
+          var(--vscode-editorWidget-background) 88%,
+          transparent
+        );
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .chat-tool svg {
+        width: 12px;
+        height: 12px;
+        stroke: currentColor;
+        stroke-width: 1.5;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
       .chat-send {
         border: none;
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-size: 12px;
-        font-weight: 600;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        padding: 0;
         cursor: pointer;
         background: var(--vscode-button-background);
         color: var(--vscode-button-foreground);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .chat-send svg {
+        width: 12px;
+        height: 12px;
+        stroke: currentColor;
+        stroke-width: 2;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
       .chat-send:disabled {
@@ -667,6 +748,17 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
         font-size: 11px;
         color: var(--vscode-descriptionForeground);
         margin: 0;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        border: 0;
       }
 
       .chat-pending {
@@ -772,9 +864,43 @@ export class QueryInsightsView implements vscode.WebviewViewProvider {
           <div class="chat-shell">
             <div id="chatMessages" class="chat-thread"></div>
             <div id="chatPending" class="chat-pending"></div>
-            <div id="chatInputShell" class="chat-input">
-              <textarea id="chatInput" placeholder="Ask a follow-up question"></textarea>
-              <button id="chatSend" class="chat-send" type="button">Ask</button>
+            <div class="chat-card">
+              <div class="chat-card-title">Ask a follow-up question about this query.</div>
+              <div id="chatInputShell" class="chat-input">
+                <textarea id="chatInput" placeholder="Ask a follow-up question"></textarea>
+              </div>
+              <div class="chat-toolbar">
+                <div class="chat-tools" aria-hidden="true">
+                  <span class="chat-tool">
+                    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+                      <path d="M8 3v10M3 8h10" />
+                    </svg>
+                  </span>
+                  <span class="chat-tool">
+                    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+                      <path d="M3 4h10a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H7l-3 2v-2H3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+                    </svg>
+                  </span>
+                  <span class="chat-tool">
+                    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+                      <path d="M3 5l5-3 5 3v6l-5 3-5-3z" />
+                      <path d="M8 2v12" />
+                    </svg>
+                  </span>
+                  <span class="chat-tool">
+                    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+                      <path d="M6 4H3v3" />
+                      <path d="M3 7a5 5 0 1 0 1.5-3.5" />
+                    </svg>
+                  </span>
+                </div>
+                <button id="chatSend" class="chat-send" type="button" aria-label="Ask">
+                  <span class="sr-only">Ask</span>
+                  <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+                    <path d="M4 12l8-4-8-4v8z" />
+                  </svg>
+                </button>
+              </div>
             </div>
             <p id="chatHint" class="chat-hint">
               Responses stay scoped to the current query, schema, and EXPLAIN plan.

@@ -190,6 +190,12 @@
           "name": "Chat",
           "type": "webview",
           "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "sqlcortex.agentView",
+          "name": "Agent",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
         }
       ]
     },
