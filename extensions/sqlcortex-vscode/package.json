@@ -157,6 +157,18 @@
           "title": "SQLCortex Results",
           "icon": "resources/sqlcortex.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "sqlcortexInsightsSecondary",
+          "title": "Insights",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "sqlcortexAgentSecondary",
+          "title": "Agent",
+          "icon": "resources/sqlcortex.svg"
+        }
       ]
     },
     "views": {
@@ -180,17 +192,21 @@
           "icon": "resources/sqlcortex.svg"
         },
         {
-          "id": "sqlcortex.queryInsights",
-          "name": "Query Insights",
-          "type": "webview",
-          "icon": "resources/sqlcortex.svg"
-        },
-        {
           "id": "sqlcortex.chatView",
           "name": "Chat",
           "type": "webview",
           "icon": "resources/sqlcortex.svg"
-        },
+        }
+      ],
+      "sqlcortexInsightsSecondary": [
+        {
+          "id": "sqlcortex.queryInsights",
+          "name": "Insights",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
+        }
+      ],
+      "sqlcortexAgentSecondary": [
         {
           "id": "sqlcortex.agentView",
           "name": "Agent",
