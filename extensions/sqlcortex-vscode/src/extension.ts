@@ -45,6 +45,7 @@ import { ResultsPanel } from "./ui/resultsPanel";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
 import { AgentViewProvider } from "./ui/agentView";
+import type { AgentChatContext, AgentChatMessage } from "./ui/agentView";
 import { AnalyzeCodeLensProvider } from "./ui/analyzeCodeLens";
 import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
@@ -130,7 +131,7 @@ export function activate(context: vscode.ExtensionContext) {
   ResultsPanel.register(context);
   const queryInsightsView = QueryInsightsView.register(context);
   QueryInsightsView.show(context);
-  AgentViewProvider.register(context);
+  const agentView = AgentViewProvider.register(context);
   AgentViewProvider.show(context);
 
   const diagnostics = createSqlDiagnosticsCollection();
@@ -163,6 +164,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   queryInsightsView.setChatHandler((input) =>
     handleQueryInsightsChat(
+      context,
+      tokenStore,
+      output,
+      statusBars,
+      sidebarProvider,
+      input
+    )
+  );
+  agentView.setChatHandler((input) =>
+    handleAgentChat(
       context,
       tokenStore,
       output,
@@ -1534,6 +1545,106 @@ async function handleQueryInsightsChat(
   return { answer };
 }
 
+async function handleAgentChat(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  input: { text: string; context: AgentChatContext; history: AgentChatMessage[] }
+): Promise<{ answer: string }> {
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    throw new Error("Authentication required.");
+  }
+
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  if (input.context.type === "query") {
+    const messages = input.history.map((message) => ({
+      role: message.role,
+      content: message.text,
+    }));
+    const response = await askQueryInsightsChat(client, {
+      projectId: input.context.projectId,
+      connectionId: input.context.connectionId,
+      sql: input.context.sql,
+      explainJson: input.context.explainJson,
+      messages,
+      source: "vscode",
+    });
+    if (response.status === "gated") {
+      const fallback = response.answer?.trim() || AI_LIMIT_MESSAGE;
+      return { answer: fallback };
+    }
+    const answer = response.answer?.trim() || "AI response is unavailable.";
+    return { answer };
+  }
+
+  const focus = input.context.tableName
+    ? `Focus on table ${input.context.schemaName}.${input.context.tableName}.`
+    : `Focus on schema ${input.context.schemaName}.`;
+  const historySnippet = input.history
+    .slice(-6)
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.text}`)
+    .join("\n");
+  const userIntentParts = [
+    focus,
+    `User question: ${input.text}`,
+    historySnippet ? `Conversation:\n${historySnippet}` : null,
+  ].filter((item): item is string => Boolean(item));
+  const userIntent = userIntentParts.join("\n");
+
+  const response = await getSchemaInsights(client, {
+    projectId: input.context.projectId,
+    schemaName: input.context.schemaName,
+    stats: input.context.stats,
+    findings: input.context.findings,
+    suggestions: input.context.suggestions,
+    source: "vscode",
+    userIntent,
+  });
+
+  if (response.status === "gated") {
+    const fallback = response.ai?.explanation?.trim() || AI_LIMIT_MESSAGE;
+    return { answer: fallback };
+  }
+
+  const ai = response.ai;
+  const parts: string[] = [];
+  if (ai?.explanation?.trim()) {
+    parts.push(ai.explanation.trim());
+  }
+  const aiSuggestionList = normalizeAiSuggestions(ai?.suggestions);
+  if (aiSuggestionList.length > 0) {
+    parts.push(`Suggestions:\n${aiSuggestionList.map(formatAiSuggestion).join("\n")}`);
+  }
+  const warnings = [
+    ...normalizeStringList(response.warnings),
+    ...normalizeStringList(ai?.warnings),
+  ];
+  if (warnings.length > 0) {
+    parts.push(`Warnings:\n${warnings.join("\n")}`);
+  }
+  const assumptions = [
+    ...normalizeStringList(response.assumptions),
+    ...normalizeStringList(ai?.assumptions),
+  ];
+  if (assumptions.length > 0) {
+    parts.push(`Assumptions:\n${assumptions.join("\n")}`);
+  }
+
+  const answer = parts.join("\n\n") || "AI response is unavailable.";
+  return { answer };
+}
+
 async function analyzeSchemaFlow(
   context: vscode.ExtensionContext,
   tokenStore: ReturnType<typeof createTokenStore>,
@@ -1556,7 +1667,7 @@ async function analyzeSchemaFlow(
     return;
   }
 
-  const { auth, projectId, connectionId, schemaName } = actionContext;
+  const { auth, projectId, connectionId, schemaName, tableName } = actionContext;
   const client = createAuthorizedClient(
     context,
     auth,
@@ -1572,6 +1683,21 @@ async function analyzeSchemaFlow(
     data: { hash: schemaName, mode: "SCHEMA" },
   });
   insightsView.setChatContext(null);
+  const agentView = AgentViewProvider.show(context);
+  const targetName = tableName ? `${schemaName}.${tableName}` : schemaName;
+  const agentMode: "TABLE" | "SCHEMA" = tableName ? "TABLE" : "SCHEMA";
+  const agentLabel = tableName ? `Table ${targetName}` : `Schema ${schemaName}`;
+  agentView.updateInsights(
+    {
+      kind: "loading",
+      data: { hash: targetName, mode: agentMode },
+    },
+    { contextLabel: agentLabel }
+  );
+  agentView.setChatContext(null, {
+    contextLabel: agentLabel,
+    disabledReason: "Analyzing insights...",
+  });
 
   try {
     const metadata = await vscode.window.withProgress(
@@ -1603,6 +1729,9 @@ async function analyzeSchemaFlow(
     let eventId: string | null = null;
 
     try {
+      const focusIntent = tableName
+        ? `Schema improvement recommendations focused on ${schemaName}.${tableName}.`
+        : "Schema improvement recommendations.";
       const aiResponse = await getSchemaInsights(client, {
         projectId,
         schemaName,
@@ -1610,7 +1739,7 @@ async function analyzeSchemaFlow(
         findings: analysis.findings,
         suggestions: analysis.suggestions,
         source: "vscode",
-        userIntent: "Schema improvement recommendations.",
+        userIntent: focusIntent,
       });
       const ai = aiResponse.ai;
       const aiSuggestionList = normalizeAiSuggestions(ai?.suggestions);
@@ -1650,6 +1779,16 @@ async function analyzeSchemaFlow(
       explanation,
       eventId,
     };
+    const agentPayload = {
+      hash: targetName,
+      mode: agentMode,
+      findings: analysis.findings,
+      suggestions,
+      warnings,
+      assumptions,
+      explanation,
+      eventId,
+    };
 
     insightsView.update(
       gate
@@ -1665,6 +1804,40 @@ async function analyzeSchemaFlow(
             data: payload,
           }
     );
+    agentView.updateInsights(
+      gate
+        ? {
+            kind: "gated",
+            data: {
+              ...agentPayload,
+              gate,
+            },
+          }
+        : {
+            kind: "success",
+            data: agentPayload,
+          },
+      { contextLabel: agentLabel }
+    );
+    if (gate) {
+      agentView.setChatContext(null, {
+        contextLabel: agentLabel,
+        disabledReason: gate.title,
+      });
+    } else {
+      agentView.setChatContext(
+        {
+          type: "schema",
+          projectId,
+          schemaName,
+          tableName,
+          stats: analysis.stats,
+          findings: analysis.findings,
+          suggestions: analysis.suggestions,
+        },
+        { contextLabel: agentLabel }
+      );
+    }
     vscode.window.showInformationMessage(
       `SQLCortex: Schema analysis complete for ${schemaName}.`
     );
@@ -1674,6 +1847,18 @@ async function analyzeSchemaFlow(
       kind: "error",
       error: { message },
       data: { hash: schemaName, mode: "SCHEMA" },
+    });
+    agentView.updateInsights(
+      {
+        kind: "error",
+        error: { message },
+        data: { hash: targetName, mode: agentMode },
+      },
+      { contextLabel: agentLabel }
+    );
+    agentView.setChatContext(null, {
+      contextLabel: agentLabel,
+      disabledReason: message,
     });
     reportRequestError(output, "Schema analysis failed", err);
   }
@@ -1788,6 +1973,7 @@ async function resolveSchemaActionContext(
   projectId: string;
   connectionId: string;
   schemaName: string;
+  tableName?: string | null;
 } | null> {
   const auth = await resolveAuthContext(context, tokenStore, output);
   if (!auth) {
@@ -1813,12 +1999,18 @@ async function resolveSchemaActionContext(
 
   const projectId = workspaceContext.projectId;
   const connectionId = workspaceContext.connectionId;
+  let tableName: string | null = null;
+  if (node instanceof TableNode) {
+    tableName = node.table.name;
+  } else if (node instanceof ColumnNode) {
+    tableName = node.tableName;
+  }
   const schemaName = await resolveSchemaNameFromNode(dbExplorerProvider, node);
   if (!schemaName) {
     return null;
   }
 
-  return { auth, projectId, connectionId, schemaName };
+  return { auth, projectId, connectionId, schemaName, tableName };
 }
 
 async function resolveSchemaNameFromNode(

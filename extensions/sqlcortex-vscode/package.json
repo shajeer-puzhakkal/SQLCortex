@@ -264,6 +264,11 @@
           "group": "navigation"
         },
         {
+          "command": "sqlcortex.analyzeSchema",
+          "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",
+          "group": "navigation"
+        },
+        {
           "command": "sqlcortex.copyTableName",
           "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",
           "group": "inline"
