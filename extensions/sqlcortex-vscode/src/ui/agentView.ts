@@ -89,7 +89,7 @@ type WebviewMessage =
   | { type: "askChat"; text: string }
   | { type: "openUpgrade"; url?: string | null };
 
-const DEFAULT_CHAT_DISABLED = "Analyze a schema or table to unlock chat.";
+const DEFAULT_CHAT_DISABLED = "";
 
 export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static currentProvider: AgentViewProvider | undefined;
@@ -474,6 +474,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         min-height: 100%;
       }
 
+      .chat-shell-root {
+        margin-top: auto;
+        border: none;
+        background: transparent;
+        padding: 0;
+        box-shadow: none;
+      }
+
       .header {
         display: flex;
         flex-direction: column;
@@ -562,6 +570,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
 
       .gate.hidden {
+        display: none;
+      }
+
+      .hidden {
         display: none;
       }
 
@@ -696,18 +708,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
       .chat-card {
         border-radius: 14px;
-        border: 1px solid var(--vscode-panel-border);
+        border: none;
         padding: 10px 12px;
-        background: color-mix(
-          in srgb,
-          var(--vscode-editorWidget-background) 92%,
-          var(--vscode-editor-background)
-        );
+        background: transparent;
         display: flex;
         flex-direction: column;
         gap: 10px;
-        box-shadow: inset 0 1px 0
-          color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent);
+        box-shadow: none;
       }
 
       .chat-card-title {
@@ -721,12 +728,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         align-items: center;
         border-radius: 10px;
         border: 1px solid var(--vscode-panel-border);
-        padding: 6px 8px;
+        padding: 6px 10px;
         background: color-mix(
           in srgb,
           var(--vscode-input-background) 70%,
           transparent
         );
+        width: 100%;
+        box-sizing: border-box;
       }
 
       .chat-input textarea {
@@ -735,7 +744,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         max-height: 72px;
         resize: none;
         border: none;
-        padding: 2px 0;
+        padding: 2px 6px;
         background: transparent;
         color: var(--vscode-input-foreground);
         font-family: var(--vscode-font-family);
@@ -760,6 +769,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         align-items: center;
         gap: 8px;
         color: var(--vscode-descriptionForeground);
+        flex-wrap: wrap;
       }
 
       .chat-tool,
@@ -857,7 +867,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         <h1>SQLCortex Agent</h1>
         <p class="subtitle">Coordinate multi-step database work here.</p>
       </header>
-      <section class="card">
+      <section id="insightsShell" class="card hidden">
         <div class="section-header">
           <div>
             <h2>Insights</h2>
@@ -905,9 +915,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         </div>
       </section>
 
-      <section class="card">
+      <section class="card chat-shell-root">
         <div class="section-header">
-          <h2>Agent Chat</h2>
           <div id="chatContext" class="chat-context"></div>
         </div>
         <div class="chat-shell">
@@ -915,7 +924,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           <div id="chatPending" class="chat-pending"></div>
           <div class="chat-card">
             <div class="chat-input">
-              <textarea id="chatInput" placeholder="Ask a follow-up question"></textarea>
+              <textarea id="chatInput" placeholder="Agent Chat"></textarea>
             </div>
             <div class="chat-toolbar">
               <div class="chat-tools" aria-hidden="true">
@@ -960,6 +969,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
+      const insightsShell = document.getElementById("insightsShell");
       const subtitle = document.getElementById("subtitle");
       const hashEl = document.getElementById("hash");
       const modeEl = document.getElementById("mode");
@@ -991,7 +1001,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           chatContext.textContent = label ? "Context: " + label : "";
         }
         if (chatInput) {
-          chatInput.placeholder = label ? "Ask about " + label : "Ask a follow-up question";
+          chatInput.placeholder = label ? "Ask about " + label : "Agent Chat";
         }
       }
 
@@ -1070,6 +1080,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
       function render(state) {
         if (!state || state.kind === "idle") {
+          if (insightsShell) {
+            insightsShell.classList.add("hidden");
+          }
           subtitle.textContent = "Analyze a schema or table to see results here.";
           setMeta(null, null);
           setStatus("Waiting for analysis...", false);
@@ -1084,6 +1097,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (state.kind === "loading") {
+          if (insightsShell) {
+            insightsShell.classList.remove("hidden");
+          }
           subtitle.textContent = "Analyzing...";
           setMeta(state.data.hash, state.data.mode);
           setStatus("Analyzing insights...", false);
@@ -1098,6 +1114,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (state.kind === "error") {
+          if (insightsShell) {
+            insightsShell.classList.remove("hidden");
+          }
           subtitle.textContent = "Analysis failed.";
           setMeta(state.data?.hash || null, state.data?.mode || null);
           setStatus(state.error.message || "Analysis failed.", true);
@@ -1112,6 +1131,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
 
         const gated = state.kind === "gated";
+        if (insightsShell) {
+          insightsShell.classList.remove("hidden");
+        }
         subtitle.textContent = gated ? state.data.gate.title : "Analysis complete.";
         setMeta(state.data.hash, state.data.mode);
         setStatus(gated ? state.data.gate.title : "Analysis complete.", false);
@@ -1137,12 +1159,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         chatState = chat || { messages: [], pending: false, disabledReason: null };
         chatMessagesEl.innerHTML = "";
         if (!chatState.messages || !chatState.messages.length) {
-          const placeholder = document.createElement("div");
-          placeholder.className = "chat-placeholder";
-          placeholder.textContent = chatState.disabledReason
+          const placeholderText = chatState.disabledReason
             ? chatState.disabledReason
-            : "Ask a follow-up question about this context.";
-          chatMessagesEl.appendChild(placeholder);
+            : "";
+          if (placeholderText) {
+            const placeholder = document.createElement("div");
+            placeholder.className = "chat-placeholder";
+            placeholder.textContent = placeholderText;
+            chatMessagesEl.appendChild(placeholder);
+          }
         } else {
           chatState.messages.forEach((message) => {
             const bubble = document.createElement("div");
