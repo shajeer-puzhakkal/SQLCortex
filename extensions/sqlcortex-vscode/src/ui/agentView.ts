@@ -502,9 +502,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
       .card {
         border-radius: 12px;
-        border: 1px solid var(--vscode-panel-border);
+        border: none;
         padding: 14px;
         background: var(--vscode-editorWidget-background);
+      }
+
+      .card.chat-shell-root {
+        padding: 0;
+        background: transparent;
       }
 
       .card h2 {
@@ -709,11 +714,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       .chat-card {
         border-radius: 14px;
         border: none;
-        padding: 10px 12px;
+        padding: 0;
         background: transparent;
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: 8px;
         box-shadow: none;
       }
 
@@ -727,21 +732,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         gap: 8px;
         align-items: center;
         border-radius: 10px;
-        border: 1px solid var(--vscode-panel-border);
-        padding: 6px 10px;
+        border: none;
+        padding: 10px 12px;
         background: color-mix(
           in srgb,
           var(--vscode-input-background) 70%,
           transparent
         );
         width: 100%;
+        max-width: 100%;
+        margin: 0;
         box-sizing: border-box;
       }
 
       .chat-input textarea {
         flex: 1;
-        min-height: 28px;
-        max-height: 72px;
+        min-height: 40px;
+        max-height: 96px;
         resize: none;
         border: none;
         padding: 2px 6px;
@@ -777,7 +784,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         width: 22px;
         height: 22px;
         border-radius: 999px;
-        border: 1px solid var(--vscode-panel-border);
+        border: none;
         background: color-mix(
           in srgb,
           var(--vscode-editorWidget-background) 88%,
