@@ -52,6 +52,14 @@ type ProviderDependencies = {
 
 const CACHE_TTL_MS = 60_000;
 
+export type TableConstraintInfo = {
+  name: string;
+  type: string;
+  summary?: string;
+  tooltip?: string;
+  icon?: string;
+};
+
 export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNode> {
   private readonly onDidChangeTreeDataEmitter = new vscode.EventEmitter<
     DbExplorerNode | undefined
@@ -195,6 +203,28 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     }
     const client = this.deps.createAuthorizedClient(auth);
     return this.fetchTables(client, workspace.projectId, workspace.connectionId, schemaName);
+  }
+
+  async getTableConstraints(
+    schemaName: string,
+    tableName: string
+  ): Promise<TableConstraintInfo[] | null> {
+    const auth = await this.deps.resolveAuthContext();
+    if (!auth) {
+      return null;
+    }
+    const workspace = getWorkspaceContext(this.deps.context);
+    if (!workspace.projectId || !workspace.connectionId) {
+      return null;
+    }
+    const client = this.deps.createAuthorizedClient(auth);
+    return this.fetchConstraints(
+      client,
+      workspace.projectId,
+      workspace.connectionId,
+      schemaName,
+      tableName
+    );
   }
 
   private async getRootNodes(): Promise<DbExplorerNode[]> {
@@ -673,15 +703,7 @@ export class DbExplorerProvider implements vscode.TreeDataProvider<DbExplorerNod
     connectionId: string,
     schemaName: string,
     tableName: string
-  ): Promise<
-    Array<{
-      name: string;
-      type: string;
-      summary?: string;
-      tooltip?: string;
-      icon?: string;
-    }>
-  > {
+  ): Promise<TableConstraintInfo[]> {
     const cacheKey = this.cacheKey(connectionId, "constraints", {
       schema: schemaName,
       table: tableName,

@@ -17,6 +17,7 @@ export type AgentChatContext =
       stats: SchemaInsightsStats;
       findings: string[];
       suggestions: string[];
+      tableContext?: string | null;
     }
   | {
       type: "query";
