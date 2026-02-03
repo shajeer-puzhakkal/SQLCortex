@@ -17,9 +17,14 @@ import type {
   AiSuggestion,
   ConnectionResource,
   ExplainMode,
+  ForeignKeyInfo,
+  IndexInfo,
   Org,
   Project,
   RuleFinding,
+  SchemaColumnResource,
+  SchemaMetadataResponse,
+  TableInfo,
 } from "./api/types";
 import { estimateCredits } from "../../../packages/shared/src/credits";
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../packages/shared/src/sql";
@@ -47,14 +52,18 @@ import { ChatViewProvider } from "./ui/chatView";
 import { AgentViewProvider } from "./ui/agentView";
 import type { AgentChatContext, AgentChatMessage } from "./ui/agentView";
 import { AnalyzeCodeLensProvider } from "./ui/analyzeCodeLens";
-import { DbExplorerProvider } from "./ui/tree/dbExplorerProvider";
+import { DbExplorerProvider, type TableConstraintInfo } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { SidebarProvider } from "./ui/tree/sidebarProvider";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
 import { validateReadOnlySql } from "./sql/validator";
-import { analyzeSchemaMetadata, buildSchemaErdHtml } from "./schema/schemaAnalysis";
+import {
+  analyzeSchemaMetadata,
+  analyzeTableMetadata,
+  buildSchemaErdHtml,
+} from "./schema/schemaAnalysis";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -75,6 +84,7 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.analyzeDocument", label: "Analyze Query" },
   { id: "sqlcortex.analyzeDocumentWithAnalyze", label: "Analyze Query (EXPLAIN ANALYZE)" },
   { id: "sqlcortex.analyzeSchema", label: "Analyze Schema" },
+  { id: "sqlcortex.analyzeTable", label: "Analyze Table" },
   { id: "sqlcortex.drawSchemaErd", label: "Draw ERD Diagram" },
 ];
 
@@ -354,6 +364,17 @@ export function activate(context: vscode.ExtensionContext) {
       });
     },
     "sqlcortex.analyzeSchema": async (...args) => {
+      await analyzeSchemaFlow(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider,
+        dbExplorerProvider,
+        args[0]
+      );
+    },
+    "sqlcortex.analyzeTable": async (...args) => {
       await analyzeSchemaFlow(
         context,
         tokenStore,
@@ -1597,6 +1618,7 @@ async function handleAgentChat(
     .join("\n");
   const userIntentParts = [
     focus,
+    input.context.tableContext ? `Table context:\n${input.context.tableContext}` : null,
     `User question: ${input.text}`,
     historySnippet ? `Conversation:\n${historySnippet}` : null,
   ].filter((item): item is string => Boolean(item));
@@ -1713,7 +1735,21 @@ async function analyzeSchemaFlow(
           schemaName
         )
     );
-    const analysis = analyzeSchemaMetadata(metadata);
+    const analysis = tableName
+      ? analyzeTableMetadata(metadata, tableName)
+      : analyzeSchemaMetadata(metadata);
+    let tableContext: string | null = null;
+    if (tableName) {
+      let constraints: TableConstraintInfo[] | null = null;
+      try {
+        constraints = await dbExplorerProvider.getTableConstraints(schemaName, tableName);
+      } catch (err) {
+        output.appendLine(
+          `SQLCortex: Unable to load table constraints: ${formatRequestError(err)}`
+        );
+      }
+      tableContext = buildTableContextSummary(metadata, tableName, constraints);
+    }
     let aiSuggestions: string[] | null = null;
     let aiExplanation: string | null = null;
     let aiWarnings: string[] = [];
@@ -1732,6 +1768,9 @@ async function analyzeSchemaFlow(
       const focusIntent = tableName
         ? `Schema improvement recommendations focused on ${schemaName}.${tableName}.`
         : "Schema improvement recommendations.";
+      const userIntent = tableContext
+        ? `${focusIntent}\n\nTable context:\n${tableContext}`
+        : focusIntent;
       const aiResponse = await getSchemaInsights(client, {
         projectId,
         schemaName,
@@ -1739,7 +1778,7 @@ async function analyzeSchemaFlow(
         findings: analysis.findings,
         suggestions: analysis.suggestions,
         source: "vscode",
-        userIntent: focusIntent,
+        userIntent,
       });
       const ai = aiResponse.ai;
       const aiSuggestionList = normalizeAiSuggestions(ai?.suggestions);
@@ -1764,15 +1803,22 @@ async function analyzeSchemaFlow(
       );
     }
 
-    const suggestions = aiSuggestions ?? analysis.suggestions;
-    const explanation = aiExplanation ?? analysis.explanation;
-    const warnings = [...analysis.warnings, ...aiWarnings];
-    const assumptions = [...analysis.assumptions, ...aiAssumptions];
+    const hasAiContent = Boolean(
+      aiExplanation ||
+        (aiSuggestions && aiSuggestions.length > 0) ||
+        aiWarnings.length > 0 ||
+        aiAssumptions.length > 0
+    );
+    const suggestions = hasAiContent ? aiSuggestions ?? [] : analysis.suggestions;
+    const explanation = hasAiContent ? aiExplanation : analysis.explanation;
+    const warnings = hasAiContent ? aiWarnings : [...analysis.warnings, ...aiWarnings];
+    const assumptions = hasAiContent ? aiAssumptions : [...analysis.assumptions, ...aiAssumptions];
+    const findings = hasAiContent ? [] : analysis.findings;
     const schemaMode: "SCHEMA" = "SCHEMA";
     const payload = {
       hash: schemaName,
       mode: schemaMode,
-      findings: analysis.findings,
+      findings,
       suggestions,
       warnings,
       assumptions,
@@ -1782,7 +1828,7 @@ async function analyzeSchemaFlow(
     const agentPayload = {
       hash: targetName,
       mode: agentMode,
-      findings: analysis.findings,
+      findings,
       suggestions,
       warnings,
       assumptions,
@@ -1834,6 +1880,7 @@ async function analyzeSchemaFlow(
           stats: analysis.stats,
           findings: analysis.findings,
           suggestions: analysis.suggestions,
+          tableContext,
         },
         { contextLabel: agentLabel }
       );
@@ -1862,6 +1909,147 @@ async function analyzeSchemaFlow(
     });
     reportRequestError(output, "Schema analysis failed", err);
   }
+}
+
+function buildTableContextSummary(
+  metadata: SchemaMetadataResponse,
+  tableName: string,
+  constraints: TableConstraintInfo[] | null
+): string | null {
+  const table = metadata.tables.find((item) => item.name === tableName) ?? null;
+  if (!table) {
+    return null;
+  }
+
+  const incoming = collectIncomingForeignKeys(metadata.tables, table);
+  const lines: string[] = [];
+  lines.push(`Table: ${metadata.schema}.${table.name}`);
+
+  lines.push(`Columns (${table.columns.length}):`);
+  lines.push(
+    ...formatList(
+      table.columns.map(formatColumnSummary),
+      "None"
+    )
+  );
+
+  lines.push(`Indexes (${table.indexes.length}):`);
+  lines.push(
+    ...formatList(
+      table.indexes.map(formatIndexSummary),
+      "None"
+    )
+  );
+
+  const constraintItems =
+    constraints === null
+      ? ["Unavailable"]
+      : constraints.length === 0
+        ? ["None"]
+        : constraints.map((constraint) => formatConstraintSummary(constraint));
+  lines.push(`Constraints (${constraints ? constraints.length : 0}):`);
+  lines.push(...formatList(constraintItems, "None"));
+
+  lines.push(`Relationships (outgoing) (${table.foreignKeys.length}):`);
+  lines.push(
+    ...formatList(
+      table.foreignKeys.map((fk) => formatForeignKeySummary(fk, table)),
+      "None"
+    )
+  );
+
+  lines.push(`Relationships (incoming) (${incoming.length}):`);
+  lines.push(
+    ...formatList(
+      incoming.map((entry) => formatForeignKeySummary(entry.fk, entry.table)),
+      "None"
+    )
+  );
+
+  return lines.join("\n");
+}
+
+function formatList(items: string[], emptyLabel: string): string[] {
+  if (items.length === 0) {
+    return [`- ${emptyLabel}`];
+  }
+  return items.map((item) => `- ${item}`);
+}
+
+function formatColumnSummary(column: SchemaColumnResource): string {
+  const parts: string[] = [];
+  parts.push(column.name);
+  parts.push(column.type);
+  parts.push(column.nullable ? "NULL" : "NOT NULL");
+  if (column.default) {
+    parts.push(`default ${column.default}`);
+  }
+  return parts.join(" ");
+}
+
+function formatIndexSummary(index: IndexInfo): string {
+  const parts: string[] = [];
+  if (index.primary) {
+    parts.push("primary");
+  } else if (index.unique) {
+    parts.push("unique");
+  } else {
+    parts.push("index");
+  }
+  if (index.method) {
+    parts.push(index.method);
+  }
+  const columns = index.columns.length > 0 ? `(${index.columns.join(", ")})` : "";
+  if (columns) {
+    parts.push(columns);
+  }
+  if (index.predicate) {
+    parts.push(`WHERE ${index.predicate}`);
+  }
+  return `${index.name}: ${parts.join(" ")}`.trim();
+}
+
+function formatConstraintSummary(constraint: TableConstraintInfo): string {
+  const summary = constraint.summary?.trim();
+  if (summary) {
+    return `${constraint.name}: ${sanitizeConstraintSummary(summary)}`;
+  }
+  return `${constraint.name}: ${constraint.type}`;
+}
+
+function sanitizeConstraintSummary(value: string): string {
+  return value.replace(/\u2192|â†’/g, "->");
+}
+
+function formatForeignKeySummary(fk: ForeignKeyInfo, source: TableInfo): string {
+  const localColumns = fk.columns.length > 0 ? `(${fk.columns.join(", ")})` : "";
+  const foreignColumns =
+    fk.foreignColumns.length > 0 ? `(${fk.foreignColumns.join(", ")})` : "";
+  const foreignTable = `${fk.foreignSchema}.${fk.foreignTable}${foreignColumns}`;
+  const direction = localColumns
+    ? `${source.name}${localColumns} -> ${foreignTable}`
+    : `${source.name} -> ${foreignTable}`;
+  const onDelete = fk.onDelete?.trim() || "NO ACTION";
+  const onUpdate = fk.onUpdate?.trim() || "NO ACTION";
+  return `${direction} | ON DELETE ${onDelete}, ON UPDATE ${onUpdate}`;
+}
+
+function collectIncomingForeignKeys(
+  tables: TableInfo[],
+  target: TableInfo
+): Array<{ table: TableInfo; fk: ForeignKeyInfo }> {
+  const matches: Array<{ table: TableInfo; fk: ForeignKeyInfo }> = [];
+  for (const table of tables) {
+    if (table.name === target.name && table.schema === target.schema) {
+      continue;
+    }
+    for (const fk of table.foreignKeys) {
+      if (fk.foreignTable === target.name && fk.foreignSchema === target.schema) {
+        matches.push({ table, fk });
+      }
+    }
+  }
+  return matches;
 }
 
 async function drawSchemaErdFlow(

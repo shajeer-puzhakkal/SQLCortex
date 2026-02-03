@@ -21,6 +21,11 @@ Rules:
 - Do not say "apply automatically" or similar language.
 - If actual row counts are missing, note that the plan is based on estimates.
 - Keep suggestions generic and safe.
+- Accuracy & grounding:
+  - Answer only using the plan summary, rule findings, and user intent provided below.
+  - If a question cannot be answered from that context, say you don't have enough information.
+  - Do not invent schema details, constraints, or data characteristics.
+  - Keep responses concise and specific (avoid blended or filler content).
 
 User intent: {user_intent}
 

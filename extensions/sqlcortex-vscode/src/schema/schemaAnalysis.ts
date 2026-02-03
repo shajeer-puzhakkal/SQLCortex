@@ -28,6 +28,11 @@ const FK_SUFFIXES = ["_id", "_uuid"];
 const AUDIT_CREATED = new Set(["createdat", "createdon"]);
 const AUDIT_UPDATED = new Set(["updatedat", "updatedon"]);
 const AUDIT_DELETED = new Set(["deletedat", "deletedon"]);
+const ANALYSIS_ASSUMPTIONS = [
+  "Missing foreign keys inferred from *_id and *_uuid columns within the same schema.",
+  "Foreign key index checks require an index whose leading columns match the FK columns.",
+  "Join table heuristic targets tables with 2+ foreign keys and few non-FK columns.",
+];
 const ERD_STYLE = {
   headerHeight: 60,
   rowHeight: 40,
@@ -62,11 +67,7 @@ export function analyzeSchemaMetadata(metadata: SchemaMetadataResponse): SchemaA
     warnings.push(`Views excluded from analysis (${views.length}).`);
   }
 
-  const assumptions = [
-    "Missing foreign keys inferred from *_id and *_uuid columns within the same schema.",
-    "Foreign key index checks require an index whose leading columns match the FK columns.",
-    "Join table heuristic targets tables with 2+ foreign keys and few non-FK columns.",
-  ];
+  const assumptions = [...ANALYSIS_ASSUMPTIONS];
 
   const explanation = `Analyzed schema ${metadata.schema} with ${tables.length} tables, ${columnCount} columns, ${foreignKeyCount} foreign keys, and ${indexCount} indexes.`;
 
@@ -79,6 +80,69 @@ export function analyzeSchemaMetadata(metadata: SchemaMetadataResponse): SchemaA
     stats: {
       tableCount: tables.length,
       viewCount: views.length,
+      columnCount,
+      foreignKeyCount,
+      indexCount,
+    },
+  };
+}
+
+export function analyzeTableMetadata(
+  metadata: SchemaMetadataResponse,
+  tableName: string
+): SchemaAnalysis {
+  const target = metadata.tables.find((table) => table.name === tableName) ?? null;
+  if (!target) {
+    return {
+      findings: [],
+      suggestions: [],
+      warnings: [`Table ${metadata.schema}.${tableName} not found.`],
+      assumptions: [],
+      explanation: null,
+      stats: {
+        tableCount: 0,
+        viewCount: 0,
+        columnCount: 0,
+        foreignKeyCount: 0,
+        indexCount: 0,
+      },
+    };
+  }
+
+  const isTable = target.type === "table";
+  const analysisTables = isTable ? [target] : [];
+  const columnCount = target.columns.length;
+  const foreignKeyCount = target.foreignKeys.length;
+  const indexCount = target.indexes.length;
+
+  const tableNames = buildTableNameMap(metadata.tables);
+  const missingForeignKeys = isTable
+    ? findMissingForeignKeys(analysisTables, tableNames)
+    : [];
+  const missingIndexes = isTable ? findMissingIndexesOnForeignKeys(analysisTables) : [];
+  const joinTableIssues = isTable ? findJoinTableIssues(analysisTables) : [];
+  const namingIssues = findNamingIssues([target]);
+  const auditIssues = isTable ? findAuditIssues(analysisTables) : [];
+
+  const warnings: string[] = [];
+  if (!isTable) {
+    warnings.push("View analysis excludes foreign key and index heuristics.");
+  }
+
+  const assumptions = isTable ? [...ANALYSIS_ASSUMPTIONS] : [];
+  const qualifiedName = `${metadata.schema}.${target.name}`;
+  const label = isTable ? "table" : "view";
+  const explanation = `Analyzed ${label} ${qualifiedName} with ${columnCount} columns, ${foreignKeyCount} foreign keys, and ${indexCount} indexes.`;
+
+  return {
+    findings: [...missingForeignKeys, ...missingIndexes, ...joinTableIssues],
+    suggestions: [...namingIssues, ...auditIssues],
+    warnings,
+    assumptions,
+    explanation,
+    stats: {
+      tableCount: isTable ? 1 : 0,
+      viewCount: isTable ? 0 : 1,
       columnCount,
       foreignKeyCount,
       indexCount,
@@ -420,11 +484,11 @@ export function buildSchemaErdHtml(
 </html>`;
 }
 
-function findMissingForeignKeys(tables: TableInfo[]): string[] {
-  const tableNames = new Map<string, string>();
-  for (const table of tables) {
-    tableNames.set(table.name.toLowerCase(), table.name);
-  }
+function findMissingForeignKeys(
+  tables: TableInfo[],
+  tableNamesOverride?: Map<string, string>
+): string[] {
+  const tableNames = tableNamesOverride ?? buildTableNameMap(tables);
 
   const results: string[] = [];
   const seen = new Set<string>();
@@ -462,6 +526,17 @@ function findMissingForeignKeys(tables: TableInfo[]): string[] {
   }
 
   return results;
+}
+
+function buildTableNameMap(tables: TableInfo[]): Map<string, string> {
+  const tableNames = new Map<string, string>();
+  for (const table of tables) {
+    if (table.type !== "table") {
+      continue;
+    }
+    tableNames.set(table.name.toLowerCase(), table.name);
+  }
+  return tableNames;
 }
 
 function findMissingIndexesOnForeignKeys(tables: TableInfo[]): string[] {

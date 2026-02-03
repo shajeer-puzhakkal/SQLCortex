@@ -96,6 +96,10 @@
         "title": "SQLCortex: Analyze Schema"
       },
       {
+        "command": "sqlcortex.analyzeTable",
+        "title": "SQLCortex: Analyze Table"
+      },
+      {
         "command": "sqlcortex.drawSchemaErd",
         "title": "SQLCortex: Draw ERD Diagram"
       }
@@ -264,7 +268,7 @@
           "group": "navigation"
         },
         {
-          "command": "sqlcortex.analyzeSchema",
+          "command": "sqlcortex.analyzeTable",
           "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.table",
           "group": "navigation"
         },
