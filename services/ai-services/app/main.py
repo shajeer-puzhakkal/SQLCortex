@@ -1,8 +1,13 @@
+import logging
+
 from fastapi import FastAPI
 
 from .ai_routes import router as ai_router
 from .insights_routes import router as insights_router
 from .query_chat_routes import router as query_chat_router
+
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="SQLCortex AI Services")
 app.include_router(ai_router)
