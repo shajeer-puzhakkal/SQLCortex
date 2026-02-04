@@ -10,6 +10,10 @@ summary must be 1-3 sentences in a single string.
 findings and recommendations must be arrays of short strings.
 risk_level must be one of: low, medium, high.
 
+Policy:
+- Policy flags: {policy_flags}
+- Allowed recommendation types: {allowed_reco_types}
+
 SQL:
 {sql_text}
 

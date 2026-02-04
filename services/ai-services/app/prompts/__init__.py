@@ -49,6 +49,8 @@ def render_prompt(
     db_engine: str,
     project_id: str,
     user_intent: Optional[str],
+    policy_flags: Any = None,
+    allowed_reco_types: Any = None,
 ) -> str:
     template_path = _PROMPT_DIR / f"{template_name}.md"
     template = template_path.read_text(encoding="utf-8")
@@ -60,6 +62,8 @@ def render_prompt(
         db_engine=db_engine,
         project_id=project_id,
         user_intent=user_intent or "None",
+        policy_flags=_stringify(policy_flags or []),
+        allowed_reco_types=_stringify(allowed_reco_types or []),
     )
 
 
@@ -68,8 +72,27 @@ def render_insights_prompt(
     plan_summary: Any,
     rule_findings: Any,
     user_intent: Optional[str],
+    policy_flags: Any,
+    allowed_reco_types: Any,
 ) -> str:
     template_path = _PROMPT_DIR / "insights.md"
+    template = template_path.read_text(encoding="utf-8")
+    return template.format(
+        plan_summary=_stringify(plan_summary),
+        rule_findings=_stringify(rule_findings),
+        user_intent=user_intent or "None",
+        policy_flags=_stringify(policy_flags),
+        allowed_reco_types=_stringify(allowed_reco_types),
+    )
+
+
+def render_insights_planner_prompt(
+    *,
+    plan_summary: Any,
+    rule_findings: Any,
+    user_intent: Optional[str],
+) -> str:
+    template_path = _PROMPT_DIR / "insights_planner.md"
     template = template_path.read_text(encoding="utf-8")
     return template.format(
         plan_summary=_stringify(plan_summary),
@@ -105,6 +128,7 @@ def render_query_chat_prompt(
     db_engine: str,
     project_id: str,
     messages: Any,
+    policy_flags: Any = None,
 ) -> str:
     template_path = _PROMPT_DIR / "query_chat.md"
     template = template_path.read_text(encoding="utf-8")
@@ -116,4 +140,11 @@ def render_query_chat_prompt(
         db_engine=db_engine,
         project_id=project_id,
         conversation=_format_messages(messages),
+        policy_flags=_stringify(policy_flags or []),
     )
+
+
+def render_policy_planner_prompt(*, user_intent: Optional[str]) -> str:
+    template_path = _PROMPT_DIR / "policy_planner.md"
+    template = template_path.read_text(encoding="utf-8")
+    return template.format(user_intent=user_intent or "None")

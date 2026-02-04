@@ -128,6 +128,37 @@ def parse_insights_response(text: str) -> Dict[str, Any]:
     }
 
 
+def parse_planner_response(text: str) -> Dict[str, Any]:
+    blob = _extract_json_blob(text)
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Planner response JSON parse error: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("Planner response JSON was not an object")
+
+    allow_schema_advice = payload.get("allow_schema_advice")
+    allow_fk_recommendations = payload.get("allow_fk_recommendations")
+
+    if not isinstance(allow_schema_advice, bool):
+        raise ValueError("Planner allow_schema_advice must be boolean")
+    if not isinstance(allow_fk_recommendations, bool):
+        raise ValueError("Planner allow_fk_recommendations must be boolean")
+
+    policy_flags = payload.get("policy_flags")
+    if policy_flags is None:
+        policy_flags = []
+    if not isinstance(policy_flags, list) or not all(isinstance(item, str) for item in policy_flags):
+        raise ValueError("Planner policy_flags must be a string array")
+
+    return {
+        "allow_schema_advice": allow_schema_advice,
+        "allow_fk_recommendations": allow_fk_recommendations,
+        "policy_flags": [flag.strip() for flag in policy_flags if isinstance(flag, str) and flag.strip()],
+    }
+
+
 def parse_chat_response(text: str) -> Dict[str, Any]:
     blob = _extract_json_blob(text)
     try:

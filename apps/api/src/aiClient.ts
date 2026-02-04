@@ -57,6 +57,17 @@ export type AiServiceError = {
   payload: ErrorResponse;
 };
 
+function countKeys(value: unknown): number {
+  if (!value || typeof value !== "object") {
+    return 0;
+  }
+  return Object.keys(value as Record<string, unknown>).length;
+}
+
+function logAiServiceEvent(entry: Record<string, unknown>) {
+  console.log(JSON.stringify({ event: "ai_service", ...entry }));
+}
+
 function normalizeAiServicesBaseUrl(raw: string): string {
   let base = raw.trim().replace(/\/+$/, "");
   if (!base) {
@@ -255,6 +266,19 @@ export async function callAiSqlService(
   const timeoutMs = resolveAiServicesTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const aiServicesBaseUrl = resolveAiServicesBaseUrl();
+  const start = Date.now();
+
+  logAiServiceEvent({
+    type: "request",
+    action,
+    project_id: payload.project_id,
+    db_engine: payload.db_engine,
+    sql_len: payload.sql_text?.length ?? 0,
+    explain_len: payload.explain_output?.length ?? 0,
+    schema_keys: countKeys(payload.schema),
+    indexes_keys: countKeys(payload.indexes),
+    user_intent: payload.user_intent ? "yes" : "no",
+  });
 
   try {
     const response = await fetch(`${aiServicesBaseUrl}/ai/sql/${action}`, {
@@ -266,19 +290,48 @@ export async function callAiSqlService(
 
     const responsePayload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
+      logAiServiceEvent({
+        type: "response_error",
+        action,
+        status: response.status,
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: response.status,
         payload: mapAiServiceError(response.status, responsePayload),
       } satisfies AiServiceError;
     }
 
-    return normalizeAiSqlResponse(responsePayload);
+    const normalized = normalizeAiSqlResponse(responsePayload);
+    logAiServiceEvent({
+      type: "response_ok",
+      action,
+      latency_ms: Date.now() - start,
+      provider: normalized.meta.provider,
+      model: normalized.meta.model,
+      findings: normalized.findings.length,
+      recommendations: normalized.recommendations.length,
+      risk_level: normalized.risk_level,
+    });
+    return normalized;
   } catch (err) {
     if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      logAiServiceEvent({
+        type: "response_error",
+        action,
+        status: (err as AiServiceError).status,
+        error_code: (err as AiServiceError).payload.code,
+        latency_ms: Date.now() - start,
+      });
       throw err as AiServiceError;
     }
 
     if ((err as Error)?.name === "AbortError") {
+      logAiServiceEvent({
+        type: "timeout",
+        action,
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: 504,
         payload: makeError("ANALYZER_TIMEOUT", "AI request timed out.", {
@@ -287,6 +340,12 @@ export async function callAiSqlService(
       } satisfies AiServiceError;
     }
 
+    logAiServiceEvent({
+      type: "service_unreachable",
+      action,
+      latency_ms: Date.now() - start,
+      reason: err instanceof Error ? err.message : "unknown",
+    });
     throw {
       status: 502,
       payload: makeError("ANALYZER_ERROR", "Could not reach AI service.", {
@@ -305,6 +364,15 @@ export async function callAiInsightsService(
   const timeoutMs = resolveAiServicesTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const aiServicesBaseUrl = resolveAiServicesBaseUrl();
+  const start = Date.now();
+
+  logAiServiceEvent({
+    type: "request",
+    action: "insights",
+    plan_summary_keys: countKeys(payload.plan_summary),
+    rule_findings: payload.rule_findings?.length ?? 0,
+    user_intent: payload.user_intent ? "yes" : "no",
+  });
 
   try {
     const response = await fetch(`${aiServicesBaseUrl}/ai/insights`, {
@@ -316,19 +384,48 @@ export async function callAiInsightsService(
 
     const responsePayload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
+      logAiServiceEvent({
+        type: "response_error",
+        action: "insights",
+        status: response.status,
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: response.status,
         payload: mapAiServiceError(response.status, responsePayload),
       } satisfies AiServiceError;
     }
 
-    return normalizeAiInsightsResponse(responsePayload);
+    const normalized = normalizeAiInsightsResponse(responsePayload);
+    logAiServiceEvent({
+      type: "response_ok",
+      action: "insights",
+      latency_ms: Date.now() - start,
+      provider: normalized.meta.provider,
+      model: normalized.meta.model,
+      suggestions: normalized.suggestions.length,
+      warnings: normalized.warnings.length,
+      assumptions: normalized.assumptions.length,
+    });
+    return normalized;
   } catch (err) {
     if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      logAiServiceEvent({
+        type: "response_error",
+        action: "insights",
+        status: (err as AiServiceError).status,
+        error_code: (err as AiServiceError).payload.code,
+        latency_ms: Date.now() - start,
+      });
       throw err as AiServiceError;
     }
 
     if ((err as Error)?.name === "AbortError") {
+      logAiServiceEvent({
+        type: "timeout",
+        action: "insights",
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: 504,
         payload: makeError("ANALYZER_TIMEOUT", "AI request timed out.", {
@@ -337,6 +434,12 @@ export async function callAiInsightsService(
       } satisfies AiServiceError;
     }
 
+    logAiServiceEvent({
+      type: "service_unreachable",
+      action: "insights",
+      latency_ms: Date.now() - start,
+      reason: err instanceof Error ? err.message : "unknown",
+    });
     throw {
       status: 502,
       payload: makeError("ANALYZER_ERROR", "Could not reach AI service.", {
@@ -355,6 +458,20 @@ export async function callAiQueryChatService(
   const timeoutMs = resolveAiServicesTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const aiServicesBaseUrl = resolveAiServicesBaseUrl();
+  const start = Date.now();
+
+  logAiServiceEvent({
+    type: "request",
+    action: "query_chat",
+    project_id: payload.project_id,
+    db_engine: payload.db_engine,
+    sql_len: payload.sql_text?.length ?? 0,
+    explain_len: payload.explain_output?.length ?? 0,
+    schema_keys: countKeys(payload.schema),
+    indexes_keys: countKeys(payload.indexes),
+    messages: payload.messages?.length ?? 0,
+    user_intent: payload.user_intent ? "yes" : "no",
+  });
 
   try {
     const response = await fetch(`${aiServicesBaseUrl}/ai/query/chat`, {
@@ -366,19 +483,46 @@ export async function callAiQueryChatService(
 
     const responsePayload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
+      logAiServiceEvent({
+        type: "response_error",
+        action: "query_chat",
+        status: response.status,
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: response.status,
         payload: mapAiServiceError(response.status, responsePayload),
       } satisfies AiServiceError;
     }
 
-    return normalizeAiQueryChatResponse(responsePayload);
+    const normalized = normalizeAiQueryChatResponse(responsePayload);
+    logAiServiceEvent({
+      type: "response_ok",
+      action: "query_chat",
+      latency_ms: Date.now() - start,
+      provider: normalized.meta.provider,
+      model: normalized.meta.model,
+      answer_len: normalized.answer.length,
+    });
+    return normalized;
   } catch (err) {
     if (err && typeof err === "object" && "status" in err && "payload" in err) {
+      logAiServiceEvent({
+        type: "response_error",
+        action: "query_chat",
+        status: (err as AiServiceError).status,
+        error_code: (err as AiServiceError).payload.code,
+        latency_ms: Date.now() - start,
+      });
       throw err as AiServiceError;
     }
 
     if ((err as Error)?.name === "AbortError") {
+      logAiServiceEvent({
+        type: "timeout",
+        action: "query_chat",
+        latency_ms: Date.now() - start,
+      });
       throw {
         status: 504,
         payload: makeError("ANALYZER_TIMEOUT", "AI request timed out.", {
@@ -387,6 +531,12 @@ export async function callAiQueryChatService(
       } satisfies AiServiceError;
     }
 
+    logAiServiceEvent({
+      type: "service_unreachable",
+      action: "query_chat",
+      latency_ms: Date.now() - start,
+      reason: err instanceof Error ? err.message : "unknown",
+    });
     throw {
       status: 502,
       payload: makeError("ANALYZER_ERROR", "Could not reach AI service.", {
