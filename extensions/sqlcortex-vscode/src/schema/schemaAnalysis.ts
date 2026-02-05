@@ -110,33 +110,38 @@ export function analyzeTableMetadata(
   }
 
   const isTable = target.type === "table";
-  const analysisTables = isTable ? [target] : [];
+  const isView = target.type === "view";
+  const analysisTables = [target];
   const columnCount = target.columns.length;
   const foreignKeyCount = target.foreignKeys.length;
   const indexCount = target.indexes.length;
 
   const tableNames = buildTableNameMap(metadata.tables);
-  const missingForeignKeys = isTable
-    ? findMissingForeignKeys(analysisTables, tableNames)
-    : [];
-  const missingIndexes = isTable ? findMissingIndexesOnForeignKeys(analysisTables) : [];
+  const missingForeignKeys = findMissingForeignKeys(analysisTables, tableNames);
+  const missingIndexes = findMissingIndexesOnForeignKeys(analysisTables);
   const joinTableIssues = isTable ? findJoinTableIssues(analysisTables) : [];
   const namingIssues = findNamingIssues([target]);
   const auditIssues = isTable ? findAuditIssues(analysisTables) : [];
 
   const warnings: string[] = [];
-  if (!isTable) {
-    warnings.push("View analysis excludes foreign key and index heuristics.");
+  const viewSuggestions: string[] = [];
+  if (isView) {
+    viewSuggestions.push(
+      "If this view is queried frequently and is expensive, consider a materialized view and index the key columns."
+    );
+    viewSuggestions.push(
+      "Review underlying base tables for missing indexes on join and filter columns used by this view."
+    );
   }
 
-  const assumptions = isTable ? [...ANALYSIS_ASSUMPTIONS] : [];
+  const assumptions = [...ANALYSIS_ASSUMPTIONS];
   const qualifiedName = `${metadata.schema}.${target.name}`;
   const label = isTable ? "table" : "view";
   const explanation = `Analyzed ${label} ${qualifiedName} with ${columnCount} columns, ${foreignKeyCount} foreign keys, and ${indexCount} indexes.`;
 
   return {
     findings: [...missingForeignKeys, ...missingIndexes, ...joinTableIssues],
-    suggestions: [...namingIssues, ...auditIssues],
+    suggestions: [...viewSuggestions, ...namingIssues, ...auditIssues],
     warnings,
     assumptions,
     explanation,
