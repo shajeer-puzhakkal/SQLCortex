@@ -178,27 +178,35 @@ const SubjectType = {
 } as const;
 type SubjectType = (typeof SubjectType)[keyof typeof SubjectType];
 
-type ProjectContext =
-  | {
-      projectId: string | null;
-      orgId: string | null;
-      project?: {
-        id: string;
-        orgId: string | null;
-        ownerUserId: string | null;
-        name: string;
-        aiEnabled: boolean;
-        orgAiEnabled: boolean | null;
-      };
-    }
-  | { error: ErrorResponse; status: number };
+type ProjectDetails = {
+  id: string;
+  orgId: string | null;
+  ownerUserId: string | null;
+  name: string;
+  aiEnabled: boolean;
+  orgAiEnabled: boolean | null;
+};
+
+type ProjectContextOk = {
+  projectId: string | null;
+  orgId: string | null;
+  project?: ProjectDetails;
+};
+
+type ProjectContextError = { error: ErrorResponse; status: number };
+
+type ProjectContext = ProjectContextOk | ProjectContextError;
+
+function isProjectContextOk(context: ProjectContext): context is ProjectContextOk {
+  return !("error" in context);
+}
 
 type ResolvedProjectConnection =
   | { error: ErrorResponse; status: number }
   | {
       projectId: string;
       orgId: string | null;
-      project: NonNullable<ProjectContext["project"]>;
+      project: ProjectDetails;
       connection: {
         id: string;
         projectId: string;
@@ -220,10 +228,29 @@ type AnalyzerError = {
   payload: ErrorResponse;
 };
 
+type AiValueDailyRow = {
+  estimatedMinutesSaved: number | null;
+  estimatedCostSavedUsd: number | null;
+};
+
+type AiValueDailyClient = {
+  findMany: (args: {
+    where: Record<string, unknown>;
+    select: { estimatedMinutesSaved: true; estimatedCostSavedUsd: true };
+  }) => Promise<AiValueDailyRow[]>;
+};
+
+function getAiValueDailyClient(prismaClient: PrismaClient): AiValueDailyClient | null {
+  const candidate = (prismaClient as PrismaClient & { aiValueDaily?: AiValueDailyClient })
+    .aiValueDaily;
+  return candidate ?? null;
+}
+
 type ExecuteQueryRequest = {
   projectId?: string | null;
   connectionId?: string | null;
   sql?: string;
+  explain_mode?: ExplainMode;
   source?: string;
   client?: { extensionVersion?: string; vscodeVersion?: string };
 };
@@ -337,6 +364,8 @@ type AiSqlFallbackReason =
   | "limit_reached"
   | "service_unavailable";
 
+type GateReason = "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
+
 type RunConnectionQueryFn = <T>(
   connectionString: string,
   sql: string,
@@ -359,8 +388,8 @@ export function setApiOverrides(overrides: Partial<typeof apiOverrides>) {
 }
 
 export function clearApiOverrides() {
-  apiOverrides.runConnectionQuery = undefined;
-  apiOverrides.resolveProjectConnection = undefined;
+  delete apiOverrides.runConnectionQuery;
+  delete apiOverrides.resolveProjectConnection;
 }
 
 function formatPlanId(planCode: PlanCode): string {
@@ -465,7 +494,7 @@ async function buildPlanUsageSummary(
 }
 
 function resolveAiFeatureStatusFromProject(
-  project?: ProjectContext["project"] | null
+  project?: ProjectDetails | null
 ): AiFeatureStatus {
   if (!project) {
     return { enabled: true, reason: null };
@@ -483,6 +512,9 @@ async function resolveAiFeatureStatusForContext(
   prismaClient: PrismaClient,
   projectContext: ProjectContext
 ): Promise<AiFeatureStatus> {
+  if (!isProjectContextOk(projectContext)) {
+    return { enabled: true, reason: null };
+  }
   const direct = resolveAiFeatureStatusFromProject(projectContext.project ?? null);
   if (!direct.enabled) {
     return direct;
@@ -610,6 +642,64 @@ function buildChatFallbackAnswer(params: {
       return "AI service is temporarily unavailable. Please retry in a few minutes.";
     default:
       return "AI response is unavailable right now.";
+  }
+}
+
+function buildGateFields(
+  gateReason: GateReason | null,
+  requiredPlan?: string | null,
+  upgradeUrl?: string | null
+): {
+  status: "ok" | "gated";
+  gateReason?: GateReason;
+  requiredPlan?: string | null;
+  upgradeUrl?: string | null;
+} {
+  const status = gateReason ? "gated" : "ok";
+  if (!gateReason) {
+    return { status };
+  }
+  const fields: {
+    status: "ok" | "gated";
+    gateReason: GateReason;
+    requiredPlan?: string | null;
+    upgradeUrl?: string | null;
+  } = { status, gateReason };
+  if (typeof requiredPlan !== "undefined") {
+    fields.requiredPlan = requiredPlan;
+  }
+  if (typeof upgradeUrl !== "undefined") {
+    fields.upgradeUrl = upgradeUrl;
+  }
+  return fields;
+}
+
+function buildAiInsightsWarning(err: unknown): string {
+  const aiErr = err as AiServiceError | undefined;
+  const details = aiErr?.payload?.details as Record<string, unknown> | undefined;
+  const serviceCode = typeof details?.service_code === "string" ? details.service_code : null;
+
+  switch (serviceCode) {
+    case "ai_timeout":
+      return "AI explanation timed out. Please retry.";
+    case "ai_provider_unavailable":
+      return "AI provider is unavailable. Please retry.";
+    case "ai_provider_error":
+      return "AI provider returned an error while generating the explanation.";
+    case "ai_response_invalid":
+      return "AI explanation response was invalid. Please retry.";
+    default:
+      break;
+  }
+
+  switch (aiErr?.payload?.code) {
+    case "ANALYZER_TIMEOUT":
+      return "AI explanation timed out. Please retry.";
+    case "INVALID_INPUT":
+      return "AI explanation could not be generated for this request.";
+    case "ANALYZER_ERROR":
+    default:
+      return "AI explanation is temporarily unavailable.";
   }
 }
 
@@ -1635,7 +1725,10 @@ function extractTableCandidates(sql: string): string[] {
     /\b(from|join)\s+(?:lateral\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)/gi;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(cleaned)) !== null) {
-    candidates.add(match[2]);
+    const table = match[2];
+    if (table) {
+      candidates.add(table);
+    }
   }
   return Array.from(candidates);
 }
@@ -1653,7 +1746,11 @@ function extractExplainJson(rows: unknown[]): unknown | null {
   if (keys.length === 0) {
     return null;
   }
-  return record[keys[0]] ?? null;
+  const firstKey = keys[0];
+  if (!firstKey) {
+    return null;
+  }
+  return record[firstKey] ?? null;
 }
 
 type PlanNode = Record<string, unknown>;
@@ -1796,7 +1893,7 @@ function parsePlanSummary(explainJson: unknown): PlanSummary {
     visit(root);
   }
 
-  const root = roots[0];
+  const root = roots[0]!;
   const totalCost = readNumber(root["Total Cost"]);
   const planRows = readInt(root["Plan Rows"]);
   const actualRows = readInt(root["Actual Rows"]);
@@ -1845,9 +1942,15 @@ async function collectAiMetadata(
       const normalized = normalizeIdentifier(candidate);
       const parts = normalized.split(".").map((part) => part.trim()).filter(Boolean);
       if (parts.length === 2) {
-        explicit.push({ schema: parts[0], name: parts[1] });
+        const [schema, name] = parts;
+        if (schema && name) {
+          explicit.push({ schema, name });
+        }
       } else if (parts.length === 1) {
-        names.push(parts[0]);
+        const [name] = parts;
+        if (name) {
+          names.push(name);
+        }
       }
     }
 
@@ -2673,13 +2776,16 @@ app.get(
       .map(([action, count]) => ({ action, count }))
       .sort((a, b) => b.count - a.count);
 
-    const valueRows = await prisma.aiValueDaily.findMany({
-      where: {
-        ...subjectFilter,
-        date: { gte: startDate, lte: endDate },
-      },
-      select: { estimatedMinutesSaved: true, estimatedCostSavedUsd: true },
-    });
+    const aiValueDaily = getAiValueDailyClient(prisma);
+    const valueRows = aiValueDaily
+      ? await aiValueDaily.findMany({
+          where: {
+            ...subjectFilter,
+            date: { gte: startDate, lte: endDate },
+          },
+          select: { estimatedMinutesSaved: true, estimatedCostSavedUsd: true },
+        })
+      : [];
 
     const minutesSaved = valueRows.reduce(
       (sum, row) => sum + (row.estimatedMinutesSaved ?? 0),
@@ -4257,7 +4363,7 @@ app.post(
     let aiInsight: AiInsight | null = null;
     let aiUsed = false;
     let tokensEstimated: number | null = null;
-    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
+    let gateReason: GateReason | null = null;
     let requiredPlan: string | null = null;
     let upgradeUrl: string | null = null;
 
@@ -4372,7 +4478,7 @@ app.post(
           });
         } catch (err) {
           console.error("Failed to fetch AI insights", err);
-          warnings.push("AI explanation is temporarily unavailable.");
+          warnings.push(buildAiInsightsWarning(err));
         }
       } else {
         if (!aiFeatureStatus.enabled) {
@@ -4404,10 +4510,7 @@ app.post(
     });
 
     const response: AnalyzeResponse = {
-      status: gateReason ? "gated" : "ok",
-      gateReason: gateReason ?? undefined,
-      requiredPlan,
-      upgradeUrl,
+      ...buildGateFields(gateReason, requiredPlan, upgradeUrl),
       planSummary,
       findings: ruleFindings,
       ai: aiInsight,
@@ -4492,7 +4595,7 @@ app.post(
     let aiInsight: AiInsight | null = null;
     let aiUsed = false;
     let tokensEstimated: number | null = null;
-    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
+    let gateReason: GateReason | null = null;
     let requiredPlan: string | null = null;
     let upgradeUrl: string | null = null;
 
@@ -4634,7 +4737,7 @@ app.post(
           });
         } catch (err) {
           console.error("Failed to fetch AI insights", err);
-          warnings.push("AI explanation is temporarily unavailable.");
+          warnings.push(buildAiInsightsWarning(err));
         }
       } else {
         if (!aiFeatureStatus.enabled) {
@@ -4650,10 +4753,7 @@ app.post(
     }
 
     const response: SchemaInsightsResponse = {
-      status: gateReason ? "gated" : "ok",
-      gateReason: gateReason ?? undefined,
-      requiredPlan,
-      upgradeUrl,
+      ...buildGateFields(gateReason, requiredPlan, upgradeUrl),
       ai: aiInsight,
       warnings,
       assumptions: aiInsight?.assumptions ?? assumptions,
@@ -4744,7 +4844,7 @@ app.post(
     let answer = "AI response is unavailable.";
     let aiUsed = false;
     let tokensEstimated: number | null = null;
-    let gateReason: "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED" | null = null;
+    let gateReason: GateReason | null = null;
     let requiredPlan: string | null = null;
     let upgradeUrl: string | null = null;
 
@@ -4937,10 +5037,7 @@ app.post(
     }
 
     const response: QueryChatResponse = {
-      status: gateReason ? "gated" : "ok",
-      gateReason: gateReason ?? undefined,
-      requiredPlan,
-      upgradeUrl,
+      ...buildGateFields(gateReason, requiredPlan, upgradeUrl),
       answer,
       warnings,
       metering: {
@@ -4979,6 +5076,8 @@ app.post(
         .status(400)
         .json(makeError("INVALID_INPUT", "`sql` is required and must be a string"));
     }
+    const explainMode = normalizeExplainMode(req.body?.explain_mode);
+    const meterStartedAt = Date.now();
 
     if (!isReadOnlySql(sql) || hasProhibitedClauses(sql)) {
       return res
