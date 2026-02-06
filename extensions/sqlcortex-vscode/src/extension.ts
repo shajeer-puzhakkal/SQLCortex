@@ -46,6 +46,11 @@ import {
   setActiveProject,
 } from "./state/workspaceState";
 import { createStatusBarItems, updateStatusBar, type StatusBarItems } from "./ui/statusBar";
+import {
+  createDbCopilotStatusBarItems,
+  updateDbCopilotStatusBar,
+  type DbCopilotStatusBarItems,
+} from "./ui/dbCopilotStatusBar";
 import { ResultsPanel } from "./ui/resultsPanel";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
@@ -55,6 +60,9 @@ import { AnalyzeCodeLensProvider } from "./ui/analyzeCodeLens";
 import { DbExplorerProvider, type TableConstraintInfo } from "./ui/tree/dbExplorerProvider";
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { SidebarProvider } from "./ui/tree/sidebarProvider";
+import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProvider";
+import { DbCopilotSchemaProvider } from "./ui/tree/dbCopilotSchemaProvider";
+import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
@@ -64,6 +72,13 @@ import {
   analyzeTableMetadata,
   buildSchemaErdHtml,
 } from "./schema/schemaAnalysis";
+import {
+  getDbCopilotState,
+  setDbCopilotConnection,
+  setDbCopilotMode,
+  setDbCopilotSchemaSnapshot,
+  type DbCopilotMode,
+} from "./state/dbCopilotState";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -86,6 +101,23 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.analyzeSchema", label: "Analyze Schema" },
   { id: "sqlcortex.analyzeTable", label: "Analyze Table" },
   { id: "sqlcortex.drawSchemaErd", label: "Draw ERD Diagram" },
+];
+
+const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
+  { id: "dbcopilot.connectDatabase", label: "Connect to Database" },
+  { id: "dbcopilot.captureSchemaSnapshot", label: "Capture Schema Snapshot" },
+  { id: "dbcopilot.optimizeCurrentQuery", label: "Optimize Current Query" },
+  { id: "dbcopilot.analyzeSchemaHealth", label: "Analyze Schema Health" },
+  { id: "dbcopilot.createTableWizard", label: "Create Table (Wizard)" },
+  { id: "dbcopilot.openOptimizationPlan", label: "Open Optimization Plan" },
+  { id: "dbcopilot.openErdDiagram", label: "Open ER Diagram" },
+  { id: "dbcopilot.openMigrationPlan", label: "Open Migration Plan" },
+  { id: "dbcopilot.toggleMode", label: "Toggle Mode" },
+  { id: "dbcopilot.viewPolicies", label: "View Policies" },
+];
+
+const DBCOPILOT_POLICY_NOTES = [
+  "Execution mode requires explicit confirmation before applying changes.",
 ];
 
 const API_BASE_URL_KEY = "sqlcortex.apiBaseUrl";
@@ -149,10 +181,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   const tokenStore = createTokenStore(context.secrets);
   const statusBars = createStatusBarItems();
+  const dbCopilotStatusBars = createDbCopilotStatusBarItems();
   context.subscriptions.push(
     statusBars.workspace,
     statusBars.connection,
     statusBars.runQuery
+  );
+  context.subscriptions.push(
+    dbCopilotStatusBars.db,
+    dbCopilotStatusBars.mode,
+    dbCopilotStatusBars.policies
   );
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -171,6 +209,54 @@ export function activate(context: vscode.ExtensionContext) {
     showCollapseAll: false,
   });
   context.subscriptions.push(sidebarView);
+
+  const dbCopilotOverviewProvider = new DbCopilotPlaceholderProvider({
+    context,
+    viewTitle: "Overview",
+  });
+  const dbCopilotAgentsProvider = new DbCopilotPlaceholderProvider({
+    context,
+    viewTitle: "Agents",
+  });
+  const dbCopilotSchemaProvider = new DbCopilotSchemaProvider({ context });
+  const dbCopilotRecommendationsProvider = new DbCopilotPlaceholderProvider({
+    context,
+    viewTitle: "Recommendations",
+  });
+  const dbCopilotMigrationsProvider = new DbCopilotPlaceholderProvider({
+    context,
+    viewTitle: "Migrations",
+  });
+  const dbCopilotProviders = [
+    dbCopilotOverviewProvider,
+    dbCopilotAgentsProvider,
+    dbCopilotSchemaProvider,
+    dbCopilotRecommendationsProvider,
+    dbCopilotMigrationsProvider,
+  ];
+  const dbCopilotViews = [
+    vscode.window.createTreeView("dbcopilot.overview", {
+      treeDataProvider: dbCopilotOverviewProvider,
+      showCollapseAll: false,
+    }),
+    vscode.window.createTreeView("dbcopilot.agents", {
+      treeDataProvider: dbCopilotAgentsProvider,
+      showCollapseAll: false,
+    }),
+    vscode.window.createTreeView("dbcopilot.schema", {
+      treeDataProvider: dbCopilotSchemaProvider,
+      showCollapseAll: false,
+    }),
+    vscode.window.createTreeView("dbcopilot.recommendations", {
+      treeDataProvider: dbCopilotRecommendationsProvider,
+      showCollapseAll: false,
+    }),
+    vscode.window.createTreeView("dbcopilot.migrations", {
+      treeDataProvider: dbCopilotMigrationsProvider,
+      showCollapseAll: false,
+    }),
+  ];
+  context.subscriptions.push(...dbCopilotViews);
 
   queryInsightsView.setChatHandler((input) =>
     handleQueryInsightsChat(
@@ -194,6 +280,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   void refreshContext(context, tokenStore, statusBars, sidebarProvider);
+  void refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
 
   const dbExplorerProvider = new DbExplorerProvider({
     context,
@@ -398,6 +485,128 @@ export function activate(context: vscode.ExtensionContext) {
     },
   };
 
+  const dbCopilotHandlers: Record<string, (...args: unknown[]) => Thenable<unknown>> =
+    {
+      "dbcopilot.connectDatabase": async () => {
+        const selection = await promptDbCopilotConnection();
+        if (!selection) {
+          return;
+        }
+        await setDbCopilotConnection(context, selection.label);
+        await setDbCopilotSchemaSnapshot(context, false);
+        await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+        vscode.window.showInformationMessage(
+          `DB Copilot: Connected to ${selection.label}.`
+        );
+      },
+      "dbcopilot.captureSchemaSnapshot": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        await setDbCopilotSchemaSnapshot(context, true);
+        await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+        vscode.window.showInformationMessage(
+          "DB Copilot: Schema snapshot captured."
+        );
+      },
+      "dbcopilot.optimizeCurrentQuery": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        if (!(await ensureDbCopilotSnapshot(context))) {
+          return;
+        }
+        openDbCopilotPlaceholderPanel("dbcopilot.optimizeCurrentQuery", {
+          title: "Optimize Current Query",
+          description:
+            "Optimization output will appear here once query analysis is wired.",
+          bullets: [
+            "Review index suggestions and query rewrites.",
+            "Track cost estimates and plan diffs.",
+          ],
+        });
+      },
+      "dbcopilot.analyzeSchemaHealth": async (...args) => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        if (!(await ensureDbCopilotSnapshot(context))) {
+          return;
+        }
+        const schemaName = resolveDbCopilotSchemaName(args[0]);
+        openDbCopilotPlaceholderPanel("dbcopilot.analyzeSchemaHealth", {
+          title: schemaName
+            ? `Analyze Schema Health: ${schemaName}`
+            : "Analyze Schema Health",
+          description:
+            "Schema health findings and recommendations will appear here.",
+          bullets: [
+            "Surface table bloat, missing indexes, and hot tables.",
+            "Track schema drift and policy violations.",
+          ],
+        });
+      },
+      "dbcopilot.createTableWizard": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        openDbCopilotPlaceholderPanel("dbcopilot.createTableWizard", {
+          title: "Create Table (Wizard)",
+          description: "Table creation workflow will land in a later phase.",
+          bullets: [
+            "Define columns, constraints, and indexes.",
+            "Preview generated SQL before execution.",
+          ],
+        });
+      },
+      "dbcopilot.openOptimizationPlan": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        if (!(await ensureDbCopilotSnapshot(context))) {
+          return;
+        }
+        openDbCopilotPlaceholderPanel("dbcopilot.openOptimizationPlan", {
+          title: "Optimization Plan",
+          description: "Optimization plan details will appear here.",
+          bullets: ["Plan diffs", "Expected impact", "Execution notes"],
+        });
+      },
+      "dbcopilot.openErdDiagram": async (...args) => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        if (!(await ensureDbCopilotSnapshot(context))) {
+          return;
+        }
+        const schemaName = resolveDbCopilotSchemaName(args[0]);
+        openDbCopilotPlaceholderPanel("dbcopilot.openErdDiagram", {
+          title: schemaName ? `ER Diagram: ${schemaName}` : "ER Diagram",
+          description: "Entity relationships will render here.",
+          bullets: ["Drag to explore", "Filter by schema", "Export to PNG"],
+        });
+      },
+      "dbcopilot.openMigrationPlan": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        if (!(await ensureDbCopilotSnapshot(context))) {
+          return;
+        }
+        openDbCopilotPlaceholderPanel("dbcopilot.openMigrationPlan", {
+          title: "Migration Plan",
+          description: "Planned migration steps will appear here.",
+          bullets: ["Ordered change set", "Rollback guidance", "Risk notes"],
+        });
+      },
+      "dbcopilot.toggleMode": async () => {
+        await toggleDbCopilotMode(context, dbCopilotStatusBars, dbCopilotProviders);
+      },
+      "dbcopilot.viewPolicies": async () => {
+        await openDbCopilotPolicies();
+      },
+    };
+
   for (const command of COMMANDS) {
     const handler =
       handlers[command.id] ??
@@ -405,6 +614,19 @@ export function activate(context: vscode.ExtensionContext) {
         output.appendLine(`Command executed: ${command.id}`);
         vscode.window.showInformationMessage(
           `SQLCortex: ${command.label} (not yet implemented)`
+        );
+      });
+    const disposable = vscode.commands.registerCommand(command.id, handler);
+    context.subscriptions.push(disposable);
+  }
+
+  for (const command of DBCOPILOT_COMMANDS) {
+    const handler =
+      dbCopilotHandlers[command.id] ??
+      (() => {
+        output.appendLine(`Command executed: ${command.id}`);
+        vscode.window.showInformationMessage(
+          `DB Copilot: ${command.label} (not yet implemented)`
         );
       });
     const disposable = vscode.commands.registerCommand(command.id, handler);
@@ -2488,6 +2710,262 @@ function buildTableSelectSql(schemaName: string, tableName: string): string {
 
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+type DbCopilotRefreshable = {
+  refresh: () => void;
+};
+
+type DbCopilotPanelSpec = {
+  title: string;
+  description: string;
+  bullets?: string[];
+};
+
+const dbCopilotPanels = new Map<string, vscode.WebviewPanel>();
+
+async function refreshDbCopilotUI(
+  context: vscode.ExtensionContext,
+  statusBars: DbCopilotStatusBarItems,
+  providers: DbCopilotRefreshable[]
+): Promise<void> {
+  const state = getDbCopilotState(context);
+  updateDbCopilotStatusBar(statusBars, {
+    ...state,
+    policiesCount: DBCOPILOT_POLICY_NOTES.length,
+  });
+  for (const provider of providers) {
+    provider.refresh();
+  }
+  await vscode.commands.executeCommand(
+    "setContext",
+    "dbcopilot.connected",
+    Boolean(state.connectionLabel)
+  );
+  await vscode.commands.executeCommand(
+    "setContext",
+    "dbcopilot.schemaSnapshot",
+    state.schemaSnapshotAvailable
+  );
+  await vscode.commands.executeCommand("setContext", "dbcopilot.mode", state.mode);
+}
+
+async function promptDbCopilotConnection(): Promise<vscode.QuickPickItem | null> {
+  const options: vscode.QuickPickItem[] = [
+    {
+      label: "postgres@staging",
+      description: "Read-only",
+      detail: "Staging cluster",
+    },
+    {
+      label: "postgres@prod",
+      description: "Restricted",
+      detail: "Production cluster",
+    },
+    {
+      label: "sqlite@local",
+      description: "Local file",
+      detail: "Local development",
+    },
+  ];
+
+  const selection = await vscode.window.showQuickPick(options, {
+    placeHolder: "Select a database connection",
+    ignoreFocusOut: true,
+  });
+
+  return selection ?? null;
+}
+
+async function ensureDbCopilotConnected(
+  context: vscode.ExtensionContext
+): Promise<boolean> {
+  const state = getDbCopilotState(context);
+  if (state.connectionLabel) {
+    return true;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    "DB Copilot: Connect to a database to continue.",
+    "Connect to Database"
+  );
+  if (choice === "Connect to Database") {
+    await vscode.commands.executeCommand("dbcopilot.connectDatabase");
+  }
+  return false;
+}
+
+async function ensureDbCopilotSnapshot(
+  context: vscode.ExtensionContext
+): Promise<boolean> {
+  const state = getDbCopilotState(context);
+  if (state.schemaSnapshotAvailable) {
+    return true;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    "DB Copilot: Capture a schema snapshot to continue.",
+    "Capture Schema Snapshot"
+  );
+  if (choice === "Capture Schema Snapshot") {
+    await vscode.commands.executeCommand("dbcopilot.captureSchemaSnapshot");
+  }
+  return false;
+}
+
+function resolveDbCopilotSchemaName(node: unknown): string | null {
+  if (node instanceof DbCopilotSchemaNode) {
+    return node.schemaName;
+  }
+  return null;
+}
+
+async function toggleDbCopilotMode(
+  context: vscode.ExtensionContext,
+  statusBars: DbCopilotStatusBarItems,
+  providers: DbCopilotRefreshable[]
+): Promise<void> {
+  const state = getDbCopilotState(context);
+  const nextMode = getNextDbCopilotMode(state.mode);
+  if (nextMode === "execution") {
+    const confirmation = await vscode.window.showWarningMessage(
+      "DB Copilot: Execution mode can apply changes. Continue?",
+      { modal: true },
+      "Enter Execution"
+    );
+    if (confirmation !== "Enter Execution") {
+      return;
+    }
+  }
+  await setDbCopilotMode(context, nextMode);
+  await refreshDbCopilotUI(context, statusBars, providers);
+  vscode.window.showInformationMessage(
+    `DB Copilot: Mode set to ${formatDbCopilotMode(nextMode)}.`
+  );
+}
+
+function getNextDbCopilotMode(current: DbCopilotMode): DbCopilotMode {
+  switch (current) {
+    case "readOnly":
+      return "draft";
+    case "draft":
+      return "execution";
+    case "execution":
+    default:
+      return "readOnly";
+  }
+}
+
+function formatDbCopilotMode(mode: DbCopilotMode): string {
+  switch (mode) {
+    case "readOnly":
+      return "Read-Only";
+    case "draft":
+      return "Draft";
+    case "execution":
+      return "Execution";
+  }
+}
+
+function openDbCopilotPlaceholderPanel(viewType: string, spec: DbCopilotPanelSpec): void {
+  let panel = dbCopilotPanels.get(viewType);
+  if (!panel) {
+    panel = vscode.window.createWebviewPanel(
+      viewType,
+      spec.title,
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      { enableScripts: false, retainContextWhenHidden: true }
+    );
+    panel.onDidDispose(() => {
+      dbCopilotPanels.delete(viewType);
+    });
+    dbCopilotPanels.set(viewType, panel);
+  }
+
+  panel.title = spec.title;
+  panel.webview.html = buildDbCopilotPlaceholderHtml(spec);
+  panel.reveal(vscode.ViewColumn.Active, true);
+}
+
+function buildDbCopilotPlaceholderHtml(spec: DbCopilotPanelSpec): string {
+  const escapedTitle = escapeHtml(spec.title);
+  const escapedDescription = escapeHtml(spec.description);
+  const bullets =
+    spec.bullets && spec.bullets.length > 0
+      ? `<ul>${spec.bullets
+          .map((item) => `<li>${escapeHtml(item)}</li>`)
+          .join("")}</ul>`
+      : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapedTitle}</title>
+  <style>
+    body {
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      padding: 24px;
+    }
+    .card {
+      border: 1px solid var(--vscode-editorWidget-border);
+      background: var(--vscode-editorWidget-background);
+      border-radius: 10px;
+      padding: 20px;
+      max-width: 720px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    }
+    h1 {
+      font-size: 20px;
+      margin: 0 0 8px;
+    }
+    p {
+      margin: 0 0 12px;
+      color: var(--vscode-descriptionForeground);
+    }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li {
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${escapedTitle}</h1>
+    <p>${escapedDescription}</p>
+    ${bullets}
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function openDbCopilotPolicies(): Promise<void> {
+  const content = [
+    "# DB Copilot Policies",
+    "",
+    ...DBCOPILOT_POLICY_NOTES.map((note) => `- ${note}`),
+    "",
+  ].join("\n");
+
+  const document = await vscode.workspace.openTextDocument({
+    language: "markdown",
+    content,
+  });
+  await vscode.window.showTextDocument(document, { preview: true });
 }
 
 function getExtensionVersion(context: vscode.ExtensionContext): string {
