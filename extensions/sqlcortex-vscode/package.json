@@ -13,7 +13,21 @@
   "activationEvents": [
     "onLanguage:sql",
     "onLanguage:pgsql",
-    "onLanguage:mssql"
+    "onLanguage:mssql",
+    "onView:dbcopilot.overview",
+    "onView:dbcopilot.agents",
+    "onView:dbcopilot.schema",
+    "onView:dbcopilot.recommendations",
+    "onView:dbcopilot.migrations",
+    "onCommand:dbcopilot.connectDatabase",
+    "onCommand:dbcopilot.captureSchemaSnapshot",
+    "onCommand:dbcopilot.optimizeCurrentQuery",
+    "onCommand:dbcopilot.analyzeSchemaHealth",
+    "onCommand:dbcopilot.createTableWizard",
+    "onCommand:dbcopilot.openOptimizationPlan",
+    "onCommand:dbcopilot.openErdDiagram",
+    "onCommand:dbcopilot.openMigrationPlan",
+    "onCommand:dbcopilot.toggleMode"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -102,6 +116,42 @@
       {
         "command": "sqlcortex.drawSchemaErd",
         "title": "SQLCortex: Draw ERD Diagram"
+      },
+      {
+        "command": "dbcopilot.connectDatabase",
+        "title": "DB Copilot: Connect to Database"
+      },
+      {
+        "command": "dbcopilot.captureSchemaSnapshot",
+        "title": "DB Copilot: Capture Schema Snapshot"
+      },
+      {
+        "command": "dbcopilot.optimizeCurrentQuery",
+        "title": "DB Copilot: Optimize Current Query"
+      },
+      {
+        "command": "dbcopilot.analyzeSchemaHealth",
+        "title": "DB Copilot: Analyze Schema Health"
+      },
+      {
+        "command": "dbcopilot.createTableWizard",
+        "title": "DB Copilot: Create Table (Wizard)"
+      },
+      {
+        "command": "dbcopilot.openOptimizationPlan",
+        "title": "DB Copilot: Open Optimization Plan"
+      },
+      {
+        "command": "dbcopilot.openErdDiagram",
+        "title": "DB Copilot: Open ER Diagram"
+      },
+      {
+        "command": "dbcopilot.openMigrationPlan",
+        "title": "DB Copilot: Open Migration Plan"
+      },
+      {
+        "command": "dbcopilot.toggleMode",
+        "title": "DB Copilot: Toggle Mode (Read-Only/Draft/Execution)"
       }
     ],
     "configuration": {
@@ -153,6 +203,11 @@
           "id": "sqlcortex",
           "title": "SQLCortex",
           "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot",
+          "title": "DB Copilot",
+          "icon": "resources/sqlcortex.svg"
         }
       ],
       "panel": [
@@ -199,6 +254,33 @@
           "id": "sqlcortex.chatView",
           "name": "Chat",
           "type": "webview",
+          "icon": "resources/sqlcortex.svg"
+        }
+      ],
+      "dbcopilot": [
+        {
+          "id": "dbcopilot.overview",
+          "name": "Overview",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.agents",
+          "name": "Agents",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.schema",
+          "name": "Schema",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.recommendations",
+          "name": "Recommendations",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.migrations",
+          "name": "Migrations",
           "icon": "resources/sqlcortex.svg"
         }
       ],
@@ -295,6 +377,16 @@
         {
           "command": "sqlcortex.drawSchemaErd",
           "when": "view == sqlcortex.databaseExplorer && viewItem == sqlcortex.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.analyzeSchemaHealth",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.openErdDiagram",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema",
           "group": "navigation"
         }
       ]
