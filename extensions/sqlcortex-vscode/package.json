@@ -398,7 +398,8 @@
     "compile": "tsc -p ./"
   },
   "dependencies": {
-    "dagre": "^0.8.5"
+    "dagre": "^0.8.5",
+    "mermaid": "^10.9.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.19",

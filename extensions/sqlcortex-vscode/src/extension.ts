@@ -63,6 +63,7 @@ import { SidebarProvider } from "./ui/tree/sidebarProvider";
 import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProvider";
 import { DbCopilotSchemaProvider } from "./ui/tree/dbCopilotSchemaProvider";
 import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
+import { buildDbCopilotErdHtml } from "./ui/dbCopilotErdPanel";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
@@ -73,10 +74,17 @@ import {
   buildSchemaErdHtml,
 } from "./schema/schemaAnalysis";
 import {
+  createSampleDbCopilotSnapshots,
+  type DbCopilotSchemaSnapshot,
+} from "./dbcopilot/schemaSnapshot";
+import {
   getDbCopilotState,
   setDbCopilotConnection,
   setDbCopilotMode,
   setDbCopilotSchemaSnapshot,
+  getDbCopilotSchemaSnapshot,
+  getDbCopilotSchemaSnapshots,
+  setDbCopilotSchemaSnapshots,
   type DbCopilotMode,
 } from "./state/dbCopilotState";
 
@@ -140,6 +148,8 @@ const AI_LIMIT_MESSAGE =
 const CREDIT_WARNING_MESSAGE = "You are getting strong value from SQLCortex";
 const CREDIT_CRITICAL_MESSAGE = "Avoid interruptions - upgrade to Pro";
 let schemaErdPanel: vscode.WebviewPanel | undefined;
+let dbCopilotErdPanel: vscode.WebviewPanel | undefined;
+let dbCopilotErdSnapshot: DbCopilotSchemaSnapshot | null = null;
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -494,6 +504,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         await setDbCopilotConnection(context, selection.label);
         await setDbCopilotSchemaSnapshot(context, false);
+        await setDbCopilotSchemaSnapshots(context, null);
         await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
         vscode.window.showInformationMessage(
           `DB Copilot: Connected to ${selection.label}.`
@@ -503,6 +514,8 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotConnected(context))) {
           return;
         }
+        const snapshots = createSampleDbCopilotSnapshots();
+        await setDbCopilotSchemaSnapshots(context, snapshots);
         await setDbCopilotSchemaSnapshot(context, true);
         await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
         vscode.window.showInformationMessage(
@@ -580,11 +593,14 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
         const schemaName = resolveDbCopilotSchemaName(args[0]);
-        openDbCopilotPlaceholderPanel("dbcopilot.openErdDiagram", {
-          title: schemaName ? `ER Diagram: ${schemaName}` : "ER Diagram",
-          description: "Entity relationships will render here.",
-          bullets: ["Drag to explore", "Filter by schema", "Export to PNG"],
-        });
+        const snapshot = resolveDbCopilotSnapshot(context, schemaName);
+        if (!snapshot) {
+          vscode.window.showErrorMessage(
+            "DB Copilot: No schema snapshot data available for ER diagram."
+          );
+          return;
+        }
+        openDbCopilotErdDiagram(context, snapshot);
       },
       "dbcopilot.openMigrationPlan": async () => {
         if (!(await ensureDbCopilotConnected(context))) {
@@ -2863,6 +2879,138 @@ function formatDbCopilotMode(mode: DbCopilotMode): string {
     case "execution":
       return "Execution";
   }
+}
+
+function resolveDbCopilotSnapshot(
+  context: vscode.ExtensionContext,
+  schemaName: string | null
+): DbCopilotSchemaSnapshot | null {
+  if (schemaName) {
+    const direct = getDbCopilotSchemaSnapshot(context, schemaName);
+    if (direct) {
+      return direct;
+    }
+  }
+  const snapshots = getDbCopilotSchemaSnapshots(context);
+  if (!snapshots) {
+    return null;
+  }
+  const first = Object.values(snapshots)[0];
+  return first ?? null;
+}
+
+function openDbCopilotErdDiagram(
+  context: vscode.ExtensionContext,
+  snapshot: DbCopilotSchemaSnapshot
+): void {
+  const title = `ER Diagram: ${snapshot.schema}`;
+  const mermaidRoot = vscode.Uri.joinPath(
+    context.extensionUri,
+    "node_modules",
+    "mermaid",
+    "dist"
+  );
+
+  if (!dbCopilotErdPanel) {
+    dbCopilotErdPanel = vscode.window.createWebviewPanel(
+      "dbcopilot.erdDiagram",
+      title,
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [mermaidRoot],
+      }
+    );
+    dbCopilotErdPanel.onDidDispose(() => {
+      dbCopilotErdPanel = undefined;
+      dbCopilotErdSnapshot = null;
+    });
+    dbCopilotErdPanel.webview.onDidReceiveMessage(
+      async (message: { type?: string; dataUrl?: string; text?: string }) => {
+        if (!message || typeof message.type !== "string") {
+          return;
+        }
+        switch (message.type) {
+          case "copyMermaid":
+            if (typeof message.text === "string") {
+              await vscode.env.clipboard.writeText(message.text);
+              vscode.window.showInformationMessage(
+                "DB Copilot: Mermaid diagram copied to clipboard."
+              );
+            }
+            break;
+          case "exportPng":
+            if (typeof message.dataUrl === "string") {
+              await exportDbCopilotErdPng(message.dataUrl, dbCopilotErdSnapshot);
+            }
+            break;
+          case "openRecommendations":
+            await vscode.commands.executeCommand(
+              "workbench.view.extension.dbcopilot"
+            );
+            await vscode.commands.executeCommand("dbcopilot.recommendations.focus");
+            if (dbCopilotErdSnapshot) {
+              vscode.window.showInformationMessage(
+                `DB Copilot: Recommendations opened for ${dbCopilotErdSnapshot.schema}.`
+              );
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    );
+  }
+
+  dbCopilotErdSnapshot = snapshot;
+  const panel = dbCopilotErdPanel;
+  if (!panel) {
+    return;
+  }
+  panel.title = title;
+  panel.reveal(vscode.ViewColumn.Active, true);
+
+  const mermaidUri = panel.webview.asWebviewUri(
+    vscode.Uri.joinPath(mermaidRoot, "mermaid.min.js")
+  );
+  const html = buildDbCopilotErdHtml({
+    webview: panel.webview,
+    snapshot,
+    mermaidUri,
+    nonce: createNonce(),
+  });
+  panel.webview.html = html;
+}
+
+async function exportDbCopilotErdPng(
+  dataUrl: string,
+  snapshot: DbCopilotSchemaSnapshot | null
+): Promise<void> {
+  const match = dataUrl.match(/^data:image\/png;base64,(.+)$/);
+  if (!match) {
+    vscode.window.showErrorMessage("DB Copilot: Invalid PNG payload.");
+    return;
+  }
+  const buffer = Buffer.from(match[1], "base64");
+  const fileName = snapshot ? `${snapshot.schema}-erd.png` : "schema-erd.png";
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const defaultUri = workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder, fileName)
+    : undefined;
+
+  const destination = await vscode.window.showSaveDialog({
+    filters: { PNG: ["png"] },
+    defaultUri,
+    title: "Export ER diagram",
+  });
+  if (!destination) {
+    return;
+  }
+  await vscode.workspace.fs.writeFile(destination, buffer);
+  vscode.window.showInformationMessage(
+    `DB Copilot: ER diagram exported to ${destination.fsPath}.`
+  );
 }
 
 function openDbCopilotPlaceholderPanel(viewType: string, spec: DbCopilotPanelSpec): void {

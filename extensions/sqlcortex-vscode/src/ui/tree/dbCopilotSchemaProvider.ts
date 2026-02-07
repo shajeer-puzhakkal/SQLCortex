@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { getDbCopilotState } from "../../state/dbCopilotState";
+import { getDbCopilotSchemaSnapshots, getDbCopilotState } from "../../state/dbCopilotState";
 import { DbCopilotSchemaNode, DbCopilotTreeNode } from "./dbCopilotNodes";
 
 type ProviderDeps = {
@@ -70,7 +70,9 @@ export class DbCopilotSchemaProvider
       ];
     }
 
-    const schemaNodes = PLACEHOLDER_SCHEMAS.map(
+    const snapshots = getDbCopilotSchemaSnapshots(this.deps.context);
+    const schemaNames = snapshots ? Object.keys(snapshots) : PLACEHOLDER_SCHEMAS;
+    const schemaNodes = schemaNames.map(
       (schemaName) => new DbCopilotSchemaNode(schemaName)
     );
 
