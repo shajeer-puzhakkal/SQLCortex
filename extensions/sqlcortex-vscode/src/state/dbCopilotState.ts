@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { DbCopilotSchemaSnapshot, DbCopilotSchemaSnapshots } from "../dbcopilot/schemaSnapshot";
 
 export type DbCopilotMode = "readOnly" | "draft" | "execution";
 
@@ -10,6 +11,7 @@ export type DbCopilotState = {
 
 const CONNECTION_LABEL_KEY = "dbcopilot.connectionLabel";
 const SCHEMA_SNAPSHOT_KEY = "dbcopilot.schemaSnapshotAvailable";
+const SCHEMA_SNAPSHOT_DATA_KEY = "dbcopilot.schemaSnapshotData";
 const MODE_KEY = "dbcopilot.mode";
 
 const DEFAULT_MODE: DbCopilotMode = "readOnly";
@@ -37,6 +39,7 @@ export async function setDbCopilotConnection(
   await context.workspaceState.update(CONNECTION_LABEL_KEY, connectionLabel);
   if (!connectionLabel) {
     await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, false);
+    await context.workspaceState.update(SCHEMA_SNAPSHOT_DATA_KEY, null);
   }
 }
 
@@ -45,6 +48,36 @@ export async function setDbCopilotSchemaSnapshot(
   available: boolean
 ): Promise<void> {
   await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, available);
+}
+
+export function getDbCopilotSchemaSnapshots(
+  context: vscode.ExtensionContext
+): DbCopilotSchemaSnapshots | null {
+  return context.workspaceState.get<DbCopilotSchemaSnapshots | null>(
+    SCHEMA_SNAPSHOT_DATA_KEY,
+    null
+  );
+}
+
+export function getDbCopilotSchemaSnapshot(
+  context: vscode.ExtensionContext,
+  schemaName: string | null | undefined
+): DbCopilotSchemaSnapshot | null {
+  if (!schemaName) {
+    return null;
+  }
+  const snapshots = getDbCopilotSchemaSnapshots(context);
+  if (!snapshots) {
+    return null;
+  }
+  return snapshots[schemaName] ?? snapshots[schemaName.toLowerCase()] ?? null;
+}
+
+export async function setDbCopilotSchemaSnapshots(
+  context: vscode.ExtensionContext,
+  snapshots: DbCopilotSchemaSnapshots | null
+): Promise<void> {
+  await context.workspaceState.update(SCHEMA_SNAPSHOT_DATA_KEY, snapshots);
 }
 
 export async function setDbCopilotMode(
