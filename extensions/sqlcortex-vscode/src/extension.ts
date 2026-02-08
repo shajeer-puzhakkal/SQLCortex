@@ -52,6 +52,11 @@ import {
   type DbCopilotStatusBarItems,
 } from "./ui/dbCopilotStatusBar";
 import { ResultsPanel } from "./ui/resultsPanel";
+import {
+  DbCopilotLogsView,
+  DbCopilotRiskImpactView,
+  DbCopilotSqlPreviewView,
+} from "./ui/dbCopilotBottomPanel";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
 import { AgentViewProvider } from "./ui/agentView";
@@ -77,6 +82,12 @@ import {
   createSampleDbCopilotSnapshots,
   type DbCopilotSchemaSnapshot,
 } from "./dbcopilot/schemaSnapshot";
+import { createSampleDbCopilotPanel } from "./dbcopilot/bottomPanelSample";
+import type {
+  DbCopilotLogEntry,
+  DbCopilotRiskImpactState,
+  DbCopilotSqlPreviewState,
+} from "./dbcopilot/bottomPanelState";
 import {
   getDbCopilotState,
   setDbCopilotConnection,
@@ -150,6 +161,13 @@ const CREDIT_CRITICAL_MESSAGE = "Avoid interruptions - upgrade to Pro";
 let schemaErdPanel: vscode.WebviewPanel | undefined;
 let dbCopilotErdPanel: vscode.WebviewPanel | undefined;
 let dbCopilotErdSnapshot: DbCopilotSchemaSnapshot | null = null;
+let dbCopilotSqlPreviewView: DbCopilotSqlPreviewView | undefined;
+let dbCopilotRiskImpactView: DbCopilotRiskImpactView | undefined;
+let dbCopilotLogsView: DbCopilotLogsView | undefined;
+let dbCopilotSqlPreviewState: DbCopilotSqlPreviewState | null = null;
+let dbCopilotRiskImpactState: DbCopilotRiskImpactState | null = null;
+let dbCopilotLogEntries: DbCopilotLogEntry[] = [];
+let dbCopilotLogStreamId = 0;
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -181,6 +199,12 @@ export function activate(context: vscode.ExtensionContext) {
   void migrateApiBaseUrl(context, output);
 
   ResultsPanel.register(context);
+  dbCopilotSqlPreviewView = DbCopilotSqlPreviewView.register(context);
+  dbCopilotRiskImpactView = DbCopilotRiskImpactView.register(context);
+  dbCopilotLogsView = DbCopilotLogsView.register(context);
+  dbCopilotSqlPreviewView.update(dbCopilotSqlPreviewState);
+  dbCopilotRiskImpactView.update(dbCopilotRiskImpactState);
+  dbCopilotLogsView.setEntries(dbCopilotLogEntries);
   const queryInsightsView = QueryInsightsView.register(context);
   QueryInsightsView.show(context);
   const agentView = AgentViewProvider.register(context);
@@ -505,6 +529,7 @@ export function activate(context: vscode.ExtensionContext) {
         await setDbCopilotConnection(context, selection.label);
         await setDbCopilotSchemaSnapshot(context, false);
         await setDbCopilotSchemaSnapshots(context, null);
+        resetDbCopilotBottomPanel();
         await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
         vscode.window.showInformationMessage(
           `DB Copilot: Connected to ${selection.label}.`
@@ -517,6 +542,7 @@ export function activate(context: vscode.ExtensionContext) {
         const snapshots = createSampleDbCopilotSnapshots();
         await setDbCopilotSchemaSnapshots(context, snapshots);
         await setDbCopilotSchemaSnapshot(context, true);
+        resetDbCopilotBottomPanel();
         await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
         vscode.window.showInformationMessage(
           "DB Copilot: Schema snapshot captured."
@@ -529,15 +555,11 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotSnapshot(context))) {
           return;
         }
-        openDbCopilotPlaceholderPanel("dbcopilot.optimizeCurrentQuery", {
-          title: "Optimize Current Query",
-          description:
-            "Optimization output will appear here once query analysis is wired.",
-          bullets: [
-            "Review index suggestions and query rewrites.",
-            "Track cost estimates and plan diffs.",
-          ],
-        });
+        const sample = createSampleDbCopilotPanel(getDbCopilotState(context).mode);
+        setDbCopilotRiskImpactState(context, sample.riskImpact);
+        setDbCopilotSqlPreviewState(context, sample.sqlPreview);
+        streamDbCopilotLogs(sample.logs);
+        DbCopilotSqlPreviewView.show(context);
       },
       "dbcopilot.analyzeSchemaHealth": async (...args) => {
         if (!(await ensureDbCopilotConnected(context))) {
@@ -2766,6 +2788,102 @@ async function refreshDbCopilotUI(
   await vscode.commands.executeCommand("setContext", "dbcopilot.mode", state.mode);
 }
 
+function resetDbCopilotBottomPanel(): void {
+  dbCopilotSqlPreviewState = null;
+  dbCopilotRiskImpactState = null;
+  dbCopilotLogEntries = [];
+  dbCopilotLogStreamId += 1;
+  dbCopilotSqlPreviewView?.update(null);
+  dbCopilotRiskImpactView?.update(null);
+  dbCopilotLogsView?.setEntries([]);
+}
+
+function resolveDbCopilotExecutionPolicy(): {
+  allowsExecution: boolean;
+  reason: string | null;
+} {
+  if (!dbCopilotRiskImpactState) {
+    return {
+      allowsExecution: false,
+      reason: "Awaiting risk and governance review.",
+    };
+  }
+  if (dbCopilotRiskImpactState?.requiresManualReview) {
+    return {
+      allowsExecution: false,
+      reason:
+        dbCopilotRiskImpactState.requiresManualReviewReason ||
+        "Manual review required.",
+    };
+  }
+  return { allowsExecution: true, reason: null };
+}
+
+function setDbCopilotRiskImpactState(
+  context: vscode.ExtensionContext,
+  state: DbCopilotRiskImpactState | null
+): void {
+  dbCopilotRiskImpactState = state;
+  dbCopilotRiskImpactView?.update(state);
+  if (dbCopilotSqlPreviewState) {
+    syncDbCopilotSqlPreviewMode(context);
+  }
+}
+
+function setDbCopilotSqlPreviewState(
+  context: vscode.ExtensionContext,
+  state: DbCopilotSqlPreviewState | null
+): void {
+  if (!state) {
+    dbCopilotSqlPreviewState = null;
+    dbCopilotSqlPreviewView?.update(null);
+    return;
+  }
+  const policy = resolveDbCopilotExecutionPolicy();
+  dbCopilotSqlPreviewState = {
+    ...state,
+    mode: getDbCopilotState(context).mode,
+    policyAllowsExecution: policy.allowsExecution,
+    policyReason: policy.reason,
+  };
+  dbCopilotSqlPreviewView?.update(dbCopilotSqlPreviewState);
+}
+
+function syncDbCopilotSqlPreviewMode(context: vscode.ExtensionContext): void {
+  if (!dbCopilotSqlPreviewState) {
+    return;
+  }
+  const policy = resolveDbCopilotExecutionPolicy();
+  dbCopilotSqlPreviewState = {
+    ...dbCopilotSqlPreviewState,
+    mode: getDbCopilotState(context).mode,
+    policyAllowsExecution: policy.allowsExecution,
+    policyReason: policy.reason,
+  };
+  dbCopilotSqlPreviewView?.update(dbCopilotSqlPreviewState);
+}
+
+function appendDbCopilotLogEntry(entry: DbCopilotLogEntry): void {
+  dbCopilotLogEntries = [...dbCopilotLogEntries, entry];
+  dbCopilotLogsView?.appendEntries([entry]);
+}
+
+function streamDbCopilotLogs(entries: DbCopilotLogEntry[]): void {
+  dbCopilotLogStreamId += 1;
+  const streamId = dbCopilotLogStreamId;
+  dbCopilotLogEntries = [];
+  dbCopilotLogsView?.setEntries([]);
+  entries.forEach((entry, index) => {
+    const delay = 200 * index;
+    setTimeout(() => {
+      if (dbCopilotLogStreamId !== streamId) {
+        return;
+      }
+      appendDbCopilotLogEntry(entry);
+    }, delay);
+  });
+}
+
 async function promptDbCopilotConnection(): Promise<vscode.QuickPickItem | null> {
   const options: vscode.QuickPickItem[] = [
     {
@@ -2853,6 +2971,7 @@ async function toggleDbCopilotMode(
   }
   await setDbCopilotMode(context, nextMode);
   await refreshDbCopilotUI(context, statusBars, providers);
+  syncDbCopilotSqlPreviewMode(context);
   vscode.window.showInformationMessage(
     `DB Copilot: Mode set to ${formatDbCopilotMode(nextMode)}.`
   );
