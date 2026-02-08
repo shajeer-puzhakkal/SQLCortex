@@ -19,6 +19,9 @@
     "onView:dbcopilot.schema",
     "onView:dbcopilot.recommendations",
     "onView:dbcopilot.migrations",
+    "onView:dbcopilot.sqlPreview",
+    "onView:dbcopilot.riskImpact",
+    "onView:dbcopilot.logs",
     "onCommand:dbcopilot.connectDatabase",
     "onCommand:dbcopilot.captureSchemaSnapshot",
     "onCommand:dbcopilot.optimizeCurrentQuery",
@@ -215,6 +218,11 @@
           "id": "sqlcortexResults",
           "title": "SQLCortex Results",
           "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilotPanel",
+          "title": "DB Copilot",
+          "icon": "resources/sqlcortex.svg"
         }
       ],
       "secondarySidebar": [
@@ -235,6 +243,26 @@
         {
           "id": "sqlcortex.resultsView",
           "name": "Results",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
+        }
+      ],
+      "dbcopilotPanel": [
+        {
+          "id": "dbcopilot.sqlPreview",
+          "name": "SQL Preview",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.riskImpact",
+          "name": "Risk & Impact",
+          "type": "webview",
+          "icon": "resources/sqlcortex.svg"
+        },
+        {
+          "id": "dbcopilot.logs",
+          "name": "Logs",
           "type": "webview",
           "icon": "resources/sqlcortex.svg"
         }
