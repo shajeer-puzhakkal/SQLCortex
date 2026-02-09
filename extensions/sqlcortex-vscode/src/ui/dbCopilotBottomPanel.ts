@@ -966,11 +966,19 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
         color: var(--vscode-charts-blue);
       }
 
+      .source-schema_analyst {
+        color: var(--vscode-inputValidation-infoForeground);
+      }
+
       .source-performance {
         color: var(--vscode-charts-yellow);
       }
 
       .source-ddl {
+        color: var(--vscode-charts-orange);
+      }
+
+      .source-procedure {
         color: var(--vscode-charts-orange);
       }
 
@@ -1008,8 +1016,10 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
       <div class="filters" id="filters">
         <button class="filter active" data-filter="all">All</button>
         <button class="filter" data-filter="orchestrator">Orchestrator</button>
+        <button class="filter" data-filter="schema_analyst">Schema Analyst</button>
         <button class="filter" data-filter="performance">Performance</button>
         <button class="filter" data-filter="ddl">DDL</button>
+        <button class="filter" data-filter="procedure">Procedure</button>
         <button class="filter" data-filter="risk">Risk</button>
         <button class="filter" data-filter="governance">Governance</button>
         <button class="filter" data-filter="explainability">Explainability</button>
@@ -1033,7 +1043,13 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
         if (source === "ddl") {
           return "DDL";
         }
-        return source.charAt(0).toUpperCase() + source.slice(1);
+        if (source === "schema_analyst") {
+          return "Schema Analyst";
+        }
+        return source
+          .split("_")
+          .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+          .join(" ");
       }
 
       function setActiveFilter(filter) {

@@ -69,6 +69,7 @@ import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProv
 import { DbCopilotSchemaProvider } from "./ui/tree/dbCopilotSchemaProvider";
 import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
 import { buildDbCopilotErdHtml } from "./ui/dbCopilotErdPanel";
+import { buildDbCopilotOptimizationPlanHtml } from "./ui/dbCopilotOptimizationPlan";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
 import { createSqlDiagnosticsCollection, updateSqlDiagnostics } from "./sql/diagnostics";
@@ -82,7 +83,12 @@ import {
   createSampleDbCopilotSnapshots,
   type DbCopilotSchemaSnapshot,
 } from "./dbcopilot/schemaSnapshot";
-import { createSampleDbCopilotPanel } from "./dbcopilot/bottomPanelSample";
+import {
+  buildDbCopilotOptimizationPlan,
+  resolveDbCopilotDbEngine,
+  resolveDbCopilotPolicies,
+  type DbCopilotOptimizationPlan,
+} from "./dbcopilot/orchestrator";
 import type {
   DbCopilotLogEntry,
   DbCopilotRiskImpactState,
@@ -166,6 +172,7 @@ let dbCopilotRiskImpactView: DbCopilotRiskImpactView | undefined;
 let dbCopilotLogsView: DbCopilotLogsView | undefined;
 let dbCopilotSqlPreviewState: DbCopilotSqlPreviewState | null = null;
 let dbCopilotRiskImpactState: DbCopilotRiskImpactState | null = null;
+let dbCopilotOptimizationPlan: DbCopilotOptimizationPlan | null = null;
 let dbCopilotLogEntries: DbCopilotLogEntry[] = [];
 let dbCopilotLogStreamId = 0;
 
@@ -555,10 +562,65 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotSnapshot(context))) {
           return;
         }
-        const sample = createSampleDbCopilotPanel(getDbCopilotState(context).mode);
-        setDbCopilotRiskImpactState(context, sample.riskImpact);
-        setDbCopilotSqlPreviewState(context, sample.sqlPreview);
-        streamDbCopilotLogs(sample.logs);
+        const state = getDbCopilotState(context);
+        const snapshot = resolveDbCopilotSnapshot(context, null);
+        let activeSql = resolveDbCopilotActiveSqlText();
+        const dbEngine = resolveDbCopilotDbEngine(state.connectionLabel ?? null);
+        const policies = resolveDbCopilotPolicies(state.connectionLabel ?? null, dbEngine);
+        let userRequest = activeSql
+          ? `Optimize query:\n${activeSql}`
+          : "Optimize current query";
+        let plan = buildDbCopilotOptimizationPlan({
+          user_request: userRequest,
+          db_engine: dbEngine,
+          connection_label: state.connectionLabel ?? null,
+          schema_snapshot: snapshot,
+          execution_mode: state.mode === "execution",
+          policies,
+          query_text: activeSql,
+          explain_plan: null,
+          now: new Date(),
+        });
+        if (plan.orchestrator.missing_context.includes("query_text")) {
+          const manualSql = await vscode.window.showInputBox({
+            prompt: "Paste the SQL to optimize",
+            placeHolder: "SELECT ...",
+            ignoreFocusOut: true,
+          });
+          if (manualSql && manualSql.trim()) {
+            activeSql = manualSql.trim();
+            userRequest = `Optimize query:\n${activeSql}`;
+            plan = buildDbCopilotOptimizationPlan({
+              user_request: userRequest,
+              db_engine: dbEngine,
+              connection_label: state.connectionLabel ?? null,
+              schema_snapshot: snapshot,
+              execution_mode: state.mode === "execution",
+              policies,
+              query_text: activeSql,
+              explain_plan: null,
+              now: new Date(),
+            });
+          }
+        }
+        dbCopilotOptimizationPlan = plan;
+        if (plan.orchestrator.missing_context.length) {
+          setDbCopilotRiskImpactState(context, null);
+          setDbCopilotSqlPreviewState(context, null);
+          streamDbCopilotLogs(plan.logs);
+          DbCopilotLogsView.show(context);
+          vscode.window.showWarningMessage(
+            `DB Copilot: Missing context (${plan.orchestrator.missing_context.join(", ")}).`
+          );
+          return;
+        }
+        if (plan.merged.risk_impact) {
+          setDbCopilotRiskImpactState(context, plan.merged.risk_impact);
+        }
+        if (plan.merged.sql_preview) {
+          setDbCopilotSqlPreviewState(context, plan.merged.sql_preview);
+        }
+        streamDbCopilotLogs(plan.logs);
         DbCopilotSqlPreviewView.show(context);
       },
       "dbcopilot.analyzeSchemaHealth": async (...args) => {
@@ -601,11 +663,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotSnapshot(context))) {
           return;
         }
-        openDbCopilotPlaceholderPanel("dbcopilot.openOptimizationPlan", {
-          title: "Optimization Plan",
-          description: "Optimization plan details will appear here.",
-          bullets: ["Plan diffs", "Expected impact", "Execution notes"],
-        });
+        openDbCopilotOptimizationPlan(context, dbCopilotOptimizationPlan);
       },
       "dbcopilot.openErdDiagram": async (...args) => {
         if (!(await ensureDbCopilotConnected(context))) {
@@ -2791,6 +2849,7 @@ async function refreshDbCopilotUI(
 function resetDbCopilotBottomPanel(): void {
   dbCopilotSqlPreviewState = null;
   dbCopilotRiskImpactState = null;
+  dbCopilotOptimizationPlan = null;
   dbCopilotLogEntries = [];
   dbCopilotLogStreamId += 1;
   dbCopilotSqlPreviewView?.update(null);
@@ -2943,6 +3002,18 @@ async function ensureDbCopilotSnapshot(
     await vscode.commands.executeCommand("dbcopilot.captureSchemaSnapshot");
   }
   return false;
+}
+
+function resolveDbCopilotActiveSqlText(): string | null {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return null;
+  }
+  const selection = editor.selection && !editor.selection.isEmpty
+    ? editor.document.getText(editor.selection)
+    : editor.document.getText();
+  const trimmed = selection.trim();
+  return trimmed.length ? trimmed : null;
 }
 
 function resolveDbCopilotSchemaName(node: unknown): string | null {
@@ -3100,6 +3171,22 @@ function openDbCopilotErdDiagram(
     nonce: createNonce(),
   });
   panel.webview.html = html;
+}
+
+function openDbCopilotOptimizationPlan(
+  context: vscode.ExtensionContext,
+  plan: DbCopilotOptimizationPlan | null
+): void {
+  const panel = vscode.window.createWebviewPanel(
+    "dbcopilot.optimizationPlan",
+    "Optimization Plan",
+    { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+    {
+      enableScripts: false,
+      retainContextWhenHidden: true,
+    }
+  );
+  panel.webview.html = buildDbCopilotOptimizationPlanHtml(plan);
 }
 
 async function exportDbCopilotErdPng(
