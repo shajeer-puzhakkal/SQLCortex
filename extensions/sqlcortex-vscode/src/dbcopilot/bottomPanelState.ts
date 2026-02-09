@@ -2,8 +2,10 @@ import type { DbCopilotMode } from "../state/dbCopilotState";
 
 export type DbCopilotLogSource =
   | "orchestrator"
+  | "schema_analyst"
   | "performance"
   | "ddl"
+  | "procedure"
   | "risk"
   | "governance"
   | "explainability";
