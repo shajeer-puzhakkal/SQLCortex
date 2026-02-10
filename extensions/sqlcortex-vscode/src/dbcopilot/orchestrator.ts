@@ -95,6 +95,7 @@ export type DbCopilotDdlOutput = {
   transactional: boolean;
   up_sql: string;
   down_sql: string;
+  migration_yaml: string;
   notes: string;
 };
 
@@ -813,12 +814,22 @@ function runDdl(
     const downSql = input.policies.allow_drop
       ? `DROP TABLE IF EXISTS public.${tableName};`
       : "-- Rollback requires manual drop (allow_drop=false).";
+    const migrationYaml = buildMigrationYaml({
+      migrationId: `mig_create_${tableName}`,
+      title: `Create ${tableName}`,
+      transactional: true,
+      engine: input.db_engine,
+      upSql,
+      downSql,
+      notes: "Create table with primary key and timestamp.",
+    });
     return {
       migration_id: `mig_create_${tableName}`,
       title: `Create ${tableName}`,
       transactional: true,
       up_sql: upSql,
       down_sql: downSql,
+      migration_yaml: migrationYaml,
       notes: "Create table with primary key and timestamp.",
     };
   }
@@ -844,12 +855,25 @@ function runDdl(
     : "-- Rollback requires manual drop (allow_drop=false).";
   const title = `Optimize ${baseIndex.table} filters`;
 
+  const migrationYaml = buildMigrationYaml({
+    migrationId: `mig_${baseIndex.table}_${baseIndex.columns.join("_")}`,
+    title,
+    transactional: !useConcurrently,
+    engine: input.db_engine,
+    upSql,
+    downSql,
+    notes: useConcurrently
+      ? "Uses CONCURRENTLY to reduce lock contention."
+      : "Standard index creation.",
+  });
+
   return {
     migration_id: `mig_${baseIndex.table}_${baseIndex.columns.join("_")}`,
     title,
     transactional: !useConcurrently,
     up_sql: upSql,
     down_sql: downSql,
+    migration_yaml: migrationYaml,
     notes: useConcurrently
       ? "Uses CONCURRENTLY to reduce lock contention."
       : "Standard index creation.",
@@ -1090,4 +1114,48 @@ function titleCase(value: string): string {
     .map((chunk) => (chunk ? chunk[0].toUpperCase() + chunk.slice(1) : ""))
     .join(" ")
     .trim();
+}
+
+function buildMigrationYaml(input: {
+  migrationId: string;
+  title: string;
+  transactional: boolean;
+  engine: DbCopilotDbEngine;
+  upSql: string;
+  downSql: string;
+  notes: string;
+}): string {
+  const lines: string[] = [
+    `id: ${yamlQuote(input.migrationId)}`,
+    `title: ${yamlQuote(input.title)}`,
+    `engine: ${yamlQuote(input.engine)}`,
+    `transactional: ${input.transactional ? "true" : "false"}`,
+  ];
+
+  if (input.upSql.trim()) {
+    lines.push("up: |", ...indentBlock(input.upSql));
+  } else {
+    lines.push('up: ""');
+  }
+
+  if (input.downSql.trim()) {
+    lines.push("down: |", ...indentBlock(input.downSql));
+  } else {
+    lines.push('down: ""');
+  }
+
+  if (input.notes.trim()) {
+    lines.push(`notes: ${yamlQuote(input.notes)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function indentBlock(value: string): string[] {
+  return value.replace(/\r\n/g, "\n").split("\n").map((line) => `  ${line}`);
+}
+
+function yamlQuote(value: string): string {
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }

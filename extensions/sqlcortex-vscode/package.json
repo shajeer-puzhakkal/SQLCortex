@@ -30,6 +30,8 @@
     "onCommand:dbcopilot.openOptimizationPlan",
     "onCommand:dbcopilot.openErdDiagram",
     "onCommand:dbcopilot.openMigrationPlan",
+    "onCommand:dbcopilot.saveMigration",
+    "onCommand:dbcopilot.executeMigration",
     "onCommand:dbcopilot.toggleMode"
   ],
   "main": "./dist/extension.js",
@@ -151,6 +153,14 @@
       {
         "command": "dbcopilot.openMigrationPlan",
         "title": "DB Copilot: Open Migration Plan"
+      },
+      {
+        "command": "dbcopilot.saveMigration",
+        "title": "DB Copilot: Save Migration"
+      },
+      {
+        "command": "dbcopilot.executeMigration",
+        "title": "DB Copilot: Execute Migration"
       },
       {
         "command": "dbcopilot.toggleMode",

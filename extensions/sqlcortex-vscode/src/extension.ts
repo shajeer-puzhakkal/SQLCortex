@@ -69,6 +69,7 @@ import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProv
 import { DbCopilotSchemaProvider } from "./ui/tree/dbCopilotSchemaProvider";
 import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
 import { buildDbCopilotErdHtml } from "./ui/dbCopilotErdPanel";
+import { buildDbCopilotMigrationPlanHtml } from "./ui/dbCopilotMigrationPlan";
 import { buildDbCopilotOptimizationPlanHtml } from "./ui/dbCopilotOptimizationPlan";
 import { SqlCompletionProvider } from "./sql/completions";
 import { extractSql, type ExtractMode } from "./sql/extractor";
@@ -89,6 +90,14 @@ import {
   resolveDbCopilotPolicies,
   type DbCopilotOptimizationPlan,
 } from "./dbcopilot/orchestrator";
+import {
+  buildDbCopilotMigrationPlan,
+  buildDbCopilotMigrationSqlExport,
+  buildDbCopilotMigrationTopRisks,
+  evaluateDbCopilotMigrationExecutionGate,
+  splitSqlStatements,
+  type DbCopilotMigrationPlan,
+} from "./dbcopilot/migrationPlan";
 import type {
   DbCopilotLogEntry,
   DbCopilotRiskImpactState,
@@ -137,6 +146,8 @@ const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
   { id: "dbcopilot.openOptimizationPlan", label: "Open Optimization Plan" },
   { id: "dbcopilot.openErdDiagram", label: "Open ER Diagram" },
   { id: "dbcopilot.openMigrationPlan", label: "Open Migration Plan" },
+  { id: "dbcopilot.saveMigration", label: "Save Migration" },
+  { id: "dbcopilot.executeMigration", label: "Execute Migration" },
   { id: "dbcopilot.toggleMode", label: "Toggle Mode" },
   { id: "dbcopilot.viewPolicies", label: "View Policies" },
 ];
@@ -166,6 +177,7 @@ const CREDIT_WARNING_MESSAGE = "You are getting strong value from SQLCortex";
 const CREDIT_CRITICAL_MESSAGE = "Avoid interruptions - upgrade to Pro";
 let schemaErdPanel: vscode.WebviewPanel | undefined;
 let dbCopilotErdPanel: vscode.WebviewPanel | undefined;
+let dbCopilotMigrationPlanPanel: vscode.WebviewPanel | undefined;
 let dbCopilotErdSnapshot: DbCopilotSchemaSnapshot | null = null;
 let dbCopilotSqlPreviewView: DbCopilotSqlPreviewView | undefined;
 let dbCopilotRiskImpactView: DbCopilotRiskImpactView | undefined;
@@ -689,11 +701,24 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotSnapshot(context))) {
           return;
         }
-        openDbCopilotPlaceholderPanel("dbcopilot.openMigrationPlan", {
-          title: "Migration Plan",
-          description: "Planned migration steps will appear here.",
-          bullets: ["Ordered change set", "Rollback guidance", "Risk notes"],
+        openDbCopilotMigrationPlan(context, {
+          tokenStore,
+          output,
+          statusBars,
+          sidebarProvider,
         });
+      },
+      "dbcopilot.saveMigration": async () => {
+        await saveDbCopilotMigrationArtifacts(context);
+      },
+      "dbcopilot.executeMigration": async () => {
+        await executeDbCopilotMigrationPlan(
+          context,
+          tokenStore,
+          output,
+          statusBars,
+          sidebarProvider
+        );
       },
       "dbcopilot.toggleMode": async () => {
         await toggleDbCopilotMode(context, dbCopilotStatusBars, dbCopilotProviders);
@@ -2857,10 +2882,21 @@ function resetDbCopilotBottomPanel(): void {
   dbCopilotLogsView?.setEntries([]);
 }
 
-function resolveDbCopilotExecutionPolicy(): {
+function resolveDbCopilotExecutionPolicy(
+  context: vscode.ExtensionContext
+): {
   allowsExecution: boolean;
   reason: string | null;
 } {
+  const state = getDbCopilotState(context);
+  const dbEngine = resolveDbCopilotDbEngine(state.connectionLabel ?? null);
+  const policies = resolveDbCopilotPolicies(state.connectionLabel ?? null, dbEngine);
+  if (policies.env === "prod") {
+    return {
+      allowsExecution: false,
+      reason: "Execution blocked in production (enterprise override required).",
+    };
+  }
   if (!dbCopilotRiskImpactState) {
     return {
       allowsExecution: false,
@@ -2898,7 +2934,7 @@ function setDbCopilotSqlPreviewState(
     dbCopilotSqlPreviewView?.update(null);
     return;
   }
-  const policy = resolveDbCopilotExecutionPolicy();
+  const policy = resolveDbCopilotExecutionPolicy(context);
   dbCopilotSqlPreviewState = {
     ...state,
     mode: getDbCopilotState(context).mode,
@@ -2912,7 +2948,7 @@ function syncDbCopilotSqlPreviewMode(context: vscode.ExtensionContext): void {
   if (!dbCopilotSqlPreviewState) {
     return;
   }
-  const policy = resolveDbCopilotExecutionPolicy();
+  const policy = resolveDbCopilotExecutionPolicy(context);
   dbCopilotSqlPreviewState = {
     ...dbCopilotSqlPreviewState,
     mode: getDbCopilotState(context).mode,
@@ -2941,6 +2977,66 @@ function streamDbCopilotLogs(entries: DbCopilotLogEntry[]): void {
       appendDbCopilotLogEntry(entry);
     }, delay);
   });
+}
+
+function buildDbCopilotLogEntry(
+  source: DbCopilotLogEntry["source"],
+  message: string
+): DbCopilotLogEntry {
+  const timestamp = formatDbCopilotLogTimestamp(new Date());
+  return {
+    id: `${timestamp}-${source}-${Math.random().toString(16).slice(2, 8)}`,
+    timestamp,
+    source,
+    message,
+  };
+}
+
+function formatDbCopilotLogTimestamp(value: Date): string {
+  const hours = value.getHours().toString().padStart(2, "0");
+  const minutes = value.getMinutes().toString().padStart(2, "0");
+  const seconds = value.getSeconds().toString().padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function sanitizeMigrationId(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function ensureTrailingNewline(value: string): string {
+  if (!value) {
+    return "";
+  }
+  return value.endsWith("\n") ? value : `${value}\n`;
+}
+
+async function writeTextFile(
+  uri: vscode.Uri,
+  content: string
+): Promise<void> {
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+}
+
+function summarizeSql(statement: string): string {
+  const trimmed = statement.replace(/\r\n/g, "\n").split("\n")[0]?.trim() ?? "";
+  if (!trimmed) {
+    return "SQL statement";
+  }
+  if (trimmed.length > 80) {
+    return `${trimmed.slice(0, 77)}...`;
+  }
+  return trimmed;
+}
+
+function formatDbCopilotEnvironment(env: DbCopilotMigrationPlan["environment"]): string {
+  switch (env) {
+    case "prod":
+      return "Production";
+    case "staging":
+      return "Staging";
+    default:
+      return "Development";
+  }
 }
 
 async function promptDbCopilotConnection(): Promise<vscode.QuickPickItem | null> {
@@ -3187,6 +3283,367 @@ function openDbCopilotOptimizationPlan(
     }
   );
   panel.webview.html = buildDbCopilotOptimizationPlanHtml(plan);
+}
+
+function resolveDbCopilotMigrationPlan(
+  context: vscode.ExtensionContext
+): DbCopilotMigrationPlan | null {
+  if (!dbCopilotOptimizationPlan) {
+    return null;
+  }
+  const state = getDbCopilotState(context);
+  const dbEngine = resolveDbCopilotDbEngine(state.connectionLabel ?? null);
+  const policies = resolveDbCopilotPolicies(state.connectionLabel ?? null, dbEngine);
+  return buildDbCopilotMigrationPlan({
+    plan: dbCopilotOptimizationPlan,
+    mode: state.mode,
+    engine: dbEngine,
+    policies,
+  });
+}
+
+function openDbCopilotMigrationPlan(
+  context: vscode.ExtensionContext,
+  deps: {
+    tokenStore: ReturnType<typeof createTokenStore>;
+    output: vscode.OutputChannel;
+    statusBars: StatusBarItems;
+    sidebarProvider?: SidebarProvider;
+  }
+): void {
+  const plan = resolveDbCopilotMigrationPlan(context);
+  let panel = dbCopilotMigrationPlanPanel;
+  if (!panel) {
+    panel = vscode.window.createWebviewPanel(
+      "dbcopilot.migrationPlan",
+      "Migration Plan",
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+      }
+    );
+    panel.onDidDispose(() => {
+      if (dbCopilotMigrationPlanPanel === panel) {
+        dbCopilotMigrationPlanPanel = undefined;
+      }
+    });
+    panel.webview.onDidReceiveMessage(
+      (message) => void handleDbCopilotMigrationPlanMessage(context, deps, message)
+    );
+    dbCopilotMigrationPlanPanel = panel;
+  }
+
+  panel.title = "Migration Plan";
+  panel.webview.html = buildDbCopilotMigrationPlanHtml({
+    webview: panel.webview,
+    plan,
+  });
+  panel.reveal(vscode.ViewColumn.Active, true);
+}
+
+async function handleDbCopilotMigrationPlanMessage(
+  context: vscode.ExtensionContext,
+  deps: {
+    tokenStore: ReturnType<typeof createTokenStore>;
+    output: vscode.OutputChannel;
+    statusBars: StatusBarItems;
+    sidebarProvider?: SidebarProvider;
+  },
+  message: unknown
+): Promise<void> {
+  const payload = message as { type?: string } | undefined;
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+
+  switch (payload.type) {
+    case "exportSql":
+      await exportDbCopilotMigrationSql(context);
+      return;
+    case "exportYaml":
+      await exportDbCopilotMigrationYaml(context);
+      return;
+    case "saveMigration":
+      await saveDbCopilotMigrationArtifacts(context);
+      return;
+    case "executeMigration":
+      await executeDbCopilotMigrationPlan(
+        context,
+        deps.tokenStore,
+        deps.output,
+        deps.statusBars,
+        deps.sidebarProvider
+      );
+      return;
+    default:
+      return;
+  }
+}
+
+async function exportDbCopilotMigrationSql(
+  context: vscode.ExtensionContext
+): Promise<void> {
+  const plan = resolveDbCopilotMigrationPlan(context);
+  if (!plan) {
+    vscode.window.showWarningMessage("DB Copilot: No migration plan to export.");
+    return;
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const defaultUri = workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder, `${sanitizeMigrationId(plan.id)}.sql`)
+    : undefined;
+  const destination = await vscode.window.showSaveDialog({
+    filters: { SQL: ["sql"] },
+    defaultUri,
+    title: "Export migration SQL",
+  });
+  if (!destination) {
+    return;
+  }
+  const content = buildDbCopilotMigrationSqlExport(plan);
+  await writeTextFile(destination, content);
+  vscode.window.showInformationMessage(
+    `DB Copilot: Migration SQL exported to ${destination.fsPath}.`
+  );
+}
+
+async function exportDbCopilotMigrationYaml(
+  context: vscode.ExtensionContext
+): Promise<void> {
+  const plan = resolveDbCopilotMigrationPlan(context);
+  if (!plan) {
+    vscode.window.showWarningMessage("DB Copilot: No migration plan to export.");
+    return;
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const defaultUri = workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder, `${sanitizeMigrationId(plan.id)}.yaml`)
+    : undefined;
+  const destination = await vscode.window.showSaveDialog({
+    filters: { YAML: ["yaml", "yml"] },
+    defaultUri,
+    title: "Export migration YAML",
+  });
+  if (!destination) {
+    return;
+  }
+  await writeTextFile(destination, plan.artifacts.migrationYaml);
+  vscode.window.showInformationMessage(
+    `DB Copilot: Migration YAML exported to ${destination.fsPath}.`
+  );
+}
+
+async function saveDbCopilotMigrationArtifacts(
+  context: vscode.ExtensionContext
+): Promise<void> {
+  const plan = resolveDbCopilotMigrationPlan(context);
+  if (!plan) {
+    vscode.window.showWarningMessage("DB Copilot: No migration plan to save.");
+    return;
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage(
+      "DB Copilot: Open a workspace to save migration artifacts."
+    );
+    return;
+  }
+
+  const migrationId = sanitizeMigrationId(plan.id);
+  const migrationRoot = vscode.Uri.joinPath(
+    workspaceFolder,
+    ".sqlcortex",
+    "migrations",
+    migrationId
+  );
+  await vscode.workspace.fs.createDirectory(migrationRoot);
+
+  const yamlUri = vscode.Uri.joinPath(migrationRoot, "migration.yaml");
+  const upUri = vscode.Uri.joinPath(migrationRoot, "up.sql");
+  const downUri = vscode.Uri.joinPath(migrationRoot, "down.sql");
+  const impactUri = vscode.Uri.joinPath(migrationRoot, "impact.json");
+  const complianceUri = vscode.Uri.joinPath(migrationRoot, "compliance.json");
+  const indexUri = vscode.Uri.joinPath(migrationRoot, "migration.json");
+
+  await writeTextFile(yamlUri, plan.artifacts.migrationYaml);
+  await writeTextFile(upUri, ensureTrailingNewline(plan.artifacts.upSql));
+  await writeTextFile(downUri, ensureTrailingNewline(plan.artifacts.downSql));
+  await writeTextFile(impactUri, ensureTrailingNewline(plan.artifacts.impactJson));
+  await writeTextFile(complianceUri, ensureTrailingNewline(plan.artifacts.complianceJson));
+
+  const index = {
+    id: plan.id,
+    title: plan.title,
+    environment: plan.environment,
+    engine: plan.engine,
+    artifacts: {
+      yaml: "migration.yaml",
+      up: "up.sql",
+      down: "down.sql",
+      impact: "impact.json",
+      compliance: "compliance.json",
+    },
+  };
+  await writeTextFile(indexUri, `${JSON.stringify(index, null, 2)}\n`);
+
+  vscode.window.showInformationMessage(
+    `DB Copilot: Migration saved to ${migrationRoot.fsPath}.`
+  );
+}
+
+async function executeDbCopilotMigrationPlan(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider?: SidebarProvider
+): Promise<void> {
+  const plan = resolveDbCopilotMigrationPlan(context);
+  if (!plan) {
+    vscode.window.showWarningMessage("DB Copilot: No migration plan to execute.");
+    return;
+  }
+  const gate = evaluateDbCopilotMigrationExecutionGate(plan);
+  if (!gate.allowed) {
+    vscode.window.showWarningMessage(`DB Copilot: ${gate.reasons[0]}`);
+    return;
+  }
+
+  const statements = splitSqlStatements(plan.artifacts.upSql);
+  if (!statements.length) {
+    vscode.window.showWarningMessage("DB Copilot: No SQL statements to execute.");
+    return;
+  }
+
+  const topRisks = buildDbCopilotMigrationTopRisks(plan);
+  const detail = [
+    `Environment: ${formatDbCopilotEnvironment(plan.environment)}`,
+    `Statements: ${statements.length}`,
+    "Top risks:",
+    ...topRisks.map((risk) => `- ${risk}`),
+  ].join("\n");
+  const confirmation = await vscode.window.showWarningMessage(
+    "DB Copilot: Execute migration plan?",
+    { modal: true, detail },
+    "Execute"
+  );
+  if (confirmation !== "Execute") {
+    return;
+  }
+
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "DB Copilot: Select a connection before executing migrations."
+    );
+    return;
+  }
+
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  DbCopilotLogsView.show(context);
+  streamDbCopilotLogs([
+    buildDbCopilotLogEntry(
+      "execution",
+      `Starting migration ${plan.id} (${statements.length} statements).`
+    ),
+  ]);
+
+  const requestBase = {
+    projectId: workspaceContext.projectId,
+    connectionId: workspaceContext.connectionId ?? undefined,
+    source: "vscode" as const,
+    client: {
+      extensionVersion: getExtensionVersion(context),
+      vscodeVersion: vscode.version,
+    },
+  };
+
+  for (let index = 0; index < statements.length; index += 1) {
+    const statement = statements[index];
+    const summary = summarizeSql(statement);
+    appendDbCopilotLogEntry(
+      buildDbCopilotLogEntry(
+        "execution",
+        `Executing ${index + 1}/${statements.length}: ${summary}`
+      )
+    );
+    const startedAt = Date.now();
+    try {
+      const response = await executeQuery(client, {
+        ...requestBase,
+        sql: statement,
+      });
+      if (response.error) {
+        const errorMessage = response.error.message ?? "Execution failed.";
+        appendDbCopilotLogEntry(
+          buildDbCopilotLogEntry(
+            "execution",
+            `Statement ${index + 1} failed: ${errorMessage}`
+          )
+        );
+        appendDbCopilotLogEntry(
+          buildDbCopilotLogEntry(
+            "execution",
+            "Rollback suggested: review down.sql for this migration."
+          )
+        );
+        vscode.window.showErrorMessage(
+          `DB Copilot: Migration failed on statement ${index + 1}.`
+        );
+        return;
+      }
+      const duration = Date.now() - startedAt;
+      appendDbCopilotLogEntry(
+        buildDbCopilotLogEntry(
+          "execution",
+          `Statement ${index + 1} completed in ${duration}ms.`
+        )
+      );
+    } catch (err) {
+      appendDbCopilotLogEntry(
+        buildDbCopilotLogEntry(
+          "execution",
+          `Statement ${index + 1} failed: ${formatRequestError(err)}`
+        )
+      );
+      appendDbCopilotLogEntry(
+        buildDbCopilotLogEntry(
+          "execution",
+          "Rollback suggested: review down.sql for this migration."
+        )
+      );
+      reportRequestError(output, "Migration execution failed", err);
+      return;
+    }
+  }
+
+  appendDbCopilotLogEntry(
+    buildDbCopilotLogEntry("execution", "Migration execution completed.")
+  );
+  vscode.window.showInformationMessage("DB Copilot: Migration executed successfully.");
 }
 
 async function exportDbCopilotErdPng(

@@ -8,7 +8,8 @@ export type DbCopilotLogSource =
   | "procedure"
   | "risk"
   | "governance"
-  | "explainability";
+  | "explainability"
+  | "execution";
 
 export type DbCopilotLogEntry = {
   id: string;

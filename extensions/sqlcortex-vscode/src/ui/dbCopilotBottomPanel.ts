@@ -151,13 +151,10 @@ export class DbCopilotSqlPreviewView implements vscode.WebviewViewProvider {
 
   private async saveMigration(): Promise<void> {
     try {
-      await vscode.commands.executeCommand("dbcopilot.openMigrationPlan");
+      await vscode.commands.executeCommand("dbcopilot.saveMigration");
     } catch {
-      // Ignore if command is unavailable.
+      vscode.window.showErrorMessage("DB Copilot: Unable to save migration.");
     }
-    vscode.window.showInformationMessage(
-      "DB Copilot: Save as Migration will be available in Phase 6."
-    );
   }
 
   private async executeSql(): Promise<void> {
@@ -174,7 +171,11 @@ export class DbCopilotSqlPreviewView implements vscode.WebviewViewProvider {
       vscode.window.showWarningMessage(`DB Copilot: ${reason}`);
       return;
     }
-    vscode.window.showInformationMessage("DB Copilot: Execute flow coming soon.");
+    try {
+      await vscode.commands.executeCommand("dbcopilot.executeMigration");
+    } catch {
+      vscode.window.showErrorMessage("DB Copilot: Unable to execute migration.");
+    }
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -994,6 +995,10 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
         color: var(--vscode-charts-purple);
       }
 
+      .source-execution {
+        color: var(--vscode-inputValidation-errorForeground);
+      }
+
       .empty {
         padding: 16px;
         border-radius: 10px;
@@ -1023,6 +1028,7 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
         <button class="filter" data-filter="risk">Risk</button>
         <button class="filter" data-filter="governance">Governance</button>
         <button class="filter" data-filter="explainability">Explainability</button>
+        <button class="filter" data-filter="execution">Execution</button>
       </div>
       <div id="empty" class="empty hidden">Log stream will appear here.</div>
       <div id="logList" class="log-list"></div>
@@ -1045,6 +1051,9 @@ export class DbCopilotLogsView implements vscode.WebviewViewProvider {
         }
         if (source === "schema_analyst") {
           return "Schema Analyst";
+        }
+        if (source === "execution") {
+          return "Execution";
         }
         return source
           .split("_")
