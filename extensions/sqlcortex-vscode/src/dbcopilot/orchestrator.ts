@@ -95,6 +95,7 @@ export type DbCopilotDdlOutput = {
   transactional: boolean;
   up_sql: string;
   down_sql: string;
+  migration_yaml: string;
   notes: string;
 };
 
@@ -185,18 +186,18 @@ const PLAN_TEMPLATES: Record<DbCopilotIntent, DbCopilotPlanTemplate[]> = {
     },
     {
       step_id: "s3",
-      agent: "ddl",
-      objective: "Generate migration YAML for accepted changes",
+      agent: "governance",
+      objective: "Evaluate policy compliance for proposed changes",
       inputs: (input) => ({
-        db_engine: input.db_engine,
         policies: input.policies,
       }),
     },
     {
       step_id: "s4",
-      agent: "governance",
-      objective: "Evaluate policy compliance for proposed changes",
+      agent: "ddl",
+      objective: "Generate migration YAML for accepted changes",
       inputs: (input) => ({
+        db_engine: input.db_engine,
         policies: input.policies,
       }),
     },
@@ -813,12 +814,22 @@ function runDdl(
     const downSql = input.policies.allow_drop
       ? `DROP TABLE IF EXISTS public.${tableName};`
       : "-- Rollback requires manual drop (allow_drop=false).";
+    const migrationYaml = buildMigrationYaml({
+      migrationId: `mig_create_${tableName}`,
+      title: `Create ${tableName}`,
+      transactional: true,
+      engine: input.db_engine,
+      upSql,
+      downSql,
+      notes: "Create table with primary key and timestamp.",
+    });
     return {
       migration_id: `mig_create_${tableName}`,
       title: `Create ${tableName}`,
       transactional: true,
       up_sql: upSql,
       down_sql: downSql,
+      migration_yaml: migrationYaml,
       notes: "Create table with primary key and timestamp.",
     };
   }
@@ -839,8 +850,22 @@ function runDdl(
     `CREATE INDEX ${concurrently}${indexName}`,
     `  ON public.${baseIndex.table} (${baseIndex.columns.join(", ")})${predicate};`,
   ].join("\n");
-  const downSql = `DROP INDEX IF EXISTS ${indexName};`;
+  const downSql = input.policies.allow_drop
+    ? `DROP INDEX IF EXISTS ${indexName};`
+    : "-- Rollback requires manual drop (allow_drop=false).";
   const title = `Optimize ${baseIndex.table} filters`;
+
+  const migrationYaml = buildMigrationYaml({
+    migrationId: `mig_${baseIndex.table}_${baseIndex.columns.join("_")}`,
+    title,
+    transactional: !useConcurrently,
+    engine: input.db_engine,
+    upSql,
+    downSql,
+    notes: useConcurrently
+      ? "Uses CONCURRENTLY to reduce lock contention."
+      : "Standard index creation.",
+  });
 
   return {
     migration_id: `mig_${baseIndex.table}_${baseIndex.columns.join("_")}`,
@@ -848,6 +873,7 @@ function runDdl(
     transactional: !useConcurrently,
     up_sql: upSql,
     down_sql: downSql,
+    migration_yaml: migrationYaml,
     notes: useConcurrently
       ? "Uses CONCURRENTLY to reduce lock contention."
       : "Standard index creation.",
@@ -857,8 +883,16 @@ function runDdl(
 function runRisk(input: DbCopilotOrchestratorInput, outputs: DbCopilotAgentOutputs): DbCopilotRiskOutput {
   const ddl = outputs.ddl;
   const governance = outputs.governance;
-  const breakingChanges = ddl?.up_sql.toLowerCase().includes("drop ") ? ["Drop detected"] : [];
-  const lockRisk = ddl?.up_sql.toLowerCase().includes("concurrently") ? "low" : "med";
+  const ddlText = ddl?.up_sql.toLowerCase() ?? "";
+  const breakingChanges = ddlText.includes("drop ") ? ["Drop detected"] : [];
+  const lockRisk: DbCopilotRiskOutput["lock_contention_risk"] =
+    ddlText.length === 0
+      ? "med"
+      : ddlText.includes("drop ") || ddlText.includes("alter table")
+        ? "high"
+        : ddlText.includes("concurrently")
+          ? "low"
+          : "med";
   const policyViolations = governance?.violations.map((entry) => entry.rule) ?? [];
   const requiresManualReview =
     policyViolations.length > 0 || breakingChanges.length > 0 || lockRisk === "high";
@@ -913,13 +947,15 @@ function mergeOutputs(
   const risk = outputs.risk;
   const governance = outputs.governance;
   const riskImpact = buildRiskImpactState(risk, governance);
+  const policyAllowsExecution = riskImpact ? !riskImpact.requiresManualReview : false;
+  const policyReason = riskImpact?.requiresManualReviewReason ?? null;
   const sqlPreview: DbCopilotSqlPreviewState | null = ddl
     ? {
         upSql: ddl.up_sql,
         downSql: ddl.down_sql,
-        mode: "readOnly",
-        policyAllowsExecution: false,
-        policyReason: null,
+        mode: input.execution_mode ? "execution" : "readOnly",
+        policyAllowsExecution,
+        policyReason,
       }
     : null;
   return {
@@ -936,16 +972,41 @@ function buildRiskImpactState(
   if (!risk && !governance) {
     return null;
   }
-  const policyStatus = governance?.compliant ? "Compliant" : "Non-compliant";
+  const policyStatus = governance
+    ? governance.compliant
+      ? "Compliant"
+      : "Non-compliant"
+    : "Unknown";
+  const policyViolations = governance?.violations ?? [];
+  const policyViolationSummary = governance
+    ? policyViolations.length
+      ? policyViolations.map((entry) => formatGovernanceViolation(entry)).join("; ")
+      : "None"
+    : "Unknown";
+  const riskGate = risk?.final_gate ?? null;
+  const riskGateRequiresAction = Boolean(riskGate && riskGate !== "approve");
   const requiresManualReview =
-    Boolean(risk?.requires_manual_review) || Boolean(governance && !governance.compliant);
-  const reason = !governance?.compliant
-    ? `Policy violations: ${governance?.violations.map((entry) => entry.rule).join(", ")}`
-    : risk?.final_gate && risk.final_gate !== "approve"
-      ? `Risk gate: ${risk.final_gate}`
-      : risk?.requires_manual_review
-        ? "Manual review required."
-        : null;
+    policyStatus === "Non-compliant" ||
+    Boolean(risk?.requires_manual_review) ||
+    riskGateRequiresAction;
+  const reasonParts: string[] = [];
+  if (policyStatus === "Non-compliant") {
+    const violationDetails = policyViolations.length
+      ? policyViolations.map((entry) => formatGovernanceViolation(entry)).join("; ")
+      : "Policy violations detected.";
+    reasonParts.push(`Policy violations: ${violationDetails}`);
+  }
+  if (riskGateRequiresAction && riskGate) {
+    const gateLabel = titleCase(riskGate);
+    const guidance =
+      riskGate === "reject"
+        ? "Execution blocked."
+        : "Revise required before execution.";
+    reasonParts.push(`Risk gate: ${gateLabel}. ${guidance}`);
+  } else if (risk?.requires_manual_review) {
+    reasonParts.push("Manual review required.");
+  }
+  const reason = reasonParts.length ? reasonParts.join(" ") : null;
   const summary: Array<{ label: string; value: string }> = [
     {
       label: "Breaking changes",
@@ -975,12 +1036,23 @@ function buildRiskImpactState(
       label: "Policy",
       value: policyStatus,
     },
+    {
+      label: "Policy violations",
+      value: policyViolationSummary,
+    },
   ];
   return {
     requiresManualReview,
     requiresManualReviewReason: reason ?? undefined,
     summary,
   };
+}
+
+function formatGovernanceViolation(
+  violation: DbCopilotGovernanceOutput["violations"][number]
+): string {
+  const detail = [violation.object, violation.detail].filter(Boolean).join(": ");
+  return detail ? `${violation.rule} (${detail})` : violation.rule;
 }
 
 function buildLogEntry(
@@ -1042,4 +1114,48 @@ function titleCase(value: string): string {
     .map((chunk) => (chunk ? chunk[0].toUpperCase() + chunk.slice(1) : ""))
     .join(" ")
     .trim();
+}
+
+function buildMigrationYaml(input: {
+  migrationId: string;
+  title: string;
+  transactional: boolean;
+  engine: DbCopilotDbEngine;
+  upSql: string;
+  downSql: string;
+  notes: string;
+}): string {
+  const lines: string[] = [
+    `id: ${yamlQuote(input.migrationId)}`,
+    `title: ${yamlQuote(input.title)}`,
+    `engine: ${yamlQuote(input.engine)}`,
+    `transactional: ${input.transactional ? "true" : "false"}`,
+  ];
+
+  if (input.upSql.trim()) {
+    lines.push("up: |", ...indentBlock(input.upSql));
+  } else {
+    lines.push('up: ""');
+  }
+
+  if (input.downSql.trim()) {
+    lines.push("down: |", ...indentBlock(input.downSql));
+  } else {
+    lines.push('down: ""');
+  }
+
+  if (input.notes.trim()) {
+    lines.push(`notes: ${yamlQuote(input.notes)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function indentBlock(value: string): string[] {
+  return value.replace(/\r\n/g, "\n").split("\n").map((line) => `  ${line}`);
+}
+
+function yamlQuote(value: string): string {
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }

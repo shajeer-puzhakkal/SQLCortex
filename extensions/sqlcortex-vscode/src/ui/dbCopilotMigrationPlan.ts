@@ -1,0 +1,313 @@
+import * as vscode from "vscode";
+import {
+  buildDbCopilotMigrationSqlExport,
+  evaluateDbCopilotMigrationExecutionGate,
+  type DbCopilotMigrationPlan,
+} from "../dbcopilot/migrationPlan";
+
+type DbCopilotMigrationPlanHtmlOptions = {
+  webview: vscode.Webview;
+  plan: DbCopilotMigrationPlan | null;
+};
+
+export function buildDbCopilotMigrationPlanHtml(
+  options: DbCopilotMigrationPlanHtmlOptions
+): string {
+  const { webview, plan } = options;
+  const nonce = getNonce();
+  const csp = [
+    "default-src 'none'",
+    `style-src ${webview.cspSource} 'unsafe-inline'`,
+    `script-src 'nonce-${nonce}'`,
+  ].join("; ");
+
+  const title = plan ? "Migration Plan" : "Migration Plan (No Data)";
+  const hasPlan = Boolean(plan);
+  const modeLabel = plan ? formatMode(plan.mode) : "-";
+  const envLabel = plan ? formatEnvironment(plan.environment) : "-";
+  const itemCount = plan?.items.length ?? 0;
+  const itemsHtml = buildItemsHtml(plan);
+  const impactHtml = buildImpactHtml(plan);
+  const gate = plan
+    ? evaluateDbCopilotMigrationExecutionGate(plan)
+    : { allowed: false, reasons: ["No migration plan available."] };
+  const executionNote = gate.allowed ? "" : gate.reasons[0] ?? "";
+  const executeLabel = plan ? `Execute in ${formatEnvironment(plan.environment)}` : "Execute";
+  const sqlExport = plan ? buildDbCopilotMigrationSqlExport(plan) : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="${csp}" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: var(--vscode-font-family);
+        color: var(--vscode-editor-foreground);
+        background: var(--vscode-editor-background);
+      }
+
+      .shell {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        max-width: 980px;
+      }
+
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+      }
+
+      .subtitle {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border: 1px solid var(--vscode-panel-border);
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      button {
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+      }
+
+      button.secondary {
+        background: var(--vscode-button-secondaryBackground);
+        color: var(--vscode-button-secondaryForeground);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .note {
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .card {
+        border-radius: 12px;
+        border: 1px solid var(--vscode-panel-border);
+        background: var(--vscode-editorWidget-background);
+        padding: 16px;
+      }
+
+      .section-title {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--vscode-sideBarTitle-foreground);
+        margin: 0 0 8px;
+      }
+
+      ol {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      li {
+        margin-bottom: 6px;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+
+      .summary-item {
+        border-radius: 10px;
+        border: 1px solid var(--vscode-panel-border);
+        background: var(--vscode-editorWidget-background);
+        padding: 10px 12px;
+      }
+
+      .summary-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .summary-value {
+        font-size: 13px;
+        margin-top: 6px;
+      }
+
+      .empty {
+        font-size: 12px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .sql-preview {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <h1>${escapeHtml(title)}</h1>
+        <p class="subtitle">Batch migration plan generated by DB Copilot.</p>
+        <div class="meta-row">
+          <span class="pill">Mode: ${escapeHtml(modeLabel)}</span>
+          <span class="pill">Env: ${escapeHtml(envLabel)}</span>
+          <span class="pill">Items: ${itemCount}</span>
+        </div>
+      </header>
+
+      <div class="actions">
+        <button id="exportSql" ${hasPlan ? "" : "disabled"}>Export .sql</button>
+        <button id="exportYaml" class="secondary" ${hasPlan ? "" : "disabled"}>Export .yaml</button>
+        <button id="saveMigration" class="secondary" ${hasPlan ? "" : "disabled"}>
+          Save Migration
+        </button>
+        <button id="executeMigration" ${gate.allowed ? "" : "disabled"}>
+          ${escapeHtml(executeLabel)}
+        </button>
+      </div>
+      <div class="note">${escapeHtml(executionNote)}</div>
+
+      <section class="card">
+        <h2 class="section-title">Items</h2>
+        ${itemsHtml}
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Impact Summary</h2>
+        ${impactHtml}
+      </section>
+    </div>
+
+    <pre class="sql-preview" id="sqlExport">${escapeHtml(sqlExport)}</pre>
+
+    <script nonce="${nonce}">
+      const vscode = acquireVsCodeApi();
+      const exportSql = document.getElementById("exportSql");
+      const exportYaml = document.getElementById("exportYaml");
+      const saveMigration = document.getElementById("saveMigration");
+      const executeMigration = document.getElementById("executeMigration");
+
+      if (exportSql) {
+        exportSql.addEventListener("click", () => vscode.postMessage({ type: "exportSql" }));
+      }
+      if (exportYaml) {
+        exportYaml.addEventListener("click", () => vscode.postMessage({ type: "exportYaml" }));
+      }
+      if (saveMigration) {
+        saveMigration.addEventListener("click", () => vscode.postMessage({ type: "saveMigration" }));
+      }
+      if (executeMigration) {
+        executeMigration.addEventListener("click", () =>
+          vscode.postMessage({ type: "executeMigration" })
+        );
+      }
+    </script>
+  </body>
+</html>`;
+}
+
+function buildItemsHtml(plan: DbCopilotMigrationPlan | null): string {
+  if (!plan || !plan.items.length) {
+    return `<div class="empty">No migration steps yet.</div>`;
+  }
+  const items = plan.items
+    .map((item) => `<li>${escapeHtml(item.title)}</li>`)
+    .join("");
+  return `<ol>${items}</ol>`;
+}
+
+function buildImpactHtml(plan: DbCopilotMigrationPlan | null): string {
+  if (!plan || !plan.impactSummary.length) {
+    return `<div class="empty">No impact summary available.</div>`;
+  }
+  const rows = plan.impactSummary
+    .map(
+      (item) => `<div class="summary-item">
+      <div class="summary-label">${escapeHtml(item.label)}</div>
+      <div class="summary-value">${escapeHtml(item.value)}</div>
+    </div>`
+    )
+    .join("");
+  return `<div class="summary">${rows}</div>`;
+}
+
+function formatMode(mode: string): string {
+  if (mode === "execution") {
+    return "Execution";
+  }
+  if (mode === "draft") {
+    return "Draft";
+  }
+  return "Read-Only";
+}
+
+function formatEnvironment(env: string): string {
+  if (env === "prod") {
+    return "Production";
+  }
+  if (env === "staging") {
+    return "Staging";
+  }
+  return "Development";
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getNonce(): string {
+  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let value = "";
+  for (let index = 0; index < 32; index += 1) {
+    value += possible.charAt(Math.floor(Math.random() * possible.length));
+  }
+  return value;
+}
