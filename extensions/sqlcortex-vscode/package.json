@@ -32,7 +32,8 @@
     "onCommand:dbcopilot.openMigrationPlan",
     "onCommand:dbcopilot.saveMigration",
     "onCommand:dbcopilot.executeMigration",
-    "onCommand:dbcopilot.toggleMode"
+    "onCommand:dbcopilot.toggleMode",
+    "onCommand:dbcopilot.openAgentLogs"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -165,6 +166,10 @@
       {
         "command": "dbcopilot.toggleMode",
         "title": "DB Copilot: Toggle Mode (Read-Only/Draft/Execution)"
+      },
+      {
+        "command": "dbcopilot.openAgentLogs",
+        "title": "DB Copilot: Open Agent Logs"
       }
     ],
     "configuration": {
@@ -207,6 +212,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show SQLCortex analyze actions above SQL files."
+        },
+        "sqlcortex.metering.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show AI metering placeholder in DB Copilot overview."
         }
       }
     },
@@ -378,6 +388,11 @@
         {
           "command": "sqlcortex.selectConnection",
           "when": "view == sqlcortex.databaseExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.openAgentLogs",
+          "when": "view == dbcopilot.logs",
           "group": "navigation"
         }
       ],
