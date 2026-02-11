@@ -35,6 +35,8 @@ export class DbCopilotPlaceholderProvider
   private buildHeaderNode(): DbCopilotTreeNode {
     const state = getDbCopilotState(this.deps.context);
     const children: DbCopilotTreeNode[] = [];
+    const config = vscode.workspace.getConfiguration("sqlcortex");
+    const showMeter = Boolean(config.get<boolean>("metering.enabled"));
 
     if (!state.connectionLabel) {
       children.push(
@@ -64,6 +66,14 @@ export class DbCopilotPlaceholderProvider
       children.push(
         new DbCopilotTreeNode("Schema snapshot ready.", {
           icon: "check",
+        })
+      );
+    }
+
+    if (showMeter && this.deps.viewTitle === "Overview") {
+      children.push(
+        new DbCopilotTreeNode("Today: 23 credits used / 100 remaining", {
+          icon: "dashboard",
         })
       );
     }

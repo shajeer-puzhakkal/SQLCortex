@@ -57,6 +57,7 @@ import {
   DbCopilotRiskImpactView,
   DbCopilotSqlPreviewView,
 } from "./ui/dbCopilotBottomPanel";
+import { DbCopilotAgentLogsPanel } from "./ui/dbCopilotAgentLogs";
 import { QueryInsightsView } from "./ui/queryInsightsView";
 import { ChatViewProvider } from "./ui/chatView";
 import { AgentViewProvider } from "./ui/agentView";
@@ -99,6 +100,7 @@ import {
   type DbCopilotMigrationPlan,
 } from "./dbcopilot/migrationPlan";
 import type {
+  DbCopilotAuditLogEntry,
   DbCopilotLogEntry,
   DbCopilotRiskImpactState,
   DbCopilotSqlPreviewState,
@@ -150,6 +152,7 @@ const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
   { id: "dbcopilot.executeMigration", label: "Execute Migration" },
   { id: "dbcopilot.toggleMode", label: "Toggle Mode" },
   { id: "dbcopilot.viewPolicies", label: "View Policies" },
+  { id: "dbcopilot.openAgentLogs", label: "Open Agent Logs" },
 ];
 
 const DBCOPILOT_POLICY_NOTES = [
@@ -187,6 +190,9 @@ let dbCopilotRiskImpactState: DbCopilotRiskImpactState | null = null;
 let dbCopilotOptimizationPlan: DbCopilotOptimizationPlan | null = null;
 let dbCopilotLogEntries: DbCopilotLogEntry[] = [];
 let dbCopilotLogStreamId = 0;
+let dbCopilotAuditLogEntries: DbCopilotAuditLogEntry[] = [];
+let dbCopilotAgentLogsPanel: DbCopilotAgentLogsPanel | undefined;
+let dbCopilotAuditLogSessionId: string | null = null;
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -616,6 +622,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         }
         dbCopilotOptimizationPlan = plan;
+        setDbCopilotAuditLogs(plan);
         if (plan.orchestrator.missing_context.length) {
           setDbCopilotRiskImpactState(context, null);
           setDbCopilotSqlPreviewState(context, null);
@@ -725,6 +732,10 @@ export function activate(context: vscode.ExtensionContext) {
       },
       "dbcopilot.viewPolicies": async () => {
         await openDbCopilotPolicies();
+      },
+      "dbcopilot.openAgentLogs": async () => {
+        dbCopilotAgentLogsPanel = DbCopilotAgentLogsPanel.show();
+        dbCopilotAgentLogsPanel.setEntries(dbCopilotAuditLogEntries);
       },
     };
 
@@ -2977,6 +2988,49 @@ function streamDbCopilotLogs(entries: DbCopilotLogEntry[]): void {
       appendDbCopilotLogEntry(entry);
     }, delay);
   });
+}
+
+function setDbCopilotAuditLogs(plan: DbCopilotOptimizationPlan): void {
+  dbCopilotAuditLogEntries = plan.auditLogs ?? [];
+  dbCopilotAuditLogSessionId = plan.logSessionId ?? null;
+  dbCopilotAgentLogsPanel?.setEntries(dbCopilotAuditLogEntries);
+  void persistDbCopilotAuditLogs(
+    dbCopilotAuditLogSessionId,
+    dbCopilotAuditLogEntries
+  );
+}
+
+async function persistDbCopilotAuditLogs(
+  sessionId: string | null,
+  entries: DbCopilotAuditLogEntry[]
+): Promise<void> {
+  if (!sessionId || !entries.length) {
+    return;
+  }
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceFolder) {
+      return;
+    }
+    const date = resolveLogDate(entries[0]?.timestamp);
+    const logRoot = vscode.Uri.joinPath(workspaceFolder, ".sqlcortex", "logs", date);
+    await vscode.workspace.fs.createDirectory(logRoot);
+    const logUri = vscode.Uri.joinPath(logRoot, `${sessionId}.jsonl`);
+    const content = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+    await writeTextFile(logUri, content);
+  } catch {
+    // Ignore persistence errors to avoid blocking UI flows.
+  }
+}
+
+function resolveLogDate(timestamp: string | undefined): string {
+  if (timestamp) {
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toISOString().slice(0, 10);
+    }
+  }
+  return new Date().toISOString().slice(0, 10);
 }
 
 function buildDbCopilotLogEntry(

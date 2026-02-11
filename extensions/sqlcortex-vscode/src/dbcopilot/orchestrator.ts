@@ -1,5 +1,7 @@
 import type { DbCopilotSchemaSnapshot } from "./schemaSnapshot";
+import { createHash } from "crypto";
 import type {
+  DbCopilotAuditLogEntry,
   DbCopilotLogEntry,
   DbCopilotLogSource,
   DbCopilotRiskImpactState,
@@ -62,6 +64,7 @@ export type DbCopilotOrchestratorInput = {
   query_text?: string | null;
   explain_plan?: string | null;
   now?: Date;
+  log_session_id?: string;
 };
 
 export type DbCopilotSchemaAnalystOutput = {
@@ -139,6 +142,8 @@ export type DbCopilotOptimizationPlan = {
     explanation_markdown: string | null;
   };
   logs: DbCopilotLogEntry[];
+  auditLogs: DbCopilotAuditLogEntry[];
+  logSessionId: string;
 };
 
 export const DB_COPILOT_AGENT_MATRIX: Array<{
@@ -417,6 +422,8 @@ export function buildDbCopilotOptimizationPlan(
 ): DbCopilotOptimizationPlan {
   const intent = detectDbCopilotIntent(input.user_request);
   const missing = resolveMissingContext(intent, input);
+  const timestampBase = input.now ?? new Date();
+  const logSessionId = input.log_session_id ?? createLogSessionId(timestampBase);
   const plan = buildPlan(intent, input);
   const orchestrator: DbCopilotOrchestratorPlan = {
     intent,
@@ -427,6 +434,12 @@ export function buildDbCopilotOptimizationPlan(
   };
 
   if (missing.length) {
+    const auditLogs = buildMissingContextAuditLogs(
+      intent,
+      input,
+      missing,
+      logSessionId
+    );
     return {
       orchestrator,
       outputs: {},
@@ -436,12 +449,14 @@ export function buildDbCopilotOptimizationPlan(
         explanation_markdown: null,
       },
       logs: buildMissingContextLogs(intent, input, missing),
+      auditLogs,
+      logSessionId,
     };
   }
 
   const outputs: DbCopilotAgentOutputs = {};
   const logs: DbCopilotLogEntry[] = [];
-  const timestampBase = input.now ?? new Date();
+  const auditLogs: DbCopilotAuditLogEntry[] = [];
   logs.push(
     buildLogEntry(
       timestampBase,
@@ -450,12 +465,33 @@ export function buildDbCopilotOptimizationPlan(
       `Detected intent ${intent}.`
     )
   );
+  auditLogs.push(
+    buildAuditLogEntry({
+      timestamp: new Date(),
+      sessionId: logSessionId,
+      agent: "orchestrator",
+      message: `Detected intent ${intent}.`,
+      input: {
+        user_request: input.user_request,
+        db_engine: input.db_engine,
+        connection_label: input.connection_label,
+        execution_mode: input.execution_mode,
+        policies: input.policies,
+        query_text: input.query_text ?? null,
+        explain_plan: input.explain_plan ?? null,
+      },
+      output: { intent },
+      durationMs: 0,
+    })
+  );
 
   for (const step of plan) {
     switch (step.agent) {
       case "schema_analyst": {
+        const startedAt = Date.now();
         const result = runSchemaAnalyst(input.schema_snapshot);
         outputs.schema_analyst = result;
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -464,11 +500,24 @@ export function buildDbCopilotOptimizationPlan(
             `Schema snapshot: ${result.table_count} tables, ${result.foreign_key_count} FKs.`
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "schema_analyst",
+            message: "Schema analysis completed.",
+            input: { schema_snapshot: input.schema_snapshot },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "performance": {
+        const startedAt = Date.now();
         const result = runPerformance(input);
         outputs.performance = result;
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -477,11 +526,28 @@ export function buildDbCopilotOptimizationPlan(
             `Identified ${result.index_recommendations.length} index candidate(s).`
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "performance",
+            message: "Performance analysis completed.",
+            input: {
+              query_text: input.query_text ?? null,
+              explain_plan: input.explain_plan ?? null,
+              db_engine: input.db_engine,
+            },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "governance": {
+        const startedAt = Date.now();
         const result = runGovernance(input, outputs);
         outputs.governance = result;
+        const durationMs = Date.now() - startedAt;
         const status = result.compliant ? "Compliant" : "Violations detected";
         logs.push(
           buildLogEntry(
@@ -491,11 +557,30 @@ export function buildDbCopilotOptimizationPlan(
             `Policy check: ${status}.`
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "governance",
+            message: "Governance evaluation completed.",
+            input: {
+              policies: input.policies,
+              proposals: {
+                indexes: outputs.performance?.sql_preview?.create_indexes ?? [],
+                migration_id: outputs.ddl?.migration_id ?? null,
+              },
+            },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "ddl": {
+        const startedAt = Date.now();
         const result = runDdl(intent, input, outputs);
         outputs.ddl = result;
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -504,11 +589,29 @@ export function buildDbCopilotOptimizationPlan(
             `Generated migration ${result.migration_id}.`
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "ddl",
+            message: "DDL migration generated.",
+            input: {
+              intent,
+              db_engine: input.db_engine,
+              policies: input.policies,
+              performance: outputs.performance?.sql_preview ?? null,
+            },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "risk": {
+        const startedAt = Date.now();
         const result = runRisk(input, outputs);
         outputs.risk = result;
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -517,10 +620,27 @@ export function buildDbCopilotOptimizationPlan(
             `Risk gate: ${result.final_gate}.`
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "risk",
+            message: "Risk assessment completed.",
+            input: {
+              env: input.policies.env,
+              ddl_preview: outputs.ddl?.up_sql ?? null,
+              governance: outputs.governance ?? null,
+            },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "procedure": {
+        const startedAt = Date.now();
         outputs.procedure = { notes: "Procedure analysis placeholder." };
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -529,11 +649,27 @@ export function buildDbCopilotOptimizationPlan(
             "Reviewed stored procedure/function."
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "procedure",
+            message: "Procedure review completed.",
+            input: {
+              db_engine: input.db_engine,
+              request: input.user_request,
+            },
+            output: outputs.procedure,
+            durationMs,
+          })
+        );
         break;
       }
       case "explainability": {
+        const startedAt = Date.now();
         const result = runExplainability(input, outputs);
         outputs.explainability = result;
+        const durationMs = Date.now() - startedAt;
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -542,9 +678,26 @@ export function buildDbCopilotOptimizationPlan(
             "Generated developer-facing summary."
           )
         );
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "explainability",
+            message: "Explainability summary generated.",
+            input: {
+              audience: "app developer",
+              db_engine: input.db_engine,
+              risk: outputs.risk ?? null,
+              governance: outputs.governance ?? null,
+            },
+            output: result,
+            durationMs,
+          })
+        );
         break;
       }
       case "orchestrator": {
+        const startedAt = Date.now();
         logs.push(
           buildLogEntry(
             timestampBase,
@@ -552,6 +705,25 @@ export function buildDbCopilotOptimizationPlan(
             "orchestrator",
             "Merged agent outputs into Optimization Plan."
           )
+        );
+        const durationMs = Date.now() - startedAt;
+        auditLogs.push(
+          buildAuditLogEntry({
+            timestamp: new Date(),
+            sessionId: logSessionId,
+            agent: "orchestrator",
+            message: "Merged agent outputs.",
+            input: {
+              intent,
+              outputs_present: Object.keys(outputs),
+            },
+            output: {
+              sql_preview: Boolean(outputs.ddl),
+              risk_impact: Boolean(outputs.risk),
+              explanation: Boolean(outputs.explainability),
+            },
+            durationMs,
+          })
         );
         break;
       }
@@ -564,6 +736,8 @@ export function buildDbCopilotOptimizationPlan(
     outputs,
     merged,
     logs,
+    auditLogs,
+    logSessionId,
   };
 }
 
@@ -1097,6 +1271,268 @@ function formatTimestamp(value: Date): string {
   const minutes = value.getMinutes().toString().padStart(2, "0");
   const seconds = value.getSeconds().toString().padStart(2, "0");
   return `${hours}:${minutes}:${seconds}`;
+}
+
+function buildMissingContextAuditLogs(
+  intent: DbCopilotIntent,
+  input: DbCopilotOrchestratorInput,
+  missing: string[],
+  sessionId: string
+): DbCopilotAuditLogEntry[] {
+  const timestamp = new Date();
+  return [
+    buildAuditLogEntry({
+      timestamp,
+      sessionId,
+      agent: "orchestrator",
+      message: `Detected intent ${intent}.`,
+      input: {
+        user_request: input.user_request,
+        db_engine: input.db_engine,
+        connection_label: input.connection_label,
+        execution_mode: input.execution_mode,
+        policies: input.policies,
+        query_text: input.query_text ?? null,
+        explain_plan: input.explain_plan ?? null,
+      },
+      output: { intent },
+      durationMs: 0,
+    }),
+    buildAuditLogEntry({
+      timestamp,
+      sessionId,
+      agent: "orchestrator",
+      message: `Missing context: ${missing.join(", ")}.`,
+      input: { missing_context: missing },
+      output: { blocked: true },
+      durationMs: 0,
+    }),
+  ];
+}
+
+function buildAuditLogEntry(input: {
+  timestamp: Date;
+  sessionId: string;
+  agent: DbCopilotLogSource;
+  message: string;
+  input: unknown;
+  output: unknown;
+  durationMs: number;
+}): DbCopilotAuditLogEntry {
+  const inputRedacted = redactLogPayload(input.input);
+  const outputRedacted = redactLogPayload(input.output);
+  const inputHash = hashPayload(inputRedacted);
+  const outputHash = hashPayload(outputRedacted);
+  const tokensIn = estimateTokens(inputRedacted);
+  const tokensOut = estimateTokens(outputRedacted);
+  const totalTokens = tokensIn + tokensOut;
+  const creditsEstimate = estimateCreditsFromTokens(totalTokens);
+
+  return {
+    id: `${input.timestamp.toISOString()}-${input.agent}-${input.sessionId}`,
+    timestamp: input.timestamp.toISOString(),
+    agent: input.agent,
+    message: input.message,
+    input_redacted: inputRedacted,
+    output_redacted: outputRedacted,
+    input_hash: inputHash,
+    output_hash: outputHash,
+    tokens_estimate: {
+      input: tokensIn,
+      output: tokensOut,
+      total: totalTokens,
+    },
+    credits_estimate: creditsEstimate,
+    duration_ms: input.durationMs,
+    meter: {
+      ai_tokens_in: tokensIn,
+      ai_tokens_out: tokensOut,
+      ai_cost_estimate_usd: 0,
+      credits_used: creditsEstimate,
+    },
+    session_id: input.sessionId,
+  };
+}
+
+function createLogSessionId(timestamp: Date): string {
+  const datePart = timestamp.toISOString().slice(0, 10).replace(/-/g, "");
+  const random = Math.random().toString(36).slice(2, 10);
+  return `dbcopilot-${datePart}-${timestamp.getTime()}-${random}`;
+}
+
+function redactLogPayload(value: unknown, path: string[] = []): unknown {
+  if (value === null || typeof value === "undefined") {
+    return value;
+  }
+
+  const key = path[path.length - 1] ?? "";
+
+  if (typeof value === "string") {
+    if (shouldRedactKey(key)) {
+      return buildRedactedSummary(value);
+    }
+    if (value.length > 180) {
+      return {
+        truncated: true,
+        length: value.length,
+        preview: value.slice(0, 140),
+        hash: hashPayload(value),
+      };
+    }
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (Array.isArray(value)) {
+    if (shouldRedactKey(key)) {
+      return buildRedactedSummary(value);
+    }
+    return value.map((item, index) => redactLogPayload(item, [...path, `${index}`]));
+  }
+
+  if (typeof value === "object") {
+    if (isSchemaSnapshot(value)) {
+      return summarizeSchemaSnapshot(value);
+    }
+    if (shouldRedactKey(key)) {
+      return buildRedactedSummary(value);
+    }
+    const record: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(
+      value as Record<string, unknown>
+    )) {
+      record[entryKey] = redactLogPayload(entryValue, [...path, entryKey]);
+    }
+    return record;
+  }
+
+  return value;
+}
+
+function shouldRedactKey(key: string): boolean {
+  if (!key) {
+    return false;
+  }
+  const normalized = key.toLowerCase();
+  return (
+    normalized.includes("sql") ||
+    normalized.includes("query") ||
+    normalized.includes("plan") ||
+    normalized.includes("schema") ||
+    normalized.includes("connection") ||
+    normalized.includes("statement") ||
+    normalized.includes("migration") ||
+    normalized.includes("explain") ||
+    normalized.includes("request") ||
+    normalized.includes("ddl")
+  );
+}
+
+function buildRedactedSummary(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    return {
+      redacted: true,
+      length: value.length,
+      hash: hashPayload(value),
+    };
+  }
+  if (Array.isArray(value)) {
+    return {
+      redacted: true,
+      count: value.length,
+      hash: hashPayload(value),
+    };
+  }
+  if (value && typeof value === "object") {
+    return {
+      redacted: true,
+      keys: Object.keys(value as Record<string, unknown>).length,
+      hash: hashPayload(value),
+    };
+  }
+  return { redacted: true, hash: hashPayload(value) };
+}
+
+function isSchemaSnapshot(value: unknown): value is DbCopilotSchemaSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as DbCopilotSchemaSnapshot;
+  return typeof record.schema === "string" && Array.isArray(record.tables);
+}
+
+function summarizeSchemaSnapshot(snapshot: DbCopilotSchemaSnapshot): Record<string, unknown> {
+  const tableCount = snapshot.tables.length;
+  let columnCount = 0;
+  let foreignKeyCount = 0;
+  snapshot.tables.forEach((table) => {
+    columnCount += table.columns.length;
+    foreignKeyCount += table.foreignKeys.length;
+  });
+  return {
+    redacted: true,
+    schema: snapshot.schema,
+    tables: tableCount,
+    columns: columnCount,
+    foreign_keys: foreignKeyCount,
+    hash: hashPayload(snapshot),
+  };
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value === "undefined") {
+    return "null";
+  }
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Date) {
+    return JSON.stringify(value.toISOString());
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const entries = keys.map(
+      (key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`
+    );
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashPayload(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value), "utf8").digest("hex");
+}
+
+function estimateTokens(value: unknown): number {
+  const text = stableStringify(value);
+  if (!text) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil(text.length / 4));
+}
+
+function estimateCreditsFromTokens(tokens: number): number {
+  if (tokens <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.round(tokens / 200));
 }
 
 function extractTableName(request: string): string | null {
