@@ -23,6 +23,8 @@
     "onView:dbcopilot.riskImpact",
     "onView:dbcopilot.logs",
     "onCommand:dbcopilot.connectDatabase",
+    "onCommand:dbcopilot.disconnectDatabase",
+    "onCommand:dbcopilot.refreshSchema",
     "onCommand:dbcopilot.captureSchemaSnapshot",
     "onCommand:dbcopilot.optimizeCurrentQuery",
     "onCommand:dbcopilot.analyzeSchemaHealth",
@@ -126,6 +128,14 @@
       {
         "command": "dbcopilot.connectDatabase",
         "title": "DB Copilot: Connect to Database"
+      },
+      {
+        "command": "dbcopilot.disconnectDatabase",
+        "title": "DB Copilot: Disconnect Database"
+      },
+      {
+        "command": "dbcopilot.refreshSchema",
+        "title": "DB Copilot: Refresh Schema"
       },
       {
         "command": "dbcopilot.captureSchemaSnapshot",
@@ -394,6 +404,11 @@
           "command": "dbcopilot.openAgentLogs",
           "when": "view == dbcopilot.logs",
           "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.refreshSchema",
+          "when": "view == dbcopilot.schema",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -452,7 +467,8 @@
   },
   "dependencies": {
     "dagre": "^0.8.5",
-    "mermaid": "^10.9.1"
+    "mermaid": "^10.9.1",
+    "pg": "^8.11.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.19",

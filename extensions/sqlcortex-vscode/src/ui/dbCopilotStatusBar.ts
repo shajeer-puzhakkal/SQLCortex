@@ -40,9 +40,15 @@ export function updateDbCopilotStatusBar(
 ): void {
   const { db, mode, policies } = items;
 
-  const connectionLabel = state.connectionLabel ?? "Connect";
-  db.text = `[ DB: ${connectionLabel} ]`;
-  db.tooltip = "Select a database connection";
+  const displayLabel = state.connectionDisplayLabel ?? state.connectionLabel;
+  if (displayLabel) {
+    const modeLabel = state.connectionReadOnly ? "Read-Only" : "Write";
+    db.text = `$(circle-filled) Connected: ${displayLabel} (Mode: ${modeLabel})`;
+    db.tooltip = "Manage database connection";
+  } else {
+    db.text = "$(circle-outline) Disconnected";
+    db.tooltip = "Connect to a database";
+  }
   db.show();
 
   mode.text = `[ Mode: ${MODE_LABELS[state.mode]} ]`;

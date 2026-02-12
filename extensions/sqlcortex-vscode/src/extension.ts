@@ -115,6 +115,13 @@ import {
   setDbCopilotSchemaSnapshots,
   type DbCopilotMode,
 } from "./state/dbCopilotState";
+import { ConnectionManager } from "./core/connection/ConnectionManager";
+import { ConnectionProfileStore } from "./core/connection/ConnectionProfileStore";
+import type { ConnectionProfile, ConnectionState } from "./core/connection/ConnectionTypes";
+import { LogBus } from "./core/logging/LogBus";
+import { createConnectDatabaseCommand } from "./commands/connectDatabase";
+import { createDisconnectDatabaseCommand } from "./commands/disconnectDatabase";
+import { createRefreshSchemaCommand } from "./commands/refreshSchema";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -141,6 +148,8 @@ const COMMANDS: Array<{ id: string; label: string }> = [
 
 const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
   { id: "dbcopilot.connectDatabase", label: "Connect to Database" },
+  { id: "dbcopilot.disconnectDatabase", label: "Disconnect Database" },
+  { id: "dbcopilot.refreshSchema", label: "Refresh Schema" },
   { id: "dbcopilot.captureSchemaSnapshot", label: "Capture Schema Snapshot" },
   { id: "dbcopilot.optimizeCurrentQuery", label: "Optimize Current Query" },
   { id: "dbcopilot.analyzeSchemaHealth", label: "Analyze Schema Health" },
@@ -251,6 +260,18 @@ export function activate(context: vscode.ExtensionContext) {
     dbCopilotStatusBars.mode,
     dbCopilotStatusBars.policies
   );
+  const logBus = new LogBus();
+  const connectionProfileStore = new ConnectionProfileStore(context);
+  const connectionManager = new ConnectionManager({
+    profileStore: connectionProfileStore,
+    logBus,
+  });
+  context.subscriptions.push(logBus, connectionManager);
+  context.subscriptions.push(
+    logBus.onDidLog((entry) => {
+      appendDbCopilotLogEntry(entry);
+    })
+  );
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration(`sqlcortex.${DIAGNOSTICS_ENABLED_SETTING}`)) {
@@ -316,6 +337,16 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   ];
   context.subscriptions.push(...dbCopilotViews);
+  context.subscriptions.push(
+    connectionManager.onDidChangeConnectionState((state) => {
+      void syncDbCopilotConnectionState(
+        context,
+        state,
+        dbCopilotStatusBars,
+        dbCopilotProviders
+      );
+    })
+  );
 
   queryInsightsView.setChatHandler((input) =>
     handleQueryInsightsChat(
@@ -339,7 +370,12 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   void refreshContext(context, tokenStore, statusBars, sidebarProvider);
-  void refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+  void syncDbCopilotConnectionState(
+    context,
+    { status: "disconnected", profile: null },
+    dbCopilotStatusBars,
+    dbCopilotProviders
+  );
 
   const dbExplorerProvider = new DbExplorerProvider({
     context,
@@ -546,20 +582,19 @@ export function activate(context: vscode.ExtensionContext) {
 
   const dbCopilotHandlers: Record<string, (...args: unknown[]) => Thenable<unknown>> =
     {
-      "dbcopilot.connectDatabase": async () => {
-        const selection = await promptDbCopilotConnection();
-        if (!selection) {
-          return;
-        }
-        await setDbCopilotConnection(context, selection.label);
-        await setDbCopilotSchemaSnapshot(context, false);
-        await setDbCopilotSchemaSnapshots(context, null);
-        resetDbCopilotBottomPanel();
-        await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
-        vscode.window.showInformationMessage(
-          `DB Copilot: Connected to ${selection.label}.`
-        );
-      },
+      "dbcopilot.connectDatabase": createConnectDatabaseCommand({
+        connectionManager,
+        profileStore: connectionProfileStore,
+        logBus,
+      }),
+      "dbcopilot.disconnectDatabase": createDisconnectDatabaseCommand({
+        connectionManager,
+        logBus,
+      }),
+      "dbcopilot.refreshSchema": createRefreshSchemaCommand({
+        connectionManager,
+        logBus,
+      }),
       "dbcopilot.captureSchemaSnapshot": async () => {
         if (!(await ensureDbCopilotConnected(context))) {
           return;
@@ -2882,6 +2917,38 @@ async function refreshDbCopilotUI(
   await vscode.commands.executeCommand("setContext", "dbcopilot.mode", state.mode);
 }
 
+async function syncDbCopilotConnectionState(
+  context: vscode.ExtensionContext,
+  state: ConnectionState,
+  statusBars: DbCopilotStatusBarItems,
+  providers: DbCopilotRefreshable[]
+): Promise<void> {
+  if (state.status === "connected" && state.profile) {
+    const labels = buildDbCopilotConnectionLabels(state.profile);
+    await setDbCopilotConnection(
+      context,
+      labels.connectionLabel,
+      labels.displayLabel,
+      state.profile.readOnly
+    );
+  } else {
+    await setDbCopilotConnection(context, null, null, null);
+  }
+  await setDbCopilotSchemaSnapshot(context, false);
+  await setDbCopilotSchemaSnapshots(context, null);
+  resetDbCopilotBottomPanel();
+  await refreshDbCopilotUI(context, statusBars, providers);
+}
+
+function buildDbCopilotConnectionLabels(profile: ConnectionProfile): {
+  connectionLabel: string;
+  displayLabel: string;
+} {
+  const displayLabel = `${profile.user}@${profile.host}:${profile.port}/${profile.database}`;
+  const connectionLabel = `postgres:${profile.name}@${profile.host}:${profile.port}/${profile.database}`;
+  return { connectionLabel, displayLabel };
+}
+
 function resetDbCopilotBottomPanel(): void {
   dbCopilotSqlPreviewState = null;
   dbCopilotRiskImpactState = null;
@@ -3091,33 +3158,6 @@ function formatDbCopilotEnvironment(env: DbCopilotMigrationPlan["environment"]):
     default:
       return "Development";
   }
-}
-
-async function promptDbCopilotConnection(): Promise<vscode.QuickPickItem | null> {
-  const options: vscode.QuickPickItem[] = [
-    {
-      label: "postgres@staging",
-      description: "Read-only",
-      detail: "Staging cluster",
-    },
-    {
-      label: "postgres@prod",
-      description: "Restricted",
-      detail: "Production cluster",
-    },
-    {
-      label: "sqlite@local",
-      description: "Local file",
-      detail: "Local development",
-    },
-  ];
-
-  const selection = await vscode.window.showQuickPick(options, {
-    placeHolder: "Select a database connection",
-    ignoreFocusOut: true,
-  });
-
-  return selection ?? null;
 }
 
 async function ensureDbCopilotConnected(
