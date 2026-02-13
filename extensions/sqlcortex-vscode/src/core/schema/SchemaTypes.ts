@@ -116,7 +116,7 @@ export function parseSchemaRefreshResponse(payload: unknown): SchemaRefreshRespo
   const record = asRecord(payload);
 
   return {
-    ok: record ? record.ok !== false : snapshot !== null,
+    ok: record ? booleanOrDefault(record.ok, snapshot !== null) : snapshot !== null,
     status: record ? stringOrNull(record.status) : null,
     refreshedAt: record
       ? stringOrNull(record.refreshedAt ?? record.capturedAt ?? record.generatedAt)
@@ -178,7 +178,7 @@ function parseColumn(value: unknown): SchemaSnapshotColumn {
   return {
     name: requiredString(record.name, "Column name is missing."),
     dataType: requiredString(record.dataType ?? record.type, "Column data type is missing."),
-    nullable: Boolean(record.nullable),
+    nullable: booleanOrDefault(record.nullable, false),
     default: stringOrNull(record.default),
   };
 }
@@ -229,8 +229,8 @@ function parseIndex(value: unknown): SchemaSnapshotIndex {
   return {
     name: requiredString(record.name, "Index name is missing."),
     columns: stringArray(record.columns),
-    unique: Boolean(record.unique),
-    primary: Boolean(record.primary),
+    unique: booleanOrDefault(record.unique, false),
+    primary: booleanOrDefault(record.primary, false),
     method: stringOrNull(record.method),
     predicate: stringOrNull(record.predicate),
   };
@@ -332,4 +332,23 @@ function stringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function booleanOrDefault(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "t" || normalized === "yes" || normalized === "y") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "f" || normalized === "no" || normalized === "n") {
+      return false;
+    }
+  }
+  return fallback;
 }
