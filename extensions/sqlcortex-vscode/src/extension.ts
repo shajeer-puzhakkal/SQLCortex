@@ -122,6 +122,15 @@ import { LogBus } from "./core/logging/LogBus";
 import { createConnectDatabaseCommand } from "./commands/connectDatabase";
 import { createDisconnectDatabaseCommand } from "./commands/disconnectDatabase";
 import { createRefreshSchemaCommand } from "./commands/refreshSchema";
+import { ApiSessionManager } from "./core/auth/ApiSessionManager";
+import { TargetStore, type SelectedTarget } from "./core/target/TargetStore";
+import { createLoginWithTokenCommand } from "./commands/loginWithToken";
+import { createLogoutCommand } from "./commands/logout";
+import { createSelectTargetCommand } from "./commands/selectTarget";
+import {
+  createTargetStatusBarItem,
+  updateTargetStatusBar,
+} from "./ui/statusbar/TargetStatusBar";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -147,6 +156,9 @@ const COMMANDS: Array<{ id: string; label: string }> = [
 ];
 
 const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
+  { id: "dbcopilot.loginWithToken", label: "Login with Token" },
+  { id: "dbcopilot.logout", label: "Logout" },
+  { id: "dbcopilot.selectTarget", label: "Select Target" },
   { id: "dbcopilot.connectDatabase", label: "Connect to Database" },
   { id: "dbcopilot.disconnectDatabase", label: "Disconnect Database" },
   { id: "dbcopilot.refreshSchema", label: "Refresh Schema" },
@@ -250,6 +262,7 @@ export function activate(context: vscode.ExtensionContext) {
   const tokenStore = createTokenStore(context.secrets);
   const statusBars = createStatusBarItems();
   const dbCopilotStatusBars = createDbCopilotStatusBarItems();
+  const targetStatusBar = createTargetStatusBarItem();
   context.subscriptions.push(
     statusBars.workspace,
     statusBars.connection,
@@ -260,7 +273,14 @@ export function activate(context: vscode.ExtensionContext) {
     dbCopilotStatusBars.mode,
     dbCopilotStatusBars.policies
   );
+  context.subscriptions.push(targetStatusBar);
   const logBus = new LogBus();
+  const targetStore = new TargetStore(context);
+  const sessionManager = new ApiSessionManager({
+    context,
+    resolveBaseUrl: () => resolveApiBaseUrlFromState(context),
+    clientHeader: clientHeader(context),
+  });
   const connectionProfileStore = new ConnectionProfileStore(context);
   const connectionManager = new ConnectionManager({
     profileStore: connectionProfileStore,
@@ -376,6 +396,7 @@ export function activate(context: vscode.ExtensionContext) {
     dbCopilotStatusBars,
     dbCopilotProviders
   );
+  void syncDbCopilotTargetStatusBar(sessionManager, targetStore, targetStatusBar);
 
   const dbExplorerProvider = new DbExplorerProvider({
     context,
@@ -391,6 +412,18 @@ export function activate(context: vscode.ExtensionContext) {
   });
   dbExplorerProvider.attachView(dbExplorerView);
   context.subscriptions.push(dbExplorerView);
+  void restoreDbCopilotTargetIfAvailable(
+    context,
+    sessionManager,
+    targetStore,
+    tokenStore,
+    statusBars,
+    sidebarProvider,
+    dbExplorerProvider,
+    dbCopilotStatusBars,
+    dbCopilotProviders,
+    targetStatusBar
+  );
 
   const chatViewProvider = new ChatViewProvider(context);
   context.subscriptions.push(
@@ -582,6 +615,48 @@ export function activate(context: vscode.ExtensionContext) {
 
   const dbCopilotHandlers: Record<string, (...args: unknown[]) => Thenable<unknown>> =
     {
+      "dbcopilot.loginWithToken": createLoginWithTokenCommand({
+        sessionManager,
+        logBus,
+        onDidLogin: async () => {
+          await syncDbCopilotTargetStatusBar(sessionManager, targetStore, targetStatusBar);
+        },
+      }),
+      "dbcopilot.logout": createLogoutCommand({
+        sessionManager,
+        targetStore,
+        logBus,
+        onDidLogout: async () => {
+          await clearWorkspaceContext(context);
+          await setDbCopilotConnection(context, null, null, null);
+          await setDbCopilotSchemaSnapshot(context, false);
+          await setDbCopilotSchemaSnapshots(context, null);
+          resetDbCopilotBottomPanel();
+          dbExplorerProvider.clearCache();
+          dbExplorerProvider.refresh();
+          await refreshContext(context, tokenStore, statusBars, sidebarProvider);
+          await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+          await syncDbCopilotTargetStatusBar(sessionManager, targetStore, targetStatusBar);
+        },
+      }),
+      "dbcopilot.selectTarget": createSelectTargetCommand({
+        sessionManager,
+        targetStore,
+        logBus,
+        onTargetSelected: async (target) => {
+          await applySelectedTarget(
+            context,
+            target,
+            tokenStore,
+            statusBars,
+            sidebarProvider,
+            dbExplorerProvider,
+            dbCopilotStatusBars,
+            dbCopilotProviders
+          );
+          await syncDbCopilotTargetStatusBar(sessionManager, targetStore, targetStatusBar);
+        },
+      }),
       "dbcopilot.connectDatabase": createConnectDatabaseCommand({
         connectionManager,
         profileStore: connectionProfileStore,
@@ -2891,6 +2966,92 @@ type DbCopilotPanelSpec = {
 
 const dbCopilotPanels = new Map<string, vscode.WebviewPanel>();
 
+function resolveApiBaseUrlFromState(context: vscode.ExtensionContext): string | null {
+  const stored = context.globalState.get<string>(API_BASE_URL_KEY);
+  if (stored && stored.trim()) {
+    return stored.trim();
+  }
+  return DEFAULT_API_BASE_URL;
+}
+
+function buildDbCopilotTargetLabel(target: SelectedTarget): string {
+  return `${target.orgName} / ${target.projectName} / ${target.envName}`;
+}
+
+async function syncDbCopilotTargetStatusBar(
+  sessionManager: ApiSessionManager,
+  targetStore: TargetStore,
+  item: vscode.StatusBarItem
+): Promise<void> {
+  const token = await sessionManager.getToken();
+  const target = targetStore.getSelectedTarget();
+  updateTargetStatusBar(item, {
+    loggedIn: Boolean(token),
+    target,
+  });
+}
+
+async function applySelectedTarget(
+  context: vscode.ExtensionContext,
+  target: SelectedTarget,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbExplorerProvider: DbExplorerProvider,
+  dbCopilotStatusBars: DbCopilotStatusBarItems,
+  dbCopilotProviders: DbCopilotRefreshable[]
+): Promise<void> {
+  await setActiveOrg(context, target.orgId, target.orgName);
+  await setActiveProject(context, target.projectId, target.projectName);
+  await setActiveConnection(context, target.envId, target.envName);
+  await setDbCopilotConnection(
+    context,
+    buildDbCopilotTargetLabel(target),
+    buildDbCopilotTargetLabel(target),
+    true
+  );
+  await setDbCopilotSchemaSnapshot(context, false);
+  await setDbCopilotSchemaSnapshots(context, null);
+  resetDbCopilotBottomPanel();
+  dbExplorerProvider.clearCache();
+  dbExplorerProvider.refresh();
+  await refreshContext(context, tokenStore, statusBars, sidebarProvider);
+  await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+}
+
+async function restoreDbCopilotTargetIfAvailable(
+  context: vscode.ExtensionContext,
+  sessionManager: ApiSessionManager,
+  targetStore: TargetStore,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbExplorerProvider: DbExplorerProvider,
+  dbCopilotStatusBars: DbCopilotStatusBarItems,
+  dbCopilotProviders: DbCopilotRefreshable[],
+  targetStatusBar: vscode.StatusBarItem
+): Promise<void> {
+  const token = await sessionManager.getToken();
+  if (!token) {
+    return;
+  }
+  const target = targetStore.getSelectedTarget();
+  if (!target) {
+    return;
+  }
+  await applySelectedTarget(
+    context,
+    target,
+    tokenStore,
+    statusBars,
+    sidebarProvider,
+    dbExplorerProvider,
+    dbCopilotStatusBars,
+    dbCopilotProviders
+  );
+  await syncDbCopilotTargetStatusBar(sessionManager, targetStore, targetStatusBar);
+}
+
 async function refreshDbCopilotUI(
   context: vscode.ExtensionContext,
   statusBars: DbCopilotStatusBarItems,
@@ -3168,11 +3329,11 @@ async function ensureDbCopilotConnected(
     return true;
   }
   const choice = await vscode.window.showWarningMessage(
-    "DB Copilot: Connect to a database to continue.",
-    "Connect to Database"
+    "DB Copilot: Select a target to continue.",
+    "Select Target"
   );
-  if (choice === "Connect to Database") {
-    await vscode.commands.executeCommand("dbcopilot.connectDatabase");
+  if (choice === "Select Target") {
+    await vscode.commands.executeCommand("dbcopilot.selectTarget");
   }
   return false;
 }

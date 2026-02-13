@@ -27,7 +27,7 @@ export function createDbCopilotStatusBarItems(): DbCopilotStatusBarItems {
     94
   );
 
-  db.command = "dbcopilot.connectDatabase";
+  db.command = "dbcopilot.selectTarget";
   mode.command = "dbcopilot.toggleMode";
   policies.command = "dbcopilot.viewPolicies";
 
@@ -44,10 +44,10 @@ export function updateDbCopilotStatusBar(
   if (displayLabel) {
     const modeLabel = state.connectionReadOnly ? "Read-Only" : "Write";
     db.text = `$(circle-filled) Connected: ${displayLabel} (Mode: ${modeLabel})`;
-    db.tooltip = "Manage database connection";
+    db.tooltip = "Manage DB Copilot target";
   } else {
-    db.text = "$(circle-outline) Disconnected";
-    db.tooltip = "Connect to a database";
+    db.text = "$(circle-outline) Target not selected";
+    db.tooltip = "Select Org / Project / Environment target";
   }
   db.show();
 

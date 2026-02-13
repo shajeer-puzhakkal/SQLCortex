@@ -40,14 +40,14 @@ export class DbCopilotPlaceholderProvider
 
     if (!state.connectionLabel) {
       children.push(
-        new DbCopilotTreeNode("Connect to a database to get started.", {
+        new DbCopilotTreeNode("Login and select a target to get started.", {
           icon: "plug",
         })
       );
       children.push(
-        new DbCopilotTreeNode("Connect to Database", {
+        new DbCopilotTreeNode("Select Target", {
           icon: "link-external",
-          commandId: "dbcopilot.connectDatabase",
+          commandId: "dbcopilot.selectTarget",
         })
       );
     } else if (!state.schemaSnapshotAvailable) {
