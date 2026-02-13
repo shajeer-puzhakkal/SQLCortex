@@ -22,6 +22,9 @@
     "onView:dbcopilot.sqlPreview",
     "onView:dbcopilot.riskImpact",
     "onView:dbcopilot.logs",
+    "onCommand:dbcopilot.loginWithToken",
+    "onCommand:dbcopilot.logout",
+    "onCommand:dbcopilot.selectTarget",
     "onCommand:dbcopilot.connectDatabase",
     "onCommand:dbcopilot.disconnectDatabase",
     "onCommand:dbcopilot.refreshSchema",
@@ -124,6 +127,18 @@
       {
         "command": "sqlcortex.drawSchemaErd",
         "title": "SQLCortex: Draw ERD Diagram"
+      },
+      {
+        "command": "dbcopilot.loginWithToken",
+        "title": "DB Copilot: Login with Token"
+      },
+      {
+        "command": "dbcopilot.logout",
+        "title": "DB Copilot: Logout"
+      },
+      {
+        "command": "dbcopilot.selectTarget",
+        "title": "DB Copilot: Select Target"
       },
       {
         "command": "dbcopilot.connectDatabase",
@@ -403,6 +418,16 @@
         {
           "command": "dbcopilot.openAgentLogs",
           "when": "view == dbcopilot.logs",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.selectTarget",
+          "when": "view == dbcopilot.overview",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.loginWithToken",
+          "when": "view == dbcopilot.overview",
           "group": "navigation"
         },
         {

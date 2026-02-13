@@ -41,12 +41,12 @@ export class DbCopilotSchemaProvider
         new DbCopilotTreeNode("Schema", {
           collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
           children: [
-            new DbCopilotTreeNode("Connect to a database to view schemas.", {
+            new DbCopilotTreeNode("Select a target to view schemas.", {
               icon: "plug",
             }),
-            new DbCopilotTreeNode("Connect to Database", {
+            new DbCopilotTreeNode("Select Target", {
               icon: "link-external",
-              commandId: "dbcopilot.connectDatabase",
+              commandId: "dbcopilot.selectTarget",
             }),
           ],
         }),
