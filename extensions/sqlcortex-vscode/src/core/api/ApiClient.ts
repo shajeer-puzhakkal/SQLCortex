@@ -1,8 +1,8 @@
 import {
   createApiClient as createBaseApiClient,
-  formatApiError as formatBaseApiError,
   type ApiClient as BaseApiClient,
 } from "../../api/client";
+import { normalizeApiError as normalizeBaseApiError } from "../errors/normalizeApiError";
 
 export type ApiClient = BaseApiClient;
 
@@ -21,5 +21,5 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 }
 
 export function normalizeApiError(err: unknown): string {
-  return formatBaseApiError(err);
+  return normalizeBaseApiError(err);
 }
