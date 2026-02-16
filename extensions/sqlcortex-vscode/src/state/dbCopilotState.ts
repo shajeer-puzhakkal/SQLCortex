@@ -2,12 +2,15 @@ import * as vscode from "vscode";
 import type { DbCopilotSchemaSnapshot, DbCopilotSchemaSnapshots } from "../dbcopilot/schemaSnapshot";
 
 export type DbCopilotMode = "readOnly" | "draft" | "execution";
+export type DbCopilotSchemaSnapshotStatus = "idle" | "loading" | "ready" | "error";
 
 export type DbCopilotState = {
   connectionLabel: string | null;
   connectionDisplayLabel: string | null;
   connectionReadOnly: boolean | null;
   schemaSnapshotAvailable: boolean;
+  schemaSnapshotStatus: DbCopilotSchemaSnapshotStatus;
+  schemaSnapshotError: string | null;
   mode: DbCopilotMode;
 };
 
@@ -15,14 +18,31 @@ const CONNECTION_LABEL_KEY = "dbcopilot.connectionLabel";
 const CONNECTION_DISPLAY_LABEL_KEY = "dbcopilot.connectionDisplayLabel";
 const CONNECTION_READONLY_KEY = "dbcopilot.connectionReadOnly";
 const SCHEMA_SNAPSHOT_KEY = "dbcopilot.schemaSnapshotAvailable";
+const SCHEMA_SNAPSHOT_STATUS_KEY = "dbcopilot.schemaSnapshotStatus";
+const SCHEMA_SNAPSHOT_ERROR_KEY = "dbcopilot.schemaSnapshotError";
 const SCHEMA_SNAPSHOT_DATA_KEY = "dbcopilot.schemaSnapshotData";
 const MODE_KEY = "dbcopilot.mode";
 
 const DEFAULT_MODE: DbCopilotMode = "readOnly";
+const DEFAULT_SCHEMA_SNAPSHOT_STATUS: DbCopilotSchemaSnapshotStatus = "idle";
 
 export function getDbCopilotState(
   context: vscode.ExtensionContext
 ): DbCopilotState {
+  const schemaSnapshotAvailable = context.workspaceState.get<boolean>(
+    SCHEMA_SNAPSHOT_KEY,
+    false
+  );
+  const rawStatus = context.workspaceState.get<DbCopilotSchemaSnapshotStatus | null>(
+    SCHEMA_SNAPSHOT_STATUS_KEY,
+    null
+  );
+  const schemaSnapshotStatus =
+    rawStatus ??
+    (schemaSnapshotAvailable
+      ? ("ready" as DbCopilotSchemaSnapshotStatus)
+      : DEFAULT_SCHEMA_SNAPSHOT_STATUS);
+
   return {
     connectionLabel: context.workspaceState.get<string | null>(
       CONNECTION_LABEL_KEY,
@@ -36,9 +56,11 @@ export function getDbCopilotState(
       CONNECTION_READONLY_KEY,
       null
     ),
-    schemaSnapshotAvailable: context.workspaceState.get<boolean>(
-      SCHEMA_SNAPSHOT_KEY,
-      false
+    schemaSnapshotAvailable,
+    schemaSnapshotStatus,
+    schemaSnapshotError: context.workspaceState.get<string | null>(
+      SCHEMA_SNAPSHOT_ERROR_KEY,
+      null
     ),
     mode: context.workspaceState.get<DbCopilotMode>(MODE_KEY, DEFAULT_MODE),
   };
@@ -58,6 +80,8 @@ export async function setDbCopilotConnection(
   await context.workspaceState.update(CONNECTION_READONLY_KEY, readOnly ?? null);
   if (!connectionLabel) {
     await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, false);
+    await context.workspaceState.update(SCHEMA_SNAPSHOT_STATUS_KEY, "idle");
+    await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_KEY, null);
     await context.workspaceState.update(SCHEMA_SNAPSHOT_DATA_KEY, null);
   }
 }
@@ -67,6 +91,24 @@ export async function setDbCopilotSchemaSnapshot(
   available: boolean
 ): Promise<void> {
   await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, available);
+  await context.workspaceState.update(
+    SCHEMA_SNAPSHOT_STATUS_KEY,
+    available ? "ready" : "idle"
+  );
+  await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_KEY, null);
+}
+
+export async function setDbCopilotSchemaSnapshotStatus(
+  context: vscode.ExtensionContext,
+  status: DbCopilotSchemaSnapshotStatus,
+  errorMessage: string | null = null
+): Promise<void> {
+  await context.workspaceState.update(SCHEMA_SNAPSHOT_STATUS_KEY, status);
+  await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, status === "ready");
+  await context.workspaceState.update(
+    SCHEMA_SNAPSHOT_ERROR_KEY,
+    status === "error" ? errorMessage ?? "Schema snapshot failed." : null
+  );
 }
 
 export function getDbCopilotSchemaSnapshots(

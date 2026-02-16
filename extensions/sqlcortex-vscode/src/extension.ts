@@ -67,8 +67,8 @@ import { DbExplorerProvider, type TableConstraintInfo } from "./ui/tree/dbExplor
 import { ColumnNode, SchemaNode, TableNode } from "./ui/tree/nodes";
 import { SidebarProvider } from "./ui/tree/sidebarProvider";
 import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProvider";
-import { DbCopilotSchemaProvider } from "./ui/tree/dbCopilotSchemaProvider";
 import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
+import { SchemaTreeProvider } from "./views/schema/SchemaTreeProvider";
 import { buildDbCopilotErdHtml } from "./ui/dbCopilotErdPanel";
 import { buildDbCopilotMigrationPlanHtml } from "./ui/dbCopilotMigrationPlan";
 import { buildDbCopilotOptimizationPlanHtml } from "./ui/dbCopilotOptimizationPlan";
@@ -110,6 +110,7 @@ import {
   setDbCopilotConnection,
   setDbCopilotMode,
   setDbCopilotSchemaSnapshot,
+  setDbCopilotSchemaSnapshotStatus,
   getDbCopilotSchemaSnapshot,
   getDbCopilotSchemaSnapshots,
   setDbCopilotSchemaSnapshots,
@@ -121,7 +122,6 @@ import type { ConnectionProfile, ConnectionState } from "./core/connection/Conne
 import { LogBus } from "./core/logging/LogBus";
 import { createConnectDatabaseCommand } from "./commands/connectDatabase";
 import { createDisconnectDatabaseCommand } from "./commands/disconnectDatabase";
-import { createRefreshSchemaCommand } from "./commands/refreshSchema";
 import { ApiSessionManager } from "./core/auth/ApiSessionManager";
 import { TargetStore, type SelectedTarget } from "./core/target/TargetStore";
 import { createLoginWithTokenCommand } from "./commands/loginWithToken";
@@ -318,7 +318,11 @@ export function activate(context: vscode.ExtensionContext) {
     context,
     viewTitle: "Agents",
   });
-  const dbCopilotSchemaProvider = new DbCopilotSchemaProvider({ context });
+  const dbCopilotSchemaProvider = new SchemaTreeProvider({
+    context,
+    sessionManager,
+    targetStore,
+  });
   const dbCopilotRecommendationsProvider = new DbCopilotPlaceholderProvider({
     context,
     viewTitle: "Recommendations",
@@ -666,20 +670,25 @@ export function activate(context: vscode.ExtensionContext) {
         connectionManager,
         logBus,
       }),
-      "dbcopilot.refreshSchema": createRefreshSchemaCommand({
-        connectionManager,
-        logBus,
-      }),
+      "dbcopilot.refreshSchema": async () => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        await syncSampleDbCopilotSchemaSnapshot(
+          context,
+          dbCopilotStatusBars,
+          dbCopilotProviders,
+          "DB Copilot: Schema refreshed."
+        );
+      },
       "dbcopilot.captureSchemaSnapshot": async () => {
         if (!(await ensureDbCopilotConnected(context))) {
           return;
         }
-        const snapshots = createSampleDbCopilotSnapshots();
-        await setDbCopilotSchemaSnapshots(context, snapshots);
-        await setDbCopilotSchemaSnapshot(context, true);
-        resetDbCopilotBottomPanel();
-        await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
-        vscode.window.showInformationMessage(
+        await syncSampleDbCopilotSchemaSnapshot(
+          context,
+          dbCopilotStatusBars,
+          dbCopilotProviders,
           "DB Copilot: Schema snapshot captured."
         );
       },
@@ -3318,6 +3327,34 @@ function formatDbCopilotEnvironment(env: DbCopilotMigrationPlan["environment"]):
       return "Staging";
     default:
       return "Development";
+  }
+}
+
+async function syncSampleDbCopilotSchemaSnapshot(
+  context: vscode.ExtensionContext,
+  statusBars: DbCopilotStatusBarItems,
+  providers: DbCopilotRefreshable[],
+  successMessage: string
+): Promise<void> {
+  await setDbCopilotSchemaSnapshotStatus(context, "loading");
+  await refreshDbCopilotUI(context, statusBars, providers);
+  try {
+    const snapshots = createSampleDbCopilotSnapshots();
+    await setDbCopilotSchemaSnapshots(context, snapshots);
+    await setDbCopilotSchemaSnapshot(context, true);
+    resetDbCopilotBottomPanel();
+    await refreshDbCopilotUI(context, statusBars, providers);
+    vscode.window.showInformationMessage(successMessage);
+  } catch (err) {
+    const message =
+      err instanceof Error && err.message.trim().length
+        ? err.message
+        : "Schema snapshot refresh failed.";
+    await setDbCopilotSchemaSnapshots(context, null);
+    await setDbCopilotSchemaSnapshotStatus(context, "error", message);
+    resetDbCopilotBottomPanel();
+    await refreshDbCopilotUI(context, statusBars, providers);
+    vscode.window.showErrorMessage(`DB Copilot: ${message}`);
   }
 }
 

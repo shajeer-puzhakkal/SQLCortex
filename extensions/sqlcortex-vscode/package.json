@@ -431,6 +431,16 @@
           "group": "navigation"
         },
         {
+          "command": "dbcopilot.loginWithToken",
+          "when": "view == dbcopilot.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.selectTarget",
+          "when": "view == dbcopilot.schema",
+          "group": "navigation"
+        },
+        {
           "command": "dbcopilot.refreshSchema",
           "when": "view == dbcopilot.schema",
           "group": "navigation"
