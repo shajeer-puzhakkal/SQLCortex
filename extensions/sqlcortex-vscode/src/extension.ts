@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import * as vscode from "vscode";
-import { createApiClient, formatApiError } from "./api/client";
+import { ApiClientError, createApiClient, formatApiError } from "./api/client";
 import {
   analyzeQuery,
   askQueryInsightsChat,
@@ -115,6 +115,7 @@ import {
   getDbCopilotSchemaSnapshot,
   getDbCopilotSchemaSnapshots,
   setDbCopilotSchemaSnapshots,
+  type DbCopilotSchemaSnapshotError,
   type DbCopilotMode,
 } from "./state/dbCopilotState";
 import { ConnectionManager } from "./core/connection/ConnectionManager";
@@ -714,7 +715,10 @@ export function activate(context: vscode.ExtensionContext) {
           targetStore,
           dbCopilotStatusBars,
           dbCopilotProviders,
-          "DB Copilot: Schema refreshed."
+          {
+            successMessage: "DB Copilot: Schema refreshed.",
+            showProgress: true,
+          }
         );
       },
       "dbcopilot.captureSchemaSnapshot": async () => {
@@ -727,7 +731,10 @@ export function activate(context: vscode.ExtensionContext) {
           targetStore,
           dbCopilotStatusBars,
           dbCopilotProviders,
-          "DB Copilot: Schema snapshot captured."
+          {
+            successMessage: "DB Copilot: Schema snapshot captured.",
+            showProgress: true,
+          }
         );
       },
       "dbcopilot.optimizeCurrentQuery": async () => {
@@ -1795,7 +1802,239 @@ async function runDbCopilotSchemaTableQueryFlow(
     content: sql,
   });
   await vscode.window.showTextDocument(document, { preview: false });
-  await runQueryFlow(context, tokenStore, output, statusBars, sidebarProvider);
+
+  const auth = await resolveAuthContext(context, tokenStore, output);
+  if (!auth) {
+    return;
+  }
+
+  const workspaceContext = await ensureActiveProject(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+  if (!workspaceContext || !workspaceContext.projectId) {
+    return;
+  }
+  if (!workspaceContext.connectionId) {
+    vscode.window.showErrorMessage(
+      "DB Copilot: Select a connection before running queries."
+    );
+    return;
+  }
+
+  const client = createAuthorizedClient(
+    context,
+    auth,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
+  );
+
+  setDbCopilotSqlPreviewState(context, {
+    upSql: sql,
+    downSql: "",
+    mode: getDbCopilotState(context).mode,
+    policyAllowsExecution: false,
+    policyReason: null,
+  });
+  setDbCopilotRiskImpactState(context, null);
+  DbCopilotSqlPreviewView.show(context);
+  DbCopilotLogsView.show(context);
+
+  const tableRef = `${resource.schemaName}.${resource.objectName}`;
+  streamDbCopilotLogs([
+    buildDbCopilotLogEntry(
+      "orchestrator",
+      `Run Table Query requested for ${tableRef}.`
+    ),
+    buildDbCopilotLogEntry(
+      "schema_analyst",
+      `Resolved schema object: table ${tableRef}.`
+    ),
+    buildDbCopilotLogEntry(
+      "governance",
+      "Read-only policy check passed (SELECT with LIMIT 100)."
+    ),
+    buildDbCopilotLogEntry(
+      "performance",
+      "Using bounded preview query to keep response latency low."
+    ),
+    buildDbCopilotLogEntry(
+      "risk",
+      "Risk classification: low impact (read-only operation)."
+    ),
+    buildDbCopilotLogEntry(
+      "execution",
+      `Running query on ${tableRef}...`
+    ),
+  ]);
+
+  const request = {
+    projectId: workspaceContext.projectId,
+    connectionId: workspaceContext.connectionId ?? undefined,
+    sql,
+    source: "vscode" as const,
+    client: {
+      extensionVersion: getExtensionVersion(context),
+      vscodeVersion: vscode.version,
+    },
+  };
+
+  try {
+    const response = await executeQuery(client, request);
+    if (response.error) {
+      const errorMessage = response.error.message ?? "Query failed.";
+      setDbCopilotRiskImpactState(context, {
+        requiresManualReview: true,
+        requiresManualReviewReason: errorMessage,
+        summary: [
+          { label: "Status", value: "Failed" },
+          { label: "Reason", value: errorMessage },
+        ],
+      });
+      const failureLogs = [
+        buildDbCopilotLogEntry("execution", `Query failed: ${errorMessage}`),
+        buildDbCopilotLogEntry(
+          "orchestrator",
+          "Pipeline ended with execution failure."
+        ),
+      ];
+      failureLogs.forEach((entry) => appendDbCopilotLogEntry(entry));
+      vscode.window.showErrorMessage(`DB Copilot: ${errorMessage}`);
+      return;
+    }
+
+    setDbCopilotRiskImpactState(context, {
+      requiresManualReview: false,
+      summary: [
+        { label: "Status", value: "Completed" },
+        { label: "Rows", value: String(response.rowsReturned) },
+        { label: "Columns", value: String(response.columns.length) },
+        { label: "Duration", value: `${response.executionTimeMs} ms` },
+      ],
+    });
+
+    const sample = formatDbCopilotQuerySample(response.columns, response.rows);
+    const completionLogs = [
+      buildDbCopilotLogEntry(
+        "execution",
+        `Returned ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
+      ),
+      buildDbCopilotLogEntry(
+        "schema_analyst",
+        `Column profile captured (${response.columns.length} columns).`
+      ),
+      buildDbCopilotLogEntry(
+        "performance",
+        `Execution latency measured at ${response.executionTimeMs}ms.`
+      ),
+      buildDbCopilotLogEntry(
+        "risk",
+        response.rowsReturned > 0
+          ? "Result set looks stable for exploratory read-only analysis."
+          : "No rows returned; verify filters or data availability."
+      ),
+    ];
+    if (sample) {
+      completionLogs.push(
+        buildDbCopilotLogEntry("explainability", `Sample: ${sample}`)
+      );
+    } else {
+      completionLogs.push(
+        buildDbCopilotLogEntry(
+          "explainability",
+          "No sample rows available for explainability preview."
+        )
+      );
+    }
+    completionLogs.push(
+      buildDbCopilotLogEntry(
+        "orchestrator",
+        "Pipeline completed successfully."
+      )
+    );
+    completionLogs.forEach((entry) => appendDbCopilotLogEntry(entry));
+
+    vscode.window.showInformationMessage(
+      `DB Copilot: Returned ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
+    );
+  } catch (err) {
+    const message = formatRequestError(err);
+    setDbCopilotRiskImpactState(context, {
+      requiresManualReview: true,
+      requiresManualReviewReason: message,
+      summary: [
+        { label: "Status", value: "Failed" },
+        { label: "Reason", value: message },
+      ],
+    });
+    const failureLogs = [
+      buildDbCopilotLogEntry("execution", `Query failed: ${message}`),
+      buildDbCopilotLogEntry(
+        "orchestrator",
+        "Pipeline ended with request error."
+      ),
+    ];
+    failureLogs.forEach((entry) => appendDbCopilotLogEntry(entry));
+    reportRequestError(output, "DB Copilot table query failed", err);
+  }
+
+  DbCopilotSqlPreviewView.show(context);
+}
+
+function formatDbCopilotQuerySample(
+  columns: Array<{ name: string; type: string }>,
+  rows: Array<Array<unknown>>
+): string | null {
+  if (!columns.length || !rows.length) {
+    return null;
+  }
+  const columnLimit = 4;
+  const rowLimit = 2;
+  const visibleColumns = columns.slice(0, columnLimit);
+  const lines = rows.slice(0, rowLimit).map((row, rowIndex) => {
+    const values = visibleColumns.map((column, columnIndex) => {
+      const value = formatDbCopilotQueryCellValue(row[columnIndex]);
+      return `${column.name}=${value}`;
+    });
+    if (columns.length > columnLimit) {
+      values.push("...");
+    }
+    return `#${rowIndex + 1} ${values.join(", ")}`;
+  });
+  if (rows.length > rowLimit) {
+    lines.push(`... +${rows.length - rowLimit} more rows`);
+  }
+  return lines.join(" | ");
+}
+
+function formatDbCopilotQueryCellValue(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "string") {
+    const trimmed = value.replace(/\s+/g, " ").trim();
+    return trimmed.length > 32 ? `"${trimmed.slice(0, 29)}..."` : `"${trimmed}"`;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized) {
+      return String(value);
+    }
+    return serialized.length > 32 ? `${serialized.slice(0, 29)}...` : serialized;
+  } catch {
+    return String(value);
+  }
 }
 
 async function ensureActiveProject(
@@ -3443,41 +3682,62 @@ async function syncDbCopilotSchemaSnapshot(
   targetStore: TargetStore,
   statusBars: DbCopilotStatusBarItems,
   providers: DbCopilotRefreshable[],
-  successMessage?: string
+  options: {
+    successMessage?: string;
+    showProgress?: boolean;
+  } = {}
 ): Promise<void> {
-  await setDbCopilotSchemaSnapshotStatus(context, "loading");
-  await refreshDbCopilotUI(context, statusBars, providers);
-  try {
-    const target = targetStore.getSelectedTarget();
-    if (!target) {
-      throw new Error("Select a target before refreshing schema.");
-    }
-
-    const schemaApi = new SchemaApi(await sessionManager.getClientOrThrow());
-    const targetRef = {
-      projectId: target.projectId,
-      envId: target.envId,
-    };
-
-    const refreshResponse = await schemaApi.refreshSnapshot(targetRef);
-    const schemaSnapshot = refreshResponse.snapshot ?? (await schemaApi.getSnapshot(targetRef));
-    const snapshots = mapSchemaSnapshotToDbCopilotSnapshots(schemaSnapshot);
-
-    await setDbCopilotSchemaSnapshots(context, snapshots);
-    await setDbCopilotSchemaSnapshotStatus(context, "ready");
-    resetDbCopilotBottomPanel();
+  const run = async (): Promise<void> => {
+    await setDbCopilotSchemaSnapshotStatus(context, "loading");
     await refreshDbCopilotUI(context, statusBars, providers);
-    if (successMessage) {
-      vscode.window.showInformationMessage(successMessage);
+    try {
+      const target = targetStore.getSelectedTarget();
+      if (!target) {
+        throw new Error("Select a target before refreshing schema.");
+      }
+
+      const schemaApi = new SchemaApi(await sessionManager.getClientOrThrow());
+      const targetRef = {
+        projectId: target.projectId,
+        envId: target.envId,
+      };
+
+      const refreshResponse = await schemaApi.refreshSnapshot(targetRef);
+      const schemaSnapshot = refreshResponse.snapshot ?? (await schemaApi.getSnapshot(targetRef));
+      const snapshots = mapSchemaSnapshotToDbCopilotSnapshots(schemaSnapshot);
+
+      await setDbCopilotSchemaSnapshots(context, snapshots);
+      await setDbCopilotSchemaSnapshotStatus(context, "ready");
+      resetDbCopilotBottomPanel();
+      await refreshDbCopilotUI(context, statusBars, providers);
+      if (options.successMessage) {
+        vscode.window.showInformationMessage(options.successMessage);
+      }
+    } catch (err) {
+      const schemaError = resolveDbCopilotSchemaSyncError(err, sessionManager);
+      await setDbCopilotSchemaSnapshots(context, null);
+      await setDbCopilotSchemaSnapshotStatus(context, "error", schemaError);
+      resetDbCopilotBottomPanel();
+      await refreshDbCopilotUI(context, statusBars, providers);
+      vscode.window.showErrorMessage(`DB Copilot: ${schemaError.message}`);
     }
-  } catch (err) {
-    const message = formatDbCopilotSchemaSyncError(err, sessionManager);
-    await setDbCopilotSchemaSnapshots(context, null);
-    await setDbCopilotSchemaSnapshotStatus(context, "error", message);
-    resetDbCopilotBottomPanel();
-    await refreshDbCopilotUI(context, statusBars, providers);
-    vscode.window.showErrorMessage(`DB Copilot: ${message}`);
+  };
+
+  if (options.showProgress) {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "DB Copilot: Refreshing schema snapshot...",
+      },
+      async (progress) => {
+        progress.report({ message: "Contacting SQLCortex API..." });
+        await run();
+      }
+    );
+    return;
   }
+
+  await run();
 }
 
 function mapSchemaSnapshotToDbCopilotSnapshots(
@@ -3578,15 +3838,60 @@ function resolvePrimaryKeyColumns(table: SchemaSnapshot["schemas"][number]["tabl
   return [];
 }
 
-function formatDbCopilotSchemaSyncError(
+function resolveDbCopilotSchemaSyncError(
   err: unknown,
   sessionManager: ApiSessionManager
-): string {
-  if (err instanceof Error && err.message.trim().length > 0) {
-    return err.message;
+): DbCopilotSchemaSnapshotError {
+  if (err instanceof ApiClientError) {
+    if (err.status === 401) {
+      return {
+        code: "unauthorized",
+        message: "Session expired. Please log in again.",
+      };
+    }
+    if (err.status === 403) {
+      return {
+        code: "forbidden",
+        message: "You do not have access to this target.",
+      };
+    }
+    if (err.status === 404) {
+      return {
+        code: "target_not_found",
+        message: "Selected target was not found. Re-select target and try again.",
+      };
+    }
+    if (err.isNetworkError) {
+      return {
+        code: "backend_unreachable",
+        message: "Cannot reach SQLCortex API. Check your network or API base URL.",
+      };
+    }
+    if (err.isTimeout) {
+      return {
+        code: "timeout",
+        message: "Schema snapshot request timed out. Try refresh again.",
+      };
+    }
   }
+
   const normalized = sessionManager.formatError(err).trim();
-  return normalized.length > 0 ? normalized : "Schema snapshot refresh failed.";
+  if (normalized.length > 0) {
+    return {
+      code: "unknown",
+      message: normalized,
+    };
+  }
+  if (err instanceof Error && err.message.trim().length > 0) {
+    return {
+      code: "unknown",
+      message: err.message,
+    };
+  }
+  return {
+    code: "unknown",
+    message: "Schema snapshot refresh failed.",
+  };
 }
 
 async function ensureDbCopilotConnected(

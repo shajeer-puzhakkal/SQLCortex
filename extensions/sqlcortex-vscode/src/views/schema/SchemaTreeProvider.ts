@@ -63,7 +63,12 @@ export class SchemaTreeProvider implements vscode.TreeDataProvider<SchemaTreeNod
       return [createLoadingNode()];
     }
     if (state.schemaSnapshotStatus === "error") {
-      return [createErrorNode(state.schemaSnapshotError)];
+      return [
+        createErrorNode({
+          message: state.schemaSnapshotError,
+          code: state.schemaSnapshotErrorCode,
+        }),
+      ];
     }
 
     const schemas = normalizeSchemaNodes(getDbCopilotSchemaSnapshots(this.deps.context));

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { DbCopilotSchemaSnapshotErrorCode } from "../../../state/dbCopilotState";
 import { SchemaTreeNode } from "./SchemaTreeNode";
 
 type PlaceholderOptions = {
@@ -10,6 +11,11 @@ type PlaceholderOptions = {
     icon: string;
   };
   detail?: string;
+};
+
+type SchemaErrorState = {
+  message: string | null;
+  code: DbCopilotSchemaSnapshotErrorCode | null;
 };
 
 export function createLoginRequiredNode(): SchemaTreeNode {
@@ -43,16 +49,15 @@ export function createLoadingNode(): SchemaTreeNode {
   });
 }
 
-export function createErrorNode(errorMessage: string | null): SchemaTreeNode {
+export function createErrorNode(error: SchemaErrorState): SchemaTreeNode {
+  const errorNode = resolveErrorNode(error);
+  const detail =
+    error.code === "unknown" ? error.message ?? errorNode.detail : errorNode.detail;
   return createPlaceholderNode("Schema unavailable", {
     icon: "error",
-    message: "Schema snapshot failed to load.",
-    detail: errorMessage ?? "Unknown error.",
-    action: {
-      label: "Refresh",
-      commandId: "dbcopilot.refreshSchema",
-      icon: "refresh",
-    },
+    message: errorNode.message,
+    detail,
+    action: errorNode.action,
   });
 }
 
@@ -107,4 +112,73 @@ function createPlaceholderNode(label: string, options: PlaceholderOptions): Sche
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function resolveErrorNode(error: SchemaErrorState): {
+  message: string;
+  detail: string;
+  action?: PlaceholderOptions["action"];
+} {
+  switch (error.code) {
+    case "unauthorized":
+      return {
+        message: "Session expired. Re-login to continue.",
+        detail: "Your DB Copilot token is no longer valid.",
+        action: {
+          label: "Login with Token",
+          commandId: "dbcopilot.loginWithToken",
+          icon: "account",
+        },
+      };
+    case "forbidden":
+      return {
+        message: "You do not have permission for this target.",
+        detail: "Ask for access, or choose a different target.",
+        action: {
+          label: "Select Target",
+          commandId: "dbcopilot.selectTarget",
+          icon: "link-external",
+        },
+      };
+    case "target_not_found":
+      return {
+        message: "Selected target is no longer available.",
+        detail: "Re-select your Org / Project / Environment.",
+        action: {
+          label: "Select Target",
+          commandId: "dbcopilot.selectTarget",
+          icon: "target",
+        },
+      };
+    case "backend_unreachable":
+      return {
+        message: "SQLCortex backend is unreachable.",
+        detail: "Check network and API base URL, then retry.",
+        action: {
+          label: "Refresh",
+          commandId: "dbcopilot.refreshSchema",
+          icon: "refresh",
+        },
+      };
+    case "timeout":
+      return {
+        message: "Schema refresh timed out.",
+        detail: "The backend responded too slowly. Retry refresh.",
+        action: {
+          label: "Refresh",
+          commandId: "dbcopilot.refreshSchema",
+          icon: "refresh",
+        },
+      };
+    default:
+      return {
+        message: "Schema snapshot failed to load.",
+        detail: "Unknown error.",
+        action: {
+          label: "Refresh",
+          commandId: "dbcopilot.refreshSchema",
+          icon: "refresh",
+        },
+      };
+  }
 }

@@ -3,6 +3,17 @@ import type { DbCopilotSchemaSnapshot, DbCopilotSchemaSnapshots } from "../dbcop
 
 export type DbCopilotMode = "readOnly" | "draft" | "execution";
 export type DbCopilotSchemaSnapshotStatus = "idle" | "loading" | "ready" | "error";
+export type DbCopilotSchemaSnapshotErrorCode =
+  | "unauthorized"
+  | "forbidden"
+  | "target_not_found"
+  | "backend_unreachable"
+  | "timeout"
+  | "unknown";
+export type DbCopilotSchemaSnapshotError = {
+  code: DbCopilotSchemaSnapshotErrorCode;
+  message: string;
+};
 
 export type DbCopilotState = {
   connectionLabel: string | null;
@@ -11,6 +22,7 @@ export type DbCopilotState = {
   schemaSnapshotAvailable: boolean;
   schemaSnapshotStatus: DbCopilotSchemaSnapshotStatus;
   schemaSnapshotError: string | null;
+  schemaSnapshotErrorCode: DbCopilotSchemaSnapshotErrorCode | null;
   mode: DbCopilotMode;
 };
 
@@ -20,6 +32,7 @@ const CONNECTION_READONLY_KEY = "dbcopilot.connectionReadOnly";
 const SCHEMA_SNAPSHOT_KEY = "dbcopilot.schemaSnapshotAvailable";
 const SCHEMA_SNAPSHOT_STATUS_KEY = "dbcopilot.schemaSnapshotStatus";
 const SCHEMA_SNAPSHOT_ERROR_KEY = "dbcopilot.schemaSnapshotError";
+const SCHEMA_SNAPSHOT_ERROR_CODE_KEY = "dbcopilot.schemaSnapshotErrorCode";
 const SCHEMA_SNAPSHOT_DATA_KEY = "dbcopilot.schemaSnapshotData";
 const MODE_KEY = "dbcopilot.mode";
 
@@ -62,6 +75,9 @@ export function getDbCopilotState(
       SCHEMA_SNAPSHOT_ERROR_KEY,
       null
     ),
+    schemaSnapshotErrorCode: normalizeSchemaSnapshotErrorCode(
+      context.workspaceState.get<string | null>(SCHEMA_SNAPSHOT_ERROR_CODE_KEY, null)
+    ),
     mode: context.workspaceState.get<DbCopilotMode>(MODE_KEY, DEFAULT_MODE),
   };
 }
@@ -82,6 +98,7 @@ export async function setDbCopilotConnection(
     await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, false);
     await context.workspaceState.update(SCHEMA_SNAPSHOT_STATUS_KEY, "idle");
     await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_KEY, null);
+    await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_CODE_KEY, null);
     await context.workspaceState.update(SCHEMA_SNAPSHOT_DATA_KEY, null);
   }
 }
@@ -96,18 +113,23 @@ export async function setDbCopilotSchemaSnapshot(
     available ? "ready" : "idle"
   );
   await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_KEY, null);
+  await context.workspaceState.update(SCHEMA_SNAPSHOT_ERROR_CODE_KEY, null);
 }
 
 export async function setDbCopilotSchemaSnapshotStatus(
   context: vscode.ExtensionContext,
   status: DbCopilotSchemaSnapshotStatus,
-  errorMessage: string | null = null
+  error: DbCopilotSchemaSnapshotError | null = null
 ): Promise<void> {
   await context.workspaceState.update(SCHEMA_SNAPSHOT_STATUS_KEY, status);
   await context.workspaceState.update(SCHEMA_SNAPSHOT_KEY, status === "ready");
   await context.workspaceState.update(
     SCHEMA_SNAPSHOT_ERROR_KEY,
-    status === "error" ? errorMessage ?? "Schema snapshot failed." : null
+    status === "error" ? error?.message ?? "Schema snapshot failed." : null
+  );
+  await context.workspaceState.update(
+    SCHEMA_SNAPSHOT_ERROR_CODE_KEY,
+    status === "error" ? error?.code ?? "unknown" : null
   );
 }
 
@@ -146,4 +168,20 @@ export async function setDbCopilotMode(
   mode: DbCopilotMode
 ): Promise<void> {
   await context.workspaceState.update(MODE_KEY, mode);
+}
+
+function normalizeSchemaSnapshotErrorCode(
+  value: string | null
+): DbCopilotSchemaSnapshotErrorCode | null {
+  switch (value) {
+    case "unauthorized":
+    case "forbidden":
+    case "target_not_found":
+    case "backend_unreachable":
+    case "timeout":
+    case "unknown":
+      return value;
+    default:
+      return null;
+  }
 }
