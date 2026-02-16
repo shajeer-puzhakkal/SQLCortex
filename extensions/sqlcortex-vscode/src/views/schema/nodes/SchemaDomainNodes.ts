@@ -123,6 +123,11 @@ function buildTableNode(schemaName: string, table: SchemaTreeTable): SchemaTreeN
     icon: "table",
     contextValue: "dbcopilot.schema.table",
     id: tableId,
+    resource: {
+      schemaName,
+      objectName: table.name,
+      kind: "table",
+    },
     collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
     children: [
       createCategoryNode(
@@ -238,6 +243,12 @@ function buildViewNode(schemaName: string, view: SchemaTreeView): SchemaTreeNode
     icon: "symbol-interface",
     id,
     contextValue: "dbcopilot.schema.view",
+    resource: {
+      schemaName,
+      objectName: view.name,
+      kind: "view",
+      definition: view.definition,
+    },
     tooltip: view.definition ?? view.name,
   });
 }
@@ -257,6 +268,14 @@ function buildRoutineNode(
     icon: kind === "function" ? "symbol-function" : "symbol-method",
     id,
     contextValue: `dbcopilot.schema.${kind}`,
+    resource: {
+      schemaName,
+      objectName: routine.name,
+      kind,
+      signature: routine.signature,
+      returnType: routine.returnType,
+      language: routine.language,
+    },
     description: descriptionParts.join(" | ") || undefined,
   });
 }

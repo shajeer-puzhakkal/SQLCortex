@@ -69,6 +69,7 @@ import { SidebarProvider } from "./ui/tree/sidebarProvider";
 import { DbCopilotPlaceholderProvider } from "./ui/tree/dbCopilotPlaceholderProvider";
 import { DbCopilotSchemaNode } from "./ui/tree/dbCopilotNodes";
 import { SchemaTreeProvider } from "./views/schema/SchemaTreeProvider";
+import { SchemaTreeNode, type SchemaTreeResource } from "./views/schema/nodes";
 import { buildDbCopilotErdHtml } from "./ui/dbCopilotErdPanel";
 import { buildDbCopilotMigrationPlanHtml } from "./ui/dbCopilotMigrationPlan";
 import { buildDbCopilotOptimizationPlanHtml } from "./ui/dbCopilotOptimizationPlan";
@@ -177,6 +178,8 @@ const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
   { id: "dbcopilot.toggleMode", label: "Toggle Mode" },
   { id: "dbcopilot.viewPolicies", label: "View Policies" },
   { id: "dbcopilot.openAgentLogs", label: "Open Agent Logs" },
+  { id: "dbcopilot.runTableQuery", label: "Run Table Query" },
+  { id: "dbcopilot.openQueryTemplate", label: "Open Query Template" },
 ];
 
 const DBCOPILOT_POLICY_NOTES = [
@@ -795,6 +798,34 @@ export function activate(context: vscode.ExtensionContext) {
         }
         streamDbCopilotLogs(plan.logs);
         DbCopilotSqlPreviewView.show(context);
+      },
+      "dbcopilot.runTableQuery": async (...args) => {
+        if (!(await ensureDbCopilotConnected(context))) {
+          return;
+        }
+        await runDbCopilotSchemaTableQueryFlow(
+          context,
+          tokenStore,
+          output,
+          statusBars,
+          sidebarProvider,
+          args[0]
+        );
+      },
+      "dbcopilot.openQueryTemplate": async (...args) => {
+        const resource = resolveDbCopilotSchemaTreeResource(args[0]);
+        if (!resource) {
+          vscode.window.showInformationMessage(
+            "DB Copilot: Select a table, view, function, or procedure."
+          );
+          return;
+        }
+        const sql = buildDbCopilotQueryTemplateSql(resource);
+        const document = await vscode.workspace.openTextDocument({
+          language: "sql",
+          content: sql,
+        });
+        await vscode.window.showTextDocument(document, { preview: false });
       },
       "dbcopilot.analyzeSchemaHealth": async (...args) => {
         if (!(await ensureDbCopilotConnected(context))) {
@@ -1736,6 +1767,29 @@ async function runTableQueryFlow(
   }
 
   const sql = buildTableSelectSql(node.schemaName, node.table.name);
+  const document = await vscode.workspace.openTextDocument({
+    language: "sql",
+    content: sql,
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  await runQueryFlow(context, tokenStore, output, statusBars, sidebarProvider);
+}
+
+async function runDbCopilotSchemaTableQueryFlow(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  node?: unknown
+): Promise<void> {
+  const resource = resolveDbCopilotSchemaTreeResource(node);
+  if (!resource || resource.kind !== "table") {
+    vscode.window.showInformationMessage("DB Copilot: Select a table to run.");
+    return;
+  }
+
+  const sql = buildTableSelectSql(resource.schemaName, resource.objectName);
   const document = await vscode.workspace.openTextDocument({
     language: "sql",
     content: sql,
@@ -3579,6 +3633,26 @@ function resolveDbCopilotActiveSqlText(): string | null {
     : editor.document.getText();
   const trimmed = selection.trim();
   return trimmed.length ? trimmed : null;
+}
+
+function resolveDbCopilotSchemaTreeResource(node: unknown): SchemaTreeResource | null {
+  if (!(node instanceof SchemaTreeNode)) {
+    return null;
+  }
+  return node.resource;
+}
+
+function buildDbCopilotQueryTemplateSql(resource: SchemaTreeResource): string {
+  const relation = `${quoteIdentifier(resource.schemaName)}.${quoteIdentifier(resource.objectName)}`;
+  switch (resource.kind) {
+    case "table":
+    case "view":
+      return `SELECT * FROM ${relation} LIMIT 100;`;
+    case "function":
+      return `SELECT ${relation}(/* args */);`;
+    case "procedure":
+      return `CALL ${relation}(/* args */);`;
+  }
 }
 
 function resolveDbCopilotSchemaName(node: unknown): string | null {

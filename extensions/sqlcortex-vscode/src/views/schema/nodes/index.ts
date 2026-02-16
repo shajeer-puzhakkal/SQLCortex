@@ -1,4 +1,4 @@
-export { SchemaTreeNode } from "./SchemaTreeNode";
+export { SchemaTreeNode, type SchemaTreeResource } from "./SchemaTreeNode";
 export {
   buildSchemaNode,
   type SchemaTreeColumn,
