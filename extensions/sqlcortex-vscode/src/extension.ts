@@ -82,8 +82,8 @@ import {
   buildSchemaErdHtml,
 } from "./schema/schemaAnalysis";
 import {
-  createSampleDbCopilotSnapshots,
   type DbCopilotSchemaSnapshot,
+  type DbCopilotSchemaSnapshots,
 } from "./dbcopilot/schemaSnapshot";
 import {
   buildDbCopilotOptimizationPlan,
@@ -124,6 +124,9 @@ import { createConnectDatabaseCommand } from "./commands/connectDatabase";
 import { createDisconnectDatabaseCommand } from "./commands/disconnectDatabase";
 import { ApiSessionManager } from "./core/auth/ApiSessionManager";
 import { TargetStore, type SelectedTarget } from "./core/target/TargetStore";
+import { SchemaRefreshScheduler } from "./core/schema/SchemaRefreshScheduler";
+import { SchemaApi } from "./core/schema/SchemaApi";
+import type { SchemaSnapshot } from "./core/schema/SchemaTypes";
 import { createLoginWithTokenCommand } from "./commands/loginWithToken";
 import { createLogoutCommand } from "./commands/logout";
 import { createSelectTargetCommand } from "./commands/selectTarget";
@@ -214,6 +217,7 @@ let dbCopilotLogStreamId = 0;
 let dbCopilotAuditLogEntries: DbCopilotAuditLogEntry[] = [];
 let dbCopilotAgentLogsPanel: DbCopilotAgentLogsPanel | undefined;
 let dbCopilotAuditLogSessionId: string | null = null;
+let dbCopilotSchemaRefreshScheduler: SchemaRefreshScheduler | null = null;
 
 type OrgPickItem = vscode.QuickPickItem & { orgId: string | null };
 type ProjectPickItem = vscode.QuickPickItem & { projectId: string };
@@ -338,6 +342,33 @@ export function activate(context: vscode.ExtensionContext) {
     dbCopilotRecommendationsProvider,
     dbCopilotMigrationsProvider,
   ];
+  const schemaRefreshScheduler = new SchemaRefreshScheduler({
+    debounceMs: 1000,
+    refresh: async () => {
+      if (!getDbCopilotState(context).connectionLabel || !targetStore.getSelectedTarget()) {
+        return;
+      }
+      await syncDbCopilotSchemaSnapshot(
+        context,
+        sessionManager,
+        targetStore,
+        dbCopilotStatusBars,
+        dbCopilotProviders
+      );
+    },
+    onError: (err) => {
+      logBus.error("Schema auto-refresh failed.", err);
+    },
+  });
+  dbCopilotSchemaRefreshScheduler = schemaRefreshScheduler;
+  context.subscriptions.push(
+    schemaRefreshScheduler,
+    new vscode.Disposable(() => {
+      if (dbCopilotSchemaRefreshScheduler === schemaRefreshScheduler) {
+        dbCopilotSchemaRefreshScheduler = null;
+      }
+    })
+  );
   const dbCopilotViews = [
     vscode.window.createTreeView("dbcopilot.overview", {
       treeDataProvider: dbCopilotOverviewProvider,
@@ -674,8 +705,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotConnected(context))) {
           return;
         }
-        await syncSampleDbCopilotSchemaSnapshot(
+        await syncDbCopilotSchemaSnapshot(
           context,
+          sessionManager,
+          targetStore,
           dbCopilotStatusBars,
           dbCopilotProviders,
           "DB Copilot: Schema refreshed."
@@ -685,8 +718,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (!(await ensureDbCopilotConnected(context))) {
           return;
         }
-        await syncSampleDbCopilotSchemaSnapshot(
+        await syncDbCopilotSchemaSnapshot(
           context,
+          sessionManager,
+          targetStore,
           dbCopilotStatusBars,
           dbCopilotProviders,
           "DB Copilot: Schema snapshot captured."
@@ -2806,6 +2841,10 @@ async function runSqlFlow(
     output.appendLine(
       `SQLCortex: Query complete. ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
     );
+    if (isSchemaMutatingSql(extracted.sql)) {
+      dbCopilotSchemaRefreshScheduler?.schedule();
+      output.appendLine("SQLCortex: Scheduled schema refresh after DDL execution.");
+    }
     vscode.window.showInformationMessage(
       `SQLCortex: Returned ${response.rowsReturned} rows in ${response.executionTimeMs}ms.`
     );
@@ -2953,6 +2992,20 @@ function extractErrorReason(details?: Record<string, unknown>): string | null {
   }
   const reason = details.reason;
   return typeof reason === "string" && reason.trim() ? reason.trim() : null;
+}
+
+function isSchemaMutatingSql(sql: string): boolean {
+  const withoutLineComments = sql.replace(/--.*$/gm, " ");
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, " ");
+  const keyword = withoutBlockComments.trim().match(/\b([a-zA-Z]+)\b/)?.[1]?.toLowerCase();
+  return (
+    keyword === "create" ||
+    keyword === "alter" ||
+    keyword === "drop" ||
+    keyword === "truncate" ||
+    keyword === "rename" ||
+    keyword === "comment"
+  );
 }
 
 function buildTableSelectSql(schemaName: string, tableName: string): string {
@@ -3330,32 +3383,156 @@ function formatDbCopilotEnvironment(env: DbCopilotMigrationPlan["environment"]):
   }
 }
 
-async function syncSampleDbCopilotSchemaSnapshot(
+async function syncDbCopilotSchemaSnapshot(
   context: vscode.ExtensionContext,
+  sessionManager: ApiSessionManager,
+  targetStore: TargetStore,
   statusBars: DbCopilotStatusBarItems,
   providers: DbCopilotRefreshable[],
-  successMessage: string
+  successMessage?: string
 ): Promise<void> {
   await setDbCopilotSchemaSnapshotStatus(context, "loading");
   await refreshDbCopilotUI(context, statusBars, providers);
   try {
-    const snapshots = createSampleDbCopilotSnapshots();
+    const target = targetStore.getSelectedTarget();
+    if (!target) {
+      throw new Error("Select a target before refreshing schema.");
+    }
+
+    const schemaApi = new SchemaApi(await sessionManager.getClientOrThrow());
+    const targetRef = {
+      projectId: target.projectId,
+      envId: target.envId,
+    };
+
+    const refreshResponse = await schemaApi.refreshSnapshot(targetRef);
+    const schemaSnapshot = refreshResponse.snapshot ?? (await schemaApi.getSnapshot(targetRef));
+    const snapshots = mapSchemaSnapshotToDbCopilotSnapshots(schemaSnapshot);
+
     await setDbCopilotSchemaSnapshots(context, snapshots);
-    await setDbCopilotSchemaSnapshot(context, true);
+    await setDbCopilotSchemaSnapshotStatus(context, "ready");
     resetDbCopilotBottomPanel();
     await refreshDbCopilotUI(context, statusBars, providers);
-    vscode.window.showInformationMessage(successMessage);
+    if (successMessage) {
+      vscode.window.showInformationMessage(successMessage);
+    }
   } catch (err) {
-    const message =
-      err instanceof Error && err.message.trim().length
-        ? err.message
-        : "Schema snapshot refresh failed.";
+    const message = formatDbCopilotSchemaSyncError(err, sessionManager);
     await setDbCopilotSchemaSnapshots(context, null);
     await setDbCopilotSchemaSnapshotStatus(context, "error", message);
     resetDbCopilotBottomPanel();
     await refreshDbCopilotUI(context, statusBars, providers);
     vscode.window.showErrorMessage(`DB Copilot: ${message}`);
   }
+}
+
+function mapSchemaSnapshotToDbCopilotSnapshots(
+  snapshot: SchemaSnapshot
+): DbCopilotSchemaSnapshots {
+  const snapshots: DbCopilotSchemaSnapshots = {};
+
+  for (const schema of snapshot.schemas) {
+    const schemaName = schema.name.trim();
+    if (!schemaName) {
+      continue;
+    }
+
+    snapshots[schemaName] = {
+      schema: schemaName,
+      tables: schema.tables.map((table) => ({
+        name: table.name,
+        columns: table.columns.map((column) => ({
+          name: column.name,
+          type: column.dataType,
+          nullable: column.nullable,
+          default: column.default,
+        })),
+        primaryKey: resolvePrimaryKeyColumns(table),
+        constraints: table.constraints.map((constraint) => ({
+          name: constraint.name,
+          type: constraint.type,
+          columns: [...constraint.columns],
+          definition: constraint.definition,
+        })),
+        foreignKeys: table.foreignKeys.map((foreignKey) => ({
+          name: foreignKey.name,
+          columns: [...foreignKey.columns],
+          references: {
+            schema: foreignKey.referencedSchema,
+            table: foreignKey.referencedTable,
+            columns: [...foreignKey.referencedColumns],
+          },
+          onUpdate: foreignKey.onUpdate,
+          onDelete: foreignKey.onDelete,
+        })),
+        indexes: table.indexes.map((index) => ({
+          name: index.name,
+          columns: [...index.columns],
+          unique: index.unique,
+          method: index.method ?? "unknown",
+          primary: index.primary,
+        })),
+      })),
+      views: schema.views.map((view) => ({
+        name: view.name,
+        definition: view.definition,
+      })),
+      routines: schema.routines.map((routine) => ({
+        name: routine.name,
+        kind: routine.kind,
+        signature: routine.signature,
+        returnType: routine.returnType,
+        language: routine.language,
+        definition: routine.definition,
+      })),
+      functions: schema.functions.map((routine) => ({
+        name: routine.name,
+        kind: routine.kind,
+        signature: routine.signature,
+        returnType: routine.returnType,
+        language: routine.language,
+        definition: routine.definition,
+      })),
+      procedures: schema.procedures.map((routine) => ({
+        name: routine.name,
+        kind: routine.kind,
+        signature: routine.signature,
+        returnType: routine.returnType,
+        language: routine.language,
+        definition: routine.definition,
+      })),
+      capturedAt: snapshot.capturedAt ?? null,
+    };
+  }
+
+  return snapshots;
+}
+
+function resolvePrimaryKeyColumns(table: SchemaSnapshot["schemas"][number]["tables"][number]): string[] {
+  const primaryConstraint = table.constraints.find(
+    (constraint) => constraint.type.trim().toUpperCase() === "PRIMARY KEY"
+  );
+  if (primaryConstraint && primaryConstraint.columns.length > 0) {
+    return [...primaryConstraint.columns];
+  }
+
+  const primaryIndex = table.indexes.find((index) => index.primary && index.columns.length > 0);
+  if (primaryIndex) {
+    return [...primaryIndex.columns];
+  }
+
+  return [];
+}
+
+function formatDbCopilotSchemaSyncError(
+  err: unknown,
+  sessionManager: ApiSessionManager
+): string {
+  if (err instanceof Error && err.message.trim().length > 0) {
+    return err.message;
+  }
+  const normalized = sessionManager.formatError(err).trim();
+  return normalized.length > 0 ? normalized : "Schema snapshot refresh failed.";
 }
 
 async function ensureDbCopilotConnected(
@@ -3935,6 +4112,7 @@ async function executeDbCopilotMigrationPlan(
   appendDbCopilotLogEntry(
     buildDbCopilotLogEntry("execution", "Migration execution completed.")
   );
+  dbCopilotSchemaRefreshScheduler?.schedule();
   vscode.window.showInformationMessage("DB Copilot: Migration executed successfully.");
 }
 
