@@ -1,12 +1,18 @@
 export type DbCopilotSchemaSnapshot = {
   schema: string;
   tables: DbCopilotTable[];
+  views?: DbCopilotView[];
+  routines?: DbCopilotRoutine[];
+  functions?: DbCopilotRoutine[];
+  procedures?: DbCopilotRoutine[];
+  capturedAt?: string | null;
 };
 
 export type DbCopilotTable = {
   name: string;
   columns: DbCopilotColumn[];
   primaryKey: string[];
+  constraints?: DbCopilotConstraint[];
   foreignKeys: DbCopilotForeignKey[];
   indexes: DbCopilotIndex[];
   rowCount?: number;
@@ -16,15 +22,26 @@ export type DbCopilotColumn = {
   name: string;
   type: string;
   nullable: boolean;
+  default?: string | null;
+};
+
+export type DbCopilotConstraint = {
+  name: string;
+  type: string;
+  columns: string[];
+  definition: string | null;
 };
 
 export type DbCopilotForeignKey = {
+  name?: string;
   columns: string[];
   references: {
     schema: string;
     table: string;
     columns: string[];
   };
+  onUpdate?: string | null;
+  onDelete?: string | null;
 };
 
 export type DbCopilotIndex = {
@@ -33,6 +50,20 @@ export type DbCopilotIndex = {
   unique: boolean;
   method: string;
   primary?: boolean;
+};
+
+export type DbCopilotView = {
+  name: string;
+  definition: string | null;
+};
+
+export type DbCopilotRoutine = {
+  name: string;
+  kind: string | null;
+  signature: string | null;
+  returnType: string | null;
+  language: string | null;
+  definition?: string | null;
 };
 
 export type DbCopilotSchemaSnapshots = Record<string, DbCopilotSchemaSnapshot>;

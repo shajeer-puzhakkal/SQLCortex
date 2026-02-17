@@ -195,6 +195,14 @@
       {
         "command": "dbcopilot.openAgentLogs",
         "title": "DB Copilot: Open Agent Logs"
+      },
+      {
+        "command": "dbcopilot.runTableQuery",
+        "title": "DB Copilot: Run Table Query"
+      },
+      {
+        "command": "dbcopilot.openQueryTemplate",
+        "title": "DB Copilot: Open Query Template"
       }
     ],
     "configuration": {
@@ -431,6 +439,16 @@
           "group": "navigation"
         },
         {
+          "command": "dbcopilot.loginWithToken",
+          "when": "view == dbcopilot.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.selectTarget",
+          "when": "view == dbcopilot.schema",
+          "group": "navigation"
+        },
+        {
           "command": "dbcopilot.refreshSchema",
           "when": "view == dbcopilot.schema",
           "group": "navigation"
@@ -481,6 +499,31 @@
           "command": "dbcopilot.openErdDiagram",
           "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema",
           "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.runTableQuery",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema.table",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.openQueryTemplate",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema.table",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dbcopilot.openQueryTemplate",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema.view",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.openQueryTemplate",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema.function",
+          "group": "navigation"
+        },
+        {
+          "command": "dbcopilot.openQueryTemplate",
+          "when": "view == dbcopilot.schema && viewItem == dbcopilot.schema.procedure",
+          "group": "navigation"
         }
       ]
     }
@@ -497,6 +540,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.19",
+    "@types/pg": "^8.16.0",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.20.2",
     "typescript": "^5.4.5"
