@@ -65,6 +65,14 @@ export class DbCopilotPlaceholderProvider
           commandId: "dbcopilot.captureSchemaSnapshot",
         })
       );
+      if (this.deps.viewTitle === "Overview") {
+        children.push(
+          new DbCopilotTreeNode("Refresh Schema", {
+            icon: "refresh",
+            commandId: "dbcopilot.refreshSchema",
+          })
+        );
+      }
     } else {
       children.push(...this.buildReadyNodes(state.connectionDisplayLabel));
     }

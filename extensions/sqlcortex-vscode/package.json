@@ -450,7 +450,7 @@
         },
         {
           "command": "dbcopilot.refreshSchema",
-          "when": "view == dbcopilot.schema",
+          "when": "view == dbcopilot.overview",
           "group": "navigation"
         }
       ],
