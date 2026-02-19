@@ -64,11 +64,11 @@ export function createErrorNode(error: SchemaErrorState): SchemaTreeNode {
 export function createEmptySnapshotNode(): SchemaTreeNode {
   return createPlaceholderNode("No snapshot", {
     icon: "database",
-    message: "Capture or refresh a schema snapshot to populate this tree.",
+    message: "Capture a schema snapshot to populate this tree.",
     action: {
-      label: "Refresh",
-      commandId: "dbcopilot.refreshSchema",
-      icon: "refresh",
+      label: "Capture Schema Snapshot",
+      commandId: "dbcopilot.captureSchemaSnapshot",
+      icon: "cloud-download",
     },
   });
 }
