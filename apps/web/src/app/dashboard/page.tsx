@@ -114,9 +114,14 @@ export default function DashboardPage() {
       const defaultOrgId = selectedProject
         ? selectedProject.org_id
         : mePayload.org?.id ?? mePayload.memberships?.[0]?.org_id ?? null;
-      const usageUrl = defaultOrgId
-        ? `${API_BASE}/dashboard/usage?org_id=${encodeURIComponent(defaultOrgId)}&range=7d`
-        : `${API_BASE}/dashboard/usage?range=7d`;
+      const usageParams = new URLSearchParams({ range: "7d" });
+      if (selectedProject?.id) {
+        usageParams.set("project_id", selectedProject.id);
+      }
+      if (defaultOrgId) {
+        usageParams.set("org_id", defaultOrgId);
+      }
+      const usageUrl = `${API_BASE}/dashboard/usage?${usageParams.toString()}`;
       const planUrl = defaultOrgId
         ? `${API_BASE}/api/v1/plan?org_id=${encodeURIComponent(defaultOrgId)}`
         : `${API_BASE}/api/v1/plan`;
