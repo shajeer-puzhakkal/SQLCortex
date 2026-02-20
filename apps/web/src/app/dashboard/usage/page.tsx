@@ -35,6 +35,7 @@ type RangeValue = "7d" | "30d";
 
 const actionLabelMap: Record<string, string> = {
   query_analysis: "Query analysis",
+  query_execute: "Query execute",
   ai_explain: "AI explain",
   ai_suggest: "AI suggest",
   reanalyze: "Reanalyze",

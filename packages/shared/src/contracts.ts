@@ -181,7 +181,7 @@ export type MeterEvent = {
   projectId: string | null;
   userId: string | null;
   source: "vscode";
-  eventType: "query_analysis" | "ai_explain" | "ai_suggest" | "reanalyze";
+  eventType: "query_analysis" | "query_execute" | "ai_explain" | "ai_suggest" | "reanalyze";
   aiUsed: boolean;
   model?: string | null;
   tokensEstimated?: number | null;

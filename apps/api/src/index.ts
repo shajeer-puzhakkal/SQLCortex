@@ -4189,6 +4189,22 @@ app.post(
       ...(req.body?.client ? { client: req.body.client } : {}),
     });
 
+    void recordMeterEvent(prisma, {
+      orgId,
+      projectId: projectContext.projectId ?? null,
+      userId: auth.userId ?? null,
+      source: "vscode",
+      eventType: "query_execute",
+      aiUsed: false,
+      model: null,
+      tokensEstimated: null,
+      sql: normalizedSql,
+      durationMs: Date.now() - meterStartedAt,
+      status: error ? "error" : "success",
+      errorCode: error?.code ?? null,
+      explainMode: null,
+    });
+
     const response: ExecuteQueryResponse = {
       queryId,
       executionTimeMs,
