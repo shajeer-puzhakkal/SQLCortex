@@ -446,6 +446,8 @@ function applyCreateTableStatement(
   const schema = ensureSchema(snapshot, tableRef.schemaName);
   schema.tables.push({
     name: tableRef.tableName,
+    rowCount: 0,
+    tableSizeMB: 0,
     columns,
     constraints,
     foreignKeys,
@@ -1276,6 +1278,8 @@ function cloneSnapshot(snapshot: SchemaSnapshot): SchemaSnapshot {
       name: schema.name,
       tables: schema.tables.map((table) => ({
         name: table.name,
+        rowCount: table.rowCount,
+        tableSizeMB: table.tableSizeMB,
         columns: table.columns.map((column) => ({
           name: column.name,
           dataType: column.dataType,

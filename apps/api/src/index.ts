@@ -310,7 +310,12 @@ type SchemaCacheEntry<T> = {
   payload: T;
 };
 
-type SchemaTableResource = { name: string; type: "table" | "view" };
+type SchemaTableResource = {
+  name: string;
+  type: "table" | "view";
+  rowCount?: number | null;
+  tableSizeMB?: number | null;
+};
 type SchemaColumnResource = {
   name: string;
   type: string;
@@ -338,6 +343,8 @@ type TableInfo = {
   schema: string;
   name: string;
   type: "table" | "view";
+  rowCount: number | null;
+  tableSizeMB: number | null;
   columns: SchemaColumnResource[];
   foreignKeys: ForeignKeyResource[];
   indexes: IndexResource[];
@@ -1114,7 +1121,15 @@ async function fetchSchemaMetadata(
     const tables = await tx.$queryRaw<SchemaTableResource[]>`
       SELECT
         c.relname AS name,
-        CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END AS type
+        CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END AS type,
+        CASE
+          WHEN c.relkind IN ('r', 'p', 'f') THEN GREATEST(c.reltuples, 0)::double precision
+          ELSE NULL
+        END AS "rowCount",
+        CASE
+          WHEN c.relkind IN ('r', 'p', 'f', 'm') THEN ROUND(pg_total_relation_size(c.oid)::numeric / 1048576.0, 2)::double precision
+          ELSE NULL
+        END AS "tableSizeMB"
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = ${schemaName}
@@ -1223,6 +1238,14 @@ async function fetchSchemaMetadata(
       schema: schemaName,
       name: table.name,
       type: table.type,
+      rowCount:
+        typeof table.rowCount === "number" && Number.isFinite(table.rowCount)
+          ? Math.max(0, Math.round(table.rowCount))
+          : null,
+      tableSizeMB:
+        typeof table.tableSizeMB === "number" && Number.isFinite(table.tableSizeMB)
+          ? Math.max(0, Number(table.tableSizeMB.toFixed(2)))
+          : null,
       columns: [],
       foreignKeys: [],
       indexes: [],

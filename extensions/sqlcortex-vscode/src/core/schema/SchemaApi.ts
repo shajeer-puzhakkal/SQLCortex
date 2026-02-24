@@ -23,6 +23,10 @@ type LegacySchemaMetadataResponse = {
 type LegacySchemaTable = {
   name?: string | null;
   type?: string | null;
+  rowCount?: number | string | null;
+  row_count?: number | string | null;
+  tableSizeMB?: number | string | null;
+  table_size_mb?: number | string | null;
   columns?: LegacySchemaColumn[];
   foreignKeys?: LegacySchemaForeignKey[];
   indexes?: LegacySchemaIndex[];
@@ -215,6 +219,21 @@ function normalizeValue(value: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function parseLegacyNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function isNotFound(err: unknown): boolean {
   return Boolean(
     err &&
@@ -256,6 +275,8 @@ function mapLegacySchema(
 
     tables.push({
       name,
+      rowCount: parseLegacyNumber(entry.rowCount ?? entry.row_count),
+      tableSizeMB: parseLegacyNumber(entry.tableSizeMB ?? entry.table_size_mb),
       columns: (entry.columns ?? [])
         .map(mapLegacyColumn)
         .filter((column): column is NonNullable<typeof column> => Boolean(column)),
