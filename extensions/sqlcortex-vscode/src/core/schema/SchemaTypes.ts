@@ -23,6 +23,8 @@ export type SchemaSnapshotSchema = {
 
 export type SchemaSnapshotTable = {
   name: string;
+  rowCount: number | null;
+  tableSizeMB: number | null;
   columns: SchemaSnapshotColumn[];
   constraints: SchemaSnapshotConstraint[];
   foreignKeys: SchemaSnapshotForeignKey[];
@@ -162,6 +164,18 @@ function parseTable(value: unknown): SchemaSnapshotTable {
 
   return {
     name: requiredString(record.name, "Table name is missing."),
+    rowCount: numberOrNull(
+      record.rowCount ??
+        record.row_count ??
+        record.estimatedRowCount ??
+        record.estimated_row_count
+    ),
+    tableSizeMB: numberOrNull(
+      record.tableSizeMB ??
+        record.table_size_mb ??
+        record.tableSize ??
+        record.table_size
+    ),
     columns: asArray(record.columns)?.map(parseColumn) ?? [],
     constraints: asArray(record.constraints)?.map(parseConstraint) ?? [],
     foreignKeys,
@@ -325,6 +339,25 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "bigint") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function stringArray(value: unknown): string[] {
