@@ -7,6 +7,13 @@ import type {
   DbCopilotRiskImpactState,
   DbCopilotSqlPreviewState,
 } from "./bottomPanelState";
+import { buildMigrationDiff } from "../core/migration/MigrationDiffBuilder";
+import {
+  appendRollbackPlanToRiskSummary,
+  generateRollbackPlan,
+  type RollbackPlan,
+} from "../core/migration/RollbackGenerator";
+import type { SchemaSnapshot } from "../core/schema/SchemaTypes";
 
 export type DbCopilotDbEngine =
   | "postgres"
@@ -111,6 +118,7 @@ export type DbCopilotRiskOutput = {
   policy_violations: string[];
   requires_manual_review: boolean;
   final_gate: "approve" | "reject" | "revise";
+  rollback_plan?: RollbackPlan;
 };
 
 export type DbCopilotGovernanceOutput = {
@@ -1058,6 +1066,7 @@ function runRisk(input: DbCopilotOrchestratorInput, outputs: DbCopilotAgentOutpu
   const ddl = outputs.ddl;
   const governance = outputs.governance;
   const ddlText = ddl?.up_sql.toLowerCase() ?? "";
+  const rollbackPlan = buildRollbackPlanForRisk(input, ddl?.up_sql ?? "");
   const breakingChanges = ddlText.includes("drop ") ? ["Drop detected"] : [];
   const lockRisk: DbCopilotRiskOutput["lock_contention_risk"] =
     ddlText.length === 0
@@ -1068,20 +1077,164 @@ function runRisk(input: DbCopilotOrchestratorInput, outputs: DbCopilotAgentOutpu
           ? "low"
           : "med";
   const policyViolations = governance?.violations.map((entry) => entry.rule) ?? [];
+  const dataLossRisk = classifyRollbackDataLossRisk(rollbackPlan);
   const requiresManualReview =
     policyViolations.length > 0 || breakingChanges.length > 0 || lockRisk === "high";
   const finalGate = requiresManualReview ? "revise" : "approve";
+  const mitigations = lockRisk === "low" ? ["CONCURRENTLY used"] : ["Schedule off-peak"];
+  if (rollbackPlan?.warnings.length) {
+    mitigations.push("Review rollback warnings and capture backup before execution.");
+  }
 
   return {
     breaking_changes: breakingChanges,
     lock_contention_risk: lockRisk,
     migration_window_friendly: lockRisk === "low",
-    data_loss_risk: "none",
-    mitigations: lockRisk === "low" ? ["CONCURRENTLY used"] : ["Schedule off-peak"],
+    data_loss_risk: dataLossRisk,
+    mitigations,
     policy_violations: policyViolations,
     requires_manual_review: requiresManualReview,
     final_gate: finalGate,
+    rollback_plan: rollbackPlan ?? undefined,
   };
+}
+
+function buildRollbackPlanForRisk(
+  input: DbCopilotOrchestratorInput,
+  ddlSql: string
+): RollbackPlan | null {
+  if (!ddlSql.trim() || !input.schema_snapshot) {
+    return null;
+  }
+
+  try {
+    const snapshotBefore = toCoreSchemaSnapshot(input.schema_snapshot);
+    const diffResult = buildMigrationDiff({
+      snapshotBefore,
+      ddlSql,
+      defaultSchema: input.schema_snapshot.schema,
+    });
+    return generateRollbackPlan({
+      migrationDiff: diffResult.migrationDiff,
+    });
+  } catch {
+    // Keep risk evaluation resilient if simulation fails on unsupported SQL.
+    return null;
+  }
+}
+
+function classifyRollbackDataLossRisk(
+  rollbackPlan: RollbackPlan | null
+): DbCopilotRiskOutput["data_loss_risk"] {
+  if (!rollbackPlan || rollbackPlan.warnings.length === 0) {
+    return "none";
+  }
+  if (
+    rollbackPlan.warnings.some((warning) =>
+      /cannot\s+automatically\s+restore|cannot\s+be\s+recovered/i.test(warning)
+    )
+  ) {
+    return "probable";
+  }
+  return "potential";
+}
+
+function toCoreSchemaSnapshot(snapshot: DbCopilotSchemaSnapshot): SchemaSnapshot {
+  const schemaName = snapshot.schema || "public";
+  const routines = (snapshot.routines ?? []).map((routine) => toCoreRoutine(routine));
+  const functions = (snapshot.functions ?? []).map((routine) => toCoreRoutine(routine));
+  const procedures = (snapshot.procedures ?? []).map((routine) => toCoreRoutine(routine));
+
+  return {
+    capturedAt: snapshot.capturedAt ?? undefined,
+    schemas: [
+      {
+        name: schemaName,
+        tables: snapshot.tables.map((table) => toCoreTableSnapshot(schemaName, table)),
+        views: (snapshot.views ?? []).map((view) => ({
+          name: view.name,
+          definition: view.definition,
+        })),
+        routines,
+        functions,
+        procedures,
+      },
+    ],
+  };
+}
+
+function toCoreTableSnapshot(
+  schemaName: string,
+  table: DbCopilotSchemaSnapshot["tables"][number]
+): SchemaSnapshot["schemas"][number]["tables"][number] {
+  const constraints = (table.constraints ?? []).map((constraint) => ({
+    name: constraint.name,
+    type: constraint.type,
+    columns: [...constraint.columns],
+    definition: constraint.definition,
+  }));
+
+  if (
+    table.primaryKey.length > 0 &&
+    !constraints.some((constraint) => normalizeConstraintType(constraint.type) === "PRIMARY KEY")
+  ) {
+    constraints.push({
+      name: `${table.name}_pkey`,
+      type: "PRIMARY KEY",
+      columns: [...table.primaryKey],
+      definition: null,
+    });
+  }
+
+  return {
+    name: table.name,
+    rowCount: table.rowCount ?? null,
+    tableSizeMB: null,
+    columns: table.columns.map((column) => ({
+      name: column.name,
+      dataType: column.type,
+      nullable: column.nullable,
+      default: column.default ?? null,
+    })),
+    constraints,
+    foreignKeys: table.foreignKeys.map((foreignKey, index) => ({
+      name:
+        foreignKey.name && foreignKey.name.trim().length > 0
+          ? foreignKey.name
+          : `${table.name}_fk_${index + 1}`,
+      columns: [...foreignKey.columns],
+      referencedSchema: foreignKey.references.schema || schemaName,
+      referencedTable: foreignKey.references.table,
+      referencedColumns: [...foreignKey.references.columns],
+      onUpdate: foreignKey.onUpdate ?? null,
+      onDelete: foreignKey.onDelete ?? null,
+    })),
+    indexes: table.indexes.map((index) => ({
+      name: index.name,
+      columns: [...index.columns],
+      unique: index.unique,
+      primary: index.primary ?? false,
+      method: index.method || null,
+      predicate: null,
+    })),
+  };
+}
+
+function toCoreRoutine(
+  routine: NonNullable<DbCopilotSchemaSnapshot["routines"]>[number]
+): SchemaSnapshot["schemas"][number]["routines"][number] {
+  return {
+    name: routine.name,
+    kind: routine.kind || "function",
+    signature: routine.signature,
+    returnType: routine.returnType,
+    language: routine.language,
+    definition: routine.definition ?? null,
+  };
+}
+
+function normalizeConstraintType(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toUpperCase();
 }
 
 function runExplainability(
@@ -1181,7 +1334,7 @@ function buildRiskImpactState(
     reasonParts.push("Manual review required.");
   }
   const reason = reasonParts.length ? reasonParts.join(" ") : null;
-  const summary: Array<{ label: string; value: string }> = [
+  const summaryBase: Array<{ label: string; value: string }> = [
     {
       label: "Breaking changes",
       value: risk?.breaking_changes.length ? "Yes" : "None",
@@ -1215,6 +1368,7 @@ function buildRiskImpactState(
       value: policyViolationSummary,
     },
   ];
+  const summary = appendRollbackPlanToRiskSummary(summaryBase, risk?.rollback_plan);
   return {
     requiresManualReview,
     requiresManualReviewReason: reason ?? undefined,
