@@ -38,6 +38,20 @@ export function createSampleDbCopilotPanel(mode: DbCopilotMode): DbCopilotPanelS
       { label: "Mitigations", value: "Already applied" },
       { label: "Policy", value: "Compliant" },
     ],
+    sections: [
+      { title: "Risk Level", value: "LOW (18/100)" },
+      { title: "Impacted Objects", value: "0 impacted, 0 broken" },
+      { title: "Lock Behavior", value: "SHARE UPDATE EXCLUSIVE (LOW)" },
+      { title: "Rows Affected", value: "0" },
+      { title: "Safer Strategy", value: "Original plan acceptable" },
+      { title: "Rollback Plan", value: "1 statement(s), 0 warning(s)" },
+      { title: "Confidence Score", value: "92% (HIGH)" },
+    ],
+    actions: {
+      canProceed: true,
+      canApplySaferPlan: false,
+      saferPlanReason: "Safer strategy is not required for this migration.",
+    },
   };
 
   const logs: DbCopilotLogEntry[] = [
