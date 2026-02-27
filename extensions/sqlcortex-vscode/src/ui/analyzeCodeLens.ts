@@ -30,12 +30,8 @@ export class AnalyzeCodeLensProvider implements vscode.CodeLensProvider {
     const range = new vscode.Range(line, 0, line, 0);
     return [
       new vscode.CodeLens(range, {
-        title: "SQLCortex: Analyze",
-        command: "sqlcortex.analyzeDocument",
-      }),
-      new vscode.CodeLens(range, {
-        title: "SQLCortex: Analyze (EXPLAIN ANALYZE)",
-        command: "sqlcortex.analyzeDocumentWithAnalyze",
+        title: "DB Copilot: Optimize Current Query",
+        command: "dbcopilot.optimizeCurrentQuery",
       }),
     ];
   }

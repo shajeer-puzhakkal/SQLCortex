@@ -55,4 +55,20 @@ export type DbCopilotRiskImpactState = {
   requiresManualReview: boolean;
   requiresManualReviewReason?: string | null;
   summary: Array<{ label: string; value: string }>;
+  sections?: DbCopilotRiskImpactSection[];
+  actions?: DbCopilotRiskImpactActions;
+};
+
+export type DbCopilotRiskImpactSection = {
+  title: string;
+  value: string;
+  details?: string[];
+};
+
+export type DbCopilotRiskImpactActions = {
+  canProceed: boolean;
+  proceedReason?: string | null;
+  canApplySaferPlan: boolean;
+  saferPlanReason?: string | null;
+  saferPlanApplied?: boolean;
 };

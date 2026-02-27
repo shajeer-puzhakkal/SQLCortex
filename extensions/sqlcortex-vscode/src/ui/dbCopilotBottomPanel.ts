@@ -16,7 +16,10 @@ type SqlPreviewMessage =
   | { type: "saveMigration" }
   | { type: "executeSql" };
 
-type RiskImpactMessage = { type: "ready" };
+type RiskImpactMessage =
+  | { type: "ready" }
+  | { type: "proceed" }
+  | { type: "applySaferPlan" };
 type LogsMessage = { type: "ready" };
 
 export class DbCopilotSqlPreviewView implements vscode.WebviewViewProvider {
@@ -574,9 +577,19 @@ export class DbCopilotRiskImpactView implements vscode.WebviewViewProvider {
     if (!payload || typeof payload !== "object") {
       return;
     }
-    if (payload.type === "ready") {
-      this.isReady = true;
-      this.postState();
+    switch (payload.type) {
+      case "ready":
+        this.isReady = true;
+        this.postState();
+        return;
+      case "proceed":
+        await vscode.commands.executeCommand("dbcopilot.proceedFromRiskPanel");
+        return;
+      case "applySaferPlan":
+        await vscode.commands.executeCommand("dbcopilot.applySaferPlan");
+        return;
+      default:
+        return;
     }
   }
 
@@ -674,6 +687,87 @@ export class DbCopilotRiskImpactView implements vscode.WebviewViewProvider {
         font-size: 11px;
       }
 
+      .sections {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      .sections.hidden {
+        display: none;
+      }
+
+      .section {
+        border-radius: 10px;
+        border: 1px solid var(--vscode-panel-border);
+        background: var(--vscode-editorWidget-background);
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .section-title {
+        font-size: 11px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .section-value {
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .section-details {
+        margin: 0;
+        padding-left: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .actions.hidden {
+        display: none;
+      }
+
+      button {
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+      }
+
+      button.secondary {
+        background: var(--vscode-button-secondaryBackground);
+        color: var(--vscode-button-secondaryForeground);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .note {
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .note.hidden {
+        display: none;
+      }
+
       .empty {
         padding: 16px;
         border-radius: 10px;
@@ -691,24 +785,39 @@ export class DbCopilotRiskImpactView implements vscode.WebviewViewProvider {
     <div class="shell">
       <header>
         <h1>Risk & Impact</h1>
-        <p class="subtitle">Governance and safety summary for the proposed changes.</p>
+        <p class="subtitle">Structured simulation output for the proposed migration.</p>
       </header>
       <div id="banner" class="banner hidden"></div>
       <div id="summary" class="summary hidden"></div>
+      <div id="sections" class="sections hidden"></div>
+      <div id="actions" class="actions hidden">
+        <button id="proceedButton">Proceed</button>
+        <button id="saferButton" class="secondary">Apply Safer Plan</button>
+      </div>
+      <div id="actionNote" class="note hidden"></div>
       <div id="empty" class="empty hidden">Risk summary will appear here.</div>
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
       const banner = document.getElementById("banner");
       const summary = document.getElementById("summary");
+      const sections = document.getElementById("sections");
+      const actions = document.getElementById("actions");
+      const proceedButton = document.getElementById("proceedButton");
+      const saferButton = document.getElementById("saferButton");
+      const actionNote = document.getElementById("actionNote");
       const empty = document.getElementById("empty");
 
       function render(state) {
         if (!state) {
           banner.classList.add("hidden");
           summary.classList.add("hidden");
+          sections.classList.add("hidden");
+          actions.classList.add("hidden");
+          actionNote.classList.add("hidden");
           empty.classList.remove("hidden");
           summary.innerHTML = "";
+          sections.innerHTML = "";
           return;
         }
 
@@ -724,7 +833,7 @@ export class DbCopilotRiskImpactView implements vscode.WebviewViewProvider {
         }
 
         summary.innerHTML = "";
-        const rows = state.summary || [];
+        const rows = Array.isArray(state.summary) ? state.summary : [];
         rows.forEach((item) => {
           const row = document.createElement("div");
           row.className = "summary-row";
@@ -737,7 +846,71 @@ export class DbCopilotRiskImpactView implements vscode.WebviewViewProvider {
           row.appendChild(value);
           summary.appendChild(row);
         });
+
+        sections.innerHTML = "";
+        const structuredSections = Array.isArray(state.sections) ? state.sections : [];
+        if (structuredSections.length) {
+          sections.classList.remove("hidden");
+          structuredSections.forEach((entry) => {
+            const card = document.createElement("section");
+            card.className = "section";
+            const title = document.createElement("div");
+            title.className = "section-title";
+            title.textContent = entry.title || "";
+            const value = document.createElement("div");
+            value.className = "section-value";
+            value.textContent = entry.value || "";
+            card.appendChild(title);
+            card.appendChild(value);
+            if (Array.isArray(entry.details) && entry.details.length) {
+              const details = document.createElement("ul");
+              details.className = "section-details";
+              entry.details.forEach((detail) => {
+                const item = document.createElement("li");
+                item.textContent = detail || "";
+                details.appendChild(item);
+              });
+              card.appendChild(details);
+            }
+            sections.appendChild(card);
+          });
+        } else {
+          sections.classList.add("hidden");
+        }
+
+        const actionState = state.actions || null;
+        if (actionState) {
+          actions.classList.remove("hidden");
+          proceedButton.disabled = !actionState.canProceed;
+          saferButton.disabled = !actionState.canApplySaferPlan;
+          let note = "";
+          if (!actionState.canProceed && actionState.proceedReason) {
+            note = actionState.proceedReason;
+          }
+          if (!actionState.canApplySaferPlan && actionState.saferPlanReason) {
+            note = note ? note + " " + actionState.saferPlanReason : actionState.saferPlanReason;
+          }
+          if (actionState.saferPlanApplied) {
+            note = note ? note + " Safer plan is active." : "Safer plan is active.";
+          }
+          if (note) {
+            actionNote.textContent = note;
+            actionNote.classList.remove("hidden");
+          } else {
+            actionNote.classList.add("hidden");
+          }
+        } else {
+          actions.classList.add("hidden");
+          actionNote.classList.add("hidden");
+        }
       }
+
+      proceedButton.addEventListener("click", () => {
+        vscode.postMessage({ type: "proceed" });
+      });
+      saferButton.addEventListener("click", () => {
+        vscode.postMessage({ type: "applySaferPlan" });
+      });
 
       window.addEventListener("message", (event) => {
         const message = event.data;

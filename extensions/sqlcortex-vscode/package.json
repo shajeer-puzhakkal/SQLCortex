@@ -37,6 +37,7 @@
     "onCommand:dbcopilot.openMigrationPlan",
     "onCommand:dbcopilot.saveMigration",
     "onCommand:dbcopilot.executeMigration",
+    "onCommand:dbcopilot.applySaferPlan",
     "onCommand:dbcopilot.toggleMode",
     "onCommand:dbcopilot.openAgentLogs"
   ],
@@ -187,6 +188,10 @@
       {
         "command": "dbcopilot.executeMigration",
         "title": "DB Copilot: Execute Migration"
+      },
+      {
+        "command": "dbcopilot.applySaferPlan",
+        "title": "DB Copilot: Apply Safer Plan"
       },
       {
         "command": "dbcopilot.toggleMode",

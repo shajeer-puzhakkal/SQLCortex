@@ -87,6 +87,7 @@ import {
   type DbCopilotSchemaSnapshots,
 } from "./dbcopilot/schemaSnapshot";
 import {
+  buildDbCopilotRiskImpactState,
   buildDbCopilotOptimizationPlan,
   resolveDbCopilotDbEngine,
   resolveDbCopilotPolicies,
@@ -176,6 +177,8 @@ const DBCOPILOT_COMMANDS: Array<{ id: string; label: string }> = [
   { id: "dbcopilot.openMigrationPlan", label: "Open Migration Plan" },
   { id: "dbcopilot.saveMigration", label: "Save Migration" },
   { id: "dbcopilot.executeMigration", label: "Execute Migration" },
+  { id: "dbcopilot.proceedFromRiskPanel", label: "Proceed From Risk Panel" },
+  { id: "dbcopilot.applySaferPlan", label: "Apply Safer Plan" },
   { id: "dbcopilot.toggleMode", label: "Toggle Mode" },
   { id: "dbcopilot.viewPolicies", label: "View Policies" },
   { id: "dbcopilot.openAgentLogs", label: "Open Agent Logs" },
@@ -918,6 +921,20 @@ export function activate(context: vscode.ExtensionContext) {
           statusBars,
           sidebarProvider
         );
+      },
+      "dbcopilot.proceedFromRiskPanel": async () => {
+        await proceedDbCopilotFromRiskPanel(
+          context,
+          tokenStore,
+          output,
+          statusBars,
+          sidebarProvider,
+          dbCopilotStatusBars,
+          dbCopilotProviders
+        );
+      },
+      "dbcopilot.applySaferPlan": async () => {
+        applyDbCopilotSaferPlan(context);
       },
       "dbcopilot.toggleMode": async () => {
         await toggleDbCopilotMode(context, dbCopilotStatusBars, dbCopilotProviders);
@@ -1833,6 +1850,7 @@ async function runDbCopilotSchemaTableQueryFlow(
     statusBars,
     sidebarProvider
   );
+  const preserveStructuredRiskState = Boolean(dbCopilotRiskImpactState?.sections?.length);
 
   setDbCopilotSqlPreviewState(context, {
     upSql: sql,
@@ -1841,7 +1859,9 @@ async function runDbCopilotSchemaTableQueryFlow(
     policyAllowsExecution: false,
     policyReason: null,
   });
-  setDbCopilotRiskImpactState(context, null);
+  if (!preserveStructuredRiskState) {
+    setDbCopilotRiskImpactState(context, null);
+  }
   DbCopilotSqlPreviewView.show(context);
   DbCopilotLogsView.show(context);
 
@@ -1888,14 +1908,16 @@ async function runDbCopilotSchemaTableQueryFlow(
     const response = await executeQuery(client, request);
     if (response.error) {
       const errorMessage = response.error.message ?? "Query failed.";
-      setDbCopilotRiskImpactState(context, {
-        requiresManualReview: true,
-        requiresManualReviewReason: errorMessage,
-        summary: [
-          { label: "Status", value: "Failed" },
-          { label: "Reason", value: errorMessage },
-        ],
-      });
+      if (!preserveStructuredRiskState) {
+        setDbCopilotRiskImpactState(context, {
+          requiresManualReview: true,
+          requiresManualReviewReason: errorMessage,
+          summary: [
+            { label: "Status", value: "Failed" },
+            { label: "Reason", value: errorMessage },
+          ],
+        });
+      }
       const failureLogs = [
         buildDbCopilotLogEntry("execution", `Query failed: ${errorMessage}`),
         buildDbCopilotLogEntry(
@@ -1908,15 +1930,17 @@ async function runDbCopilotSchemaTableQueryFlow(
       return;
     }
 
-    setDbCopilotRiskImpactState(context, {
-      requiresManualReview: false,
-      summary: [
-        { label: "Status", value: "Completed" },
-        { label: "Rows", value: String(response.rowsReturned) },
-        { label: "Columns", value: String(response.columns.length) },
-        { label: "Duration", value: `${response.executionTimeMs} ms` },
-      ],
-    });
+    if (!preserveStructuredRiskState) {
+      setDbCopilotRiskImpactState(context, {
+        requiresManualReview: false,
+        summary: [
+          { label: "Status", value: "Completed" },
+          { label: "Rows", value: String(response.rowsReturned) },
+          { label: "Columns", value: String(response.columns.length) },
+          { label: "Duration", value: `${response.executionTimeMs} ms` },
+        ],
+      });
+    }
 
     const sample = formatDbCopilotQuerySample(response.columns, response.rows);
     const completionLogs = [
@@ -1964,14 +1988,16 @@ async function runDbCopilotSchemaTableQueryFlow(
     );
   } catch (err) {
     const message = formatRequestError(err);
-    setDbCopilotRiskImpactState(context, {
-      requiresManualReview: true,
-      requiresManualReviewReason: message,
-      summary: [
-        { label: "Status", value: "Failed" },
-        { label: "Reason", value: message },
-      ],
-    });
+    if (!preserveStructuredRiskState) {
+      setDbCopilotRiskImpactState(context, {
+        requiresManualReview: true,
+        requiresManualReviewReason: message,
+        summary: [
+          { label: "Status", value: "Failed" },
+          { label: "Reason", value: message },
+        ],
+      });
+    }
     const failureLogs = [
       buildDbCopilotLogEntry("execution", `Query failed: ${message}`),
       buildDbCopilotLogEntry(
@@ -3552,6 +3578,82 @@ function syncDbCopilotSqlPreviewMode(context: vscode.ExtensionContext): void {
   dbCopilotSqlPreviewView?.update(dbCopilotSqlPreviewState);
 }
 
+function applyDbCopilotSaferPlan(context: vscode.ExtensionContext): void {
+  if (!dbCopilotOptimizationPlan?.outputs.ddl || !dbCopilotOptimizationPlan.outputs.risk) {
+    vscode.window.showWarningMessage("DB Copilot: No migration risk analysis is available.");
+    return;
+  }
+
+  const currentRisk = dbCopilotOptimizationPlan.outputs.risk;
+  const safeStrategy = currentRisk.simulation?.safeStrategy;
+  if (!safeStrategy?.recommended || safeStrategy.sql.length === 0) {
+    const reason =
+      safeStrategy?.explanation[0] ?? "Safer strategy is not available for the current SQL.";
+    vscode.window.showWarningMessage(`DB Copilot: ${reason}`);
+    return;
+  }
+
+  const saferUpSql = safeStrategy.sql.join("\n").trim();
+  if (!saferUpSql) {
+    vscode.window.showWarningMessage("DB Copilot: Generated safer strategy SQL is empty.");
+    return;
+  }
+
+  const currentDdl = dbCopilotOptimizationPlan.outputs.ddl;
+  const saferMigrationId = currentDdl.migration_id.endsWith("_safe")
+    ? currentDdl.migration_id
+    : `${currentDdl.migration_id}_safe`;
+  const saferTitle = currentDdl.title.endsWith("(Safe Plan)")
+    ? currentDdl.title
+    : `${currentDdl.title} (Safe Plan)`;
+  const saferNotes = currentDdl.notes.includes("Safe strategy applied")
+    ? currentDdl.notes
+    : `${currentDdl.notes} Safe strategy applied from Risk panel.`.trim();
+
+  const nextDdl = {
+    ...currentDdl,
+    migration_id: saferMigrationId,
+    title: saferTitle,
+    up_sql: saferUpSql,
+    notes: saferNotes,
+  };
+  const nextRisk = {
+    ...currentRisk,
+    safer_strategy_applied: true,
+  };
+  const nextRiskImpact =
+    buildDbCopilotRiskImpactState(nextRisk, dbCopilotOptimizationPlan.outputs.governance) ?? null;
+  const policy = resolveDbCopilotExecutionPolicy(context);
+  const nextSqlPreview: DbCopilotSqlPreviewState = {
+    upSql: nextDdl.up_sql,
+    downSql: nextDdl.down_sql,
+    mode: getDbCopilotState(context).mode,
+    policyAllowsExecution: policy.allowsExecution,
+    policyReason: policy.reason,
+  };
+
+  dbCopilotOptimizationPlan = {
+    ...dbCopilotOptimizationPlan,
+    outputs: {
+      ...dbCopilotOptimizationPlan.outputs,
+      ddl: nextDdl,
+      risk: nextRisk,
+    },
+    merged: {
+      ...dbCopilotOptimizationPlan.merged,
+      sql_preview: nextSqlPreview,
+      risk_impact: nextRiskImpact,
+    },
+  };
+
+  setDbCopilotRiskImpactState(context, nextRiskImpact);
+  setDbCopilotSqlPreviewState(context, nextSqlPreview);
+  appendDbCopilotLogEntry(
+    buildDbCopilotLogEntry("risk", "Applied safer phased migration strategy to SQL preview.")
+  );
+  vscode.window.showInformationMessage("DB Copilot: Safer migration strategy applied.");
+}
+
 function appendDbCopilotLogEntry(entry: DbCopilotLogEntry): void {
   dbCopilotLogEntries = [...dbCopilotLogEntries, entry];
   dbCopilotLogsView?.appendEntries([entry]);
@@ -4337,6 +4439,39 @@ async function saveDbCopilotMigrationArtifacts(
 
   vscode.window.showInformationMessage(
     `DB Copilot: Migration saved to ${migrationRoot.fsPath}.`
+  );
+}
+
+async function proceedDbCopilotFromRiskPanel(
+  context: vscode.ExtensionContext,
+  tokenStore: ReturnType<typeof createTokenStore>,
+  output: vscode.OutputChannel,
+  statusBars: StatusBarItems,
+  sidebarProvider: SidebarProvider | undefined,
+  dbCopilotStatusBars: DbCopilotStatusBarItems,
+  dbCopilotProviders: DbCopilotRefreshable[]
+): Promise<void> {
+  const state = getDbCopilotState(context);
+  if (state.mode !== "execution") {
+    const choice = await vscode.window.showWarningMessage(
+      `DB Copilot: Proceed requires Execution mode (current: ${formatDbCopilotMode(state.mode)}). Switch now?`,
+      { modal: true },
+      "Switch and Proceed"
+    );
+    if (choice !== "Switch and Proceed") {
+      return;
+    }
+    await setDbCopilotMode(context, "execution");
+    await refreshDbCopilotUI(context, dbCopilotStatusBars, dbCopilotProviders);
+    syncDbCopilotSqlPreviewMode(context);
+  }
+
+  await executeDbCopilotMigrationPlan(
+    context,
+    tokenStore,
+    output,
+    statusBars,
+    sidebarProvider
   );
 }
 

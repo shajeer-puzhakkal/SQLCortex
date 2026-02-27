@@ -4,6 +4,7 @@ import type {
   DbCopilotAuditLogEntry,
   DbCopilotLogEntry,
   DbCopilotLogSource,
+  DbCopilotRiskImpactSection,
   DbCopilotRiskImpactState,
   DbCopilotSqlPreviewState,
 } from "./bottomPanelState";
@@ -13,6 +14,10 @@ import {
   generateRollbackPlan,
   type RollbackPlan,
 } from "../core/migration/RollbackGenerator";
+import {
+  runSafeMigrationEngine,
+  type SafeMigrationSimulation,
+} from "../core/migration/SafeMigrationEngine";
 import type { SchemaSnapshot } from "../core/schema/SchemaTypes";
 
 export type DbCopilotDbEngine =
@@ -119,6 +124,8 @@ export type DbCopilotRiskOutput = {
   requires_manual_review: boolean;
   final_gate: "approve" | "reject" | "revise";
   rollback_plan?: RollbackPlan;
+  simulation?: SafeMigrationSimulation;
+  safer_strategy_applied?: boolean;
 };
 
 export type DbCopilotGovernanceOutput = {
@@ -1065,25 +1072,74 @@ function runDdl(
 function runRisk(input: DbCopilotOrchestratorInput, outputs: DbCopilotAgentOutputs): DbCopilotRiskOutput {
   const ddl = outputs.ddl;
   const governance = outputs.governance;
-  const ddlText = ddl?.up_sql.toLowerCase() ?? "";
-  const rollbackPlan = buildRollbackPlanForRisk(input, ddl?.up_sql ?? "");
-  const breakingChanges = ddlText.includes("drop ") ? ["Drop detected"] : [];
-  const lockRisk: DbCopilotRiskOutput["lock_contention_risk"] =
-    ddlText.length === 0
+  const ddlSql = ddl?.up_sql ?? "";
+  const ddlText = ddlSql.toLowerCase();
+  const policyViolations = governance?.violations.map((entry) => entry.rule) ?? [];
+  const mitigationSet = new Set<string>();
+
+  let simulation: SafeMigrationSimulation | null = null;
+  let rollbackPlan = buildRollbackPlanForRisk(input, ddlSql);
+  if (ddlSql.trim().length > 0 && input.schema_snapshot) {
+    const simulationResult = runSafeMigrationEngine({
+      ddlSql,
+      snapshotBefore: toCoreSchemaSnapshot(input.schema_snapshot),
+      defaultSchema: input.schema_snapshot.schema,
+      environment: input.policies.env,
+    });
+    if (simulationResult.ok && simulationResult.simulation) {
+      simulation = simulationResult.simulation;
+      rollbackPlan = simulation.rollbackPlan;
+      if (simulation.safeStrategy.recommended) {
+        mitigationSet.add("Apply the generated safer strategy before execution.");
+      }
+      if (simulation.lockImpact.estimatedLockSeverity === "LOW") {
+        mitigationSet.add("Estimated lock severity is low for this migration.");
+      }
+      if (simulation.lockImpact.rewriteRequired) {
+        mitigationSet.add("Pre-stage rewrite-heavy operations and monitor backfill progress.");
+      }
+    } else {
+      mitigationSet.add("Simulation confidence is reduced; perform manual migration review.");
+    }
+  }
+
+  const breakingChanges = simulation
+    ? collectBreakingChanges(simulation)
+    : ddlText.includes("drop ")
+      ? ["Drop detected"]
+      : [];
+  const lockRisk: DbCopilotRiskOutput["lock_contention_risk"] = simulation
+    ? lockSeverityToLegacyRisk(simulation.lockImpact.estimatedLockSeverity)
+    : ddlText.length === 0
       ? "med"
       : ddlText.includes("drop ") || ddlText.includes("alter table")
         ? "high"
         : ddlText.includes("concurrently")
           ? "low"
           : "med";
-  const policyViolations = governance?.violations.map((entry) => entry.rule) ?? [];
   const dataLossRisk = classifyRollbackDataLossRisk(rollbackPlan);
+  if (lockRisk !== "low") {
+    mitigationSet.add("Schedule execution in a low-traffic migration window.");
+  }
   const requiresManualReview =
-    policyViolations.length > 0 || breakingChanges.length > 0 || lockRisk === "high";
-  const finalGate = requiresManualReview ? "revise" : "approve";
-  const mitigations = lockRisk === "low" ? ["CONCURRENTLY used"] : ["Schedule off-peak"];
+    policyViolations.length > 0 ||
+    breakingChanges.length > 0 ||
+    lockRisk === "high" ||
+    dataLossRisk === "probable" ||
+    simulation?.riskScore.level === "HIGH" ||
+    simulation?.riskScore.level === "CRITICAL";
+  const finalGate = resolveRiskGate({
+    requiresManualReview,
+    policyViolations,
+    dataLossRisk,
+    simulation,
+  });
   if (rollbackPlan?.warnings.length) {
-    mitigations.push("Review rollback warnings and capture backup before execution.");
+    mitigationSet.add("Review rollback warnings and capture backup before execution.");
+  }
+  const mitigations = Array.from(mitigationSet.values());
+  if (!mitigations.length) {
+    mitigations.push("No additional mitigations required.");
   }
 
   return {
@@ -1096,7 +1152,57 @@ function runRisk(input: DbCopilotOrchestratorInput, outputs: DbCopilotAgentOutpu
     requires_manual_review: requiresManualReview,
     final_gate: finalGate,
     rollback_plan: rollbackPlan ?? undefined,
+    simulation: simulation ?? undefined,
+    safer_strategy_applied: false,
   };
+}
+
+function resolveRiskGate(input: {
+  requiresManualReview: boolean;
+  policyViolations: string[];
+  dataLossRisk: DbCopilotRiskOutput["data_loss_risk"];
+  simulation: SafeMigrationSimulation | null;
+}): DbCopilotRiskOutput["final_gate"] {
+  if (input.policyViolations.length > 0) {
+    return "reject";
+  }
+  if (input.dataLossRisk === "probable" && input.simulation?.riskScore.level === "CRITICAL") {
+    return "reject";
+  }
+  if (input.requiresManualReview) {
+    return "revise";
+  }
+  return "approve";
+}
+
+function collectBreakingChanges(simulation: SafeMigrationSimulation): string[] {
+  const changes = new Set<string>();
+  const diff = simulation.migrationDiff;
+  for (const tableName of diff.tablesRemoved) {
+    changes.add(`Drop table ${tableName}`);
+  }
+  for (const column of diff.columnsRemoved) {
+    changes.add(`Drop column ${column.schemaName}.${column.tableName}.${column.columnName}`);
+  }
+  if (simulation.impactReport.brokenObjects.length > 0) {
+    changes.add(
+      `Dependency breakage detected (${simulation.impactReport.brokenObjects.length} object(s)).`
+    );
+  }
+  return Array.from(changes.values());
+}
+
+function lockSeverityToLegacyRisk(
+  severity: SafeMigrationSimulation["lockImpact"]["estimatedLockSeverity"]
+): DbCopilotRiskOutput["lock_contention_risk"] {
+  switch (severity) {
+    case "LOW":
+      return "low";
+    case "HIGH":
+      return "high";
+    default:
+      return "med";
+  }
 }
 
 function buildRollbackPlanForRisk(
@@ -1273,7 +1379,7 @@ function mergeOutputs(
   const ddl = outputs.ddl;
   const risk = outputs.risk;
   const governance = outputs.governance;
-  const riskImpact = buildRiskImpactState(risk, governance);
+  const riskImpact = buildDbCopilotRiskImpactState(risk, governance);
   const policyAllowsExecution = riskImpact ? !riskImpact.requiresManualReview : false;
   const policyReason = riskImpact?.requiresManualReviewReason ?? null;
   const sqlPreview: DbCopilotSqlPreviewState | null = ddl
@@ -1292,7 +1398,7 @@ function mergeOutputs(
   };
 }
 
-function buildRiskImpactState(
+export function buildDbCopilotRiskImpactState(
   risk?: DbCopilotRiskOutput,
   governance?: DbCopilotGovernanceOutput
 ): DbCopilotRiskImpactState | null {
@@ -1369,11 +1475,147 @@ function buildRiskImpactState(
     },
   ];
   const summary = appendRollbackPlanToRiskSummary(summaryBase, risk?.rollback_plan);
+  const saferStrategy = risk?.simulation?.safeStrategy;
+  const saferPlanApplied = Boolean(risk?.safer_strategy_applied);
+  const canApplySaferPlan = Boolean(
+    saferStrategy?.recommended && saferStrategy.sql.length > 0 && !saferPlanApplied
+  );
+  const saferPlanReason = saferPlanApplied
+    ? "Safer strategy already applied."
+    : !saferStrategy?.recommended
+      ? (saferStrategy?.explanation[0] ?? "Safer strategy is not required for this migration.")
+      : null;
+
   return {
     requiresManualReview,
     requiresManualReviewReason: reason ?? undefined,
     summary,
+    sections: buildRiskImpactSections(risk, governance),
+    actions: {
+      canProceed: Boolean(risk),
+      proceedReason: requiresManualReview ? reason : null,
+      canApplySaferPlan,
+      saferPlanReason,
+      saferPlanApplied,
+    },
   };
+}
+
+function buildRiskImpactSections(
+  risk?: DbCopilotRiskOutput,
+  governance?: DbCopilotGovernanceOutput
+): DbCopilotRiskImpactSection[] {
+  const simulation = risk?.simulation;
+  if (!simulation) {
+    return [
+      {
+        title: "Risk Level",
+        value: risk?.final_gate ? titleCase(risk.final_gate) : "Unknown",
+        details: risk?.mitigations ?? [],
+      },
+      {
+        title: "Impacted Objects",
+        value: risk?.breaking_changes.length
+          ? `${risk.breaking_changes.length} potential breaking change(s)`
+          : "No major impact detected",
+        details: risk?.breaking_changes ?? [],
+      },
+      {
+        title: "Lock Behavior",
+        value: risk?.lock_contention_risk ? titleCase(risk.lock_contention_risk) : "Unknown",
+      },
+      {
+        title: "Rows Affected",
+        value: "Unknown",
+      },
+      {
+        title: "Safer Strategy",
+        value: "Not available",
+      },
+      {
+        title: "Rollback Plan",
+        value: risk?.rollback_plan
+          ? `${risk.rollback_plan.sql.length} statement(s), ${risk.rollback_plan.warnings.length} warning(s)`
+          : "Not available",
+        details: risk?.rollback_plan?.warnings ?? [],
+      },
+      {
+        title: "Confidence Score",
+        value: "N/A",
+      },
+    ];
+  }
+
+  const impactedDirect = simulation.impactReport.directImpact.length;
+  const impactedIndirect = simulation.impactReport.indirectImpact.length;
+  const brokenObjects = simulation.impactReport.brokenObjects.length;
+  const impactedObjectsValue = `${impactedDirect + impactedIndirect} impacted, ${brokenObjects} broken`;
+  const impactedDetails = [
+    ...simulation.impactReport.brokenObjects.slice(0, 4),
+    ...simulation.impactReport.directImpact.slice(0, 4),
+    ...simulation.impactReport.indirectImpact.slice(0, 2),
+  ];
+  const saferPlan = simulation.safeStrategy;
+  const saferStrategyValue = risk?.safer_strategy_applied
+    ? "Applied to SQL preview"
+    : saferPlan.recommended
+      ? `${saferPlan.phases.length} phase(s) suggested`
+      : "Original plan acceptable";
+  const saferStrategyDetails = [
+    ...saferPlan.explanation.slice(0, 3),
+    ...saferPlan.phases.slice(0, 3).map((phase) => phase.title),
+  ];
+  const rollbackWarnings = simulation.rollbackPlan.warnings;
+  const rollbackValue = `${simulation.rollbackPlan.sql.length} statement(s), ${rollbackWarnings.length} warning(s)`;
+
+  const sections: DbCopilotRiskImpactSection[] = [
+    {
+      title: "Risk Level",
+      value: `${simulation.riskScore.level} (${simulation.riskScore.score}/100)`,
+      details: simulation.riskScore.explanation.slice(0, 4),
+    },
+    {
+      title: "Impacted Objects",
+      value: impactedObjectsValue,
+      details: impactedDetails.length ? impactedDetails : ["No dependency impact detected."],
+    },
+    {
+      title: "Lock Behavior",
+      value: `${simulation.lockImpact.lockType} (${simulation.lockImpact.estimatedLockSeverity})`,
+      details: [
+        `Rewrite required: ${simulation.lockImpact.rewriteRequired ? "Yes" : "No"}`,
+        `Rows touched estimate: ${formatCount(simulation.lockImpact.estimatedRowsTouched)}`,
+      ],
+    },
+    {
+      title: "Rows Affected",
+      value: formatCount(simulation.lockImpact.estimatedRowsTouched),
+      details: [`Statements simulated: ${simulation.appliedStatements}/${simulation.statements.length}`],
+    },
+    {
+      title: "Safer Strategy",
+      value: saferStrategyValue,
+      details: saferStrategyDetails,
+    },
+    {
+      title: "Rollback Plan",
+      value: rollbackValue,
+      details: rollbackWarnings.length ? rollbackWarnings.slice(0, 4) : ["No rollback warnings."],
+    },
+    {
+      title: "Confidence Score",
+      value: `${simulation.confidenceScore}% (${simulation.confidenceLevel})`,
+      details: simulation.confidenceExplanation.slice(0, 4),
+    },
+  ];
+
+  if (governance && !governance.compliant) {
+    sections[0].details = [
+      ...(sections[0].details ?? []),
+      `Policy violations: ${governance.violations.length}`,
+    ];
+  }
+  return sections;
 }
 
 function formatGovernanceViolation(
@@ -1693,6 +1935,12 @@ function extractTableName(request: string): string | null {
   const normalized = request.toLowerCase();
   const match = normalized.match(/table\s+([a-z0-9_]+)/i);
   return match ? match[1] : null;
+}
+
+function formatCount(value: number): string {
+  return Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(
+    Math.max(0, Math.round(value))
+  );
 }
 
 function titleCase(value: string): string {
