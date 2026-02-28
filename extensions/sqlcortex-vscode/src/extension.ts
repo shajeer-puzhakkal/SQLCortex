@@ -276,8 +276,7 @@ export function activate(context: vscode.ExtensionContext) {
   const targetStatusBar = createTargetStatusBarItem();
   context.subscriptions.push(
     statusBars.workspace,
-    statusBars.connection,
-    statusBars.runQuery
+    statusBars.connection
   );
   context.subscriptions.push(
     dbCopilotStatusBars.db,

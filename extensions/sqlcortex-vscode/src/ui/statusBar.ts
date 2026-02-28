@@ -6,7 +6,6 @@ export type StatusBarState = WorkspaceContext & { isAuthed: boolean };
 export type StatusBarItems = {
   workspace: vscode.StatusBarItem;
   connection: vscode.StatusBarItem;
-  runQuery: vscode.StatusBarItem;
 };
 
 export function createStatusBarItems(): StatusBarItems {
@@ -18,17 +17,11 @@ export function createStatusBarItems(): StatusBarItems {
     vscode.StatusBarAlignment.Left,
     99
   );
-  const runQuery = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    98
-  );
-
-  runQuery.command = "sqlcortex.runQuery";
-  return { workspace, connection, runQuery };
+  return { workspace, connection };
 }
 
 export function updateStatusBar(items: StatusBarItems, state: StatusBarState): void {
-  const { workspace, connection, runQuery } = items;
+  const { workspace, connection } = items;
 
   if (!state.isAuthed) {
     workspace.text = "SQLCortex: Sign in";
@@ -36,7 +29,6 @@ export function updateStatusBar(items: StatusBarItems, state: StatusBarState): v
     workspace.command = "sqlcortex.login";
     workspace.show();
     connection.hide();
-    runQuery.hide();
     return;
   }
 
@@ -76,9 +68,4 @@ export function updateStatusBar(items: StatusBarItems, state: StatusBarState): v
     connection.command = "sqlcortex.selectConnection";
   }
   connection.show();
-
-  runQuery.text = "$(play) Run query";
-  runQuery.tooltip = "Run the current SQL (smart mode)";
-  runQuery.command = "sqlcortex.runQuery";
-  runQuery.show();
 }
