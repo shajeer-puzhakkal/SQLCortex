@@ -1,0 +1,40 @@
+{
+  "version": "v1",
+  "performance_score": 75,
+  "performance_label": "Good",
+  "cost_bucket": "Unknown",
+  "risk_level": "Unknown",
+  "complexity_rating": "Complex",
+  "reasons": [
+    {
+      "code": "MISSING_LIMIT",
+      "severity": "warn",
+      "delta": -15,
+      "message": "Consider LIMIT when exploring large or joined result sets."
+    },
+    {
+      "code": "DEEP_SUBQUERY",
+      "severity": "warn",
+      "delta": -15,
+      "message": "Subquery depth is 2; flatten nested queries when possible."
+    },
+    {
+      "code": "TARGETED_WHERE",
+      "severity": "info",
+      "delta": 5,
+      "message": "A targeted WHERE clause can reduce scanned rows."
+    }
+  ],
+  "recommendations": [
+    {
+      "code": "ADD_LIMIT",
+      "message": "Add LIMIT while exploring to cap returned rows.",
+      "confidence": 0.55
+    },
+    {
+      "code": "FLATTEN_SUBQUERIES",
+      "message": "Flatten nested subqueries or move repeated logic into a CTE.",
+      "confidence": 0.6
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "version": "v1",
+  "performance_score": 80,
+  "performance_label": "Good",
+  "cost_bucket": "Unknown",
+  "risk_level": "Unknown",
+  "complexity_rating": "Moderate",
+  "reasons": [
+    {
+      "code": "TOO_MANY_JOINS",
+      "severity": "warn",
+      "delta": -20,
+      "message": "Query uses 3 joins; verify each join is necessary and indexed."
+    },
+    {
+      "code": "ORDER_BY_NO_INDEX_HINT",
+      "severity": "warn",
+      "delta": -10,
+      "message": "ORDER BY may sort large result sets; verify supporting indexes."
+    },
+    {
+      "code": "TARGETED_WHERE",
+      "severity": "info",
+      "delta": 5,
+      "message": "A targeted WHERE clause can reduce scanned rows."
+    },
+    {
+      "code": "SAFE_LIMIT",
+      "severity": "info",
+      "delta": 5,
+      "message": "LIMIT keeps exploratory queries bounded."
+    }
+  ],
+  "recommendations": [
+    {
+      "code": "REDUCE_JOINS",
+      "message": "Reduce join fan-out or validate indexes on join keys.",
+      "confidence": 0.65
+    },
+    {
+      "code": "REVIEW_SORT_INDEX",
+      "message": "Review indexes that match the ORDER BY columns.",
+      "confidence": 0.4
+    }
+  ]
+}
