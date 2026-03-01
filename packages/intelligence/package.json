@@ -1,0 +1,15 @@
+{
+  "name": "@sqlcortex/intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "compile": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test -r ts-node/register test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

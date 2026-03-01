@@ -1,0 +1,23 @@
+{
+  "version": "v1",
+  "performance_score": 60,
+  "performance_label": "Needs Optimization",
+  "cost_bucket": "Unknown",
+  "risk_level": "Unknown",
+  "complexity_rating": "Simple",
+  "reasons": [
+    {
+      "code": "WRITE_WITHOUT_WHERE",
+      "severity": "high",
+      "delta": -40,
+      "message": "UPDATE without WHERE affects every matching row."
+    }
+  ],
+  "recommendations": [
+    {
+      "code": "ADD_WRITE_FILTER",
+      "message": "Add a WHERE clause or confirm that touching every row is intentional.",
+      "confidence": 0.95
+    }
+  ]
+}

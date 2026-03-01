@@ -1,0 +1,65 @@
+{
+  "rules": {
+    "SELECT_STAR": {
+      "enabled": true,
+      "delta": -10
+    },
+    "MISSING_LIMIT": {
+      "enabled": true,
+      "delta": -15
+    },
+    "TOO_MANY_JOINS": {
+      "enabled": true,
+      "delta": -20
+    },
+    "DEEP_SUBQUERY": {
+      "enabled": true,
+      "delta": -15
+    },
+    "ORDER_BY_NO_INDEX_HINT": {
+      "enabled": true,
+      "delta": -10
+    },
+    "WINDOW_FUNCTION_COMPLEXITY": {
+      "enabled": true,
+      "delta": -8
+    },
+    "WRITE_WITHOUT_WHERE": {
+      "enabled": true,
+      "delta": -40
+    },
+    "CARTESIAN_JOIN_RISK": {
+      "enabled": true,
+      "delta": -20
+    },
+    "TARGETED_WHERE": {
+      "enabled": true,
+      "delta": 5
+    },
+    "SAFE_LIMIT": {
+      "enabled": true,
+      "delta": 5
+    }
+  },
+  "modes": {
+    "fast": {
+      "allowExplain": false
+    },
+    "plan": {
+      "allowExplain": true
+    }
+  },
+  "thresholds": {
+    "simpleMaxJoinCount": 1,
+    "moderateMinJoinCount": 2,
+    "moderateMaxJoinCount": 3,
+    "complexMinJoinCount": 4,
+    "moderateSubqueryDepth": 1,
+    "complexSubqueryDepth": 2,
+    "moderateCteCount": 1,
+    "complexCteCount": 2,
+    "missingLimitTableCount": 2,
+    "deepSubqueryDepth": 2
+  },
+  "explainAllowlist": ["SELECT"]
+}

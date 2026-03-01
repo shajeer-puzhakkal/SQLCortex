@@ -1,0 +1,40 @@
+{
+  "version": "v1",
+  "performance_score": 80,
+  "performance_label": "Good",
+  "cost_bucket": "Unknown",
+  "risk_level": "Unknown",
+  "complexity_rating": "Simple",
+  "reasons": [
+    {
+      "code": "SELECT_STAR",
+      "severity": "info",
+      "delta": -10,
+      "message": "Avoid SELECT *; select only needed columns."
+    },
+    {
+      "code": "MISSING_LIMIT",
+      "severity": "warn",
+      "delta": -15,
+      "message": "Consider LIMIT when exploring large or joined result sets."
+    },
+    {
+      "code": "TARGETED_WHERE",
+      "severity": "info",
+      "delta": 5,
+      "message": "A targeted WHERE clause can reduce scanned rows."
+    }
+  ],
+  "recommendations": [
+    {
+      "code": "SELECT_COLUMNS",
+      "message": "Project only the columns you need.",
+      "confidence": 0.9
+    },
+    {
+      "code": "ADD_LIMIT",
+      "message": "Add LIMIT while exploring to cap returned rows.",
+      "confidence": 0.55
+    }
+  ]
+}
