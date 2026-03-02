@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { getActiveStatement } from "./getActiveStatement";
 
 export type SqlSource = "selection" | "document";
 export type ExtractMode = "selection" | "document" | "smart";
@@ -28,7 +29,17 @@ export function extractSql(
     return { sql: normalizeSql(selectionText), source: "selection" };
   }
 
-  return { sql: normalizeSql(editor.document.getText()), source: "document" };
+  const documentText = editor.document.getText();
+  const activeStatement = getActiveStatement(
+    documentText,
+    editor.document.offsetAt(editor.selection.active)
+  );
+
+  if (activeStatement.sql.length > 0) {
+    return { sql: normalizeSql(activeStatement.sql), source: "document" };
+  }
+
+  return { sql: normalizeSql(documentText), source: "document" };
 }
 
 function normalizeSql(text: string): string {
