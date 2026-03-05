@@ -11,6 +11,26 @@ export type ReasonSeverity = "info" | "warn" | "high";
 
 export type RiskLevel = "Unknown" | "Pending" | "Safe" | "Warning" | "Dangerous";
 
+export type RiskReasonSeverity = "warn" | "high";
+
+export type RiskReason = {
+  code: string;
+  severity: RiskReasonSeverity;
+  message: string;
+};
+
+export type RiskGate = {
+  can_execute: boolean;
+  requires_confirmation: boolean;
+  message: string;
+};
+
+export type RiskAssessment = {
+  risk_level: RiskLevel;
+  reasons: RiskReason[];
+  gate: RiskGate;
+};
+
 export type ComplexityRating = "Simple" | "Moderate" | "Complex";
 
 export type PerformanceLabel = "Excellent" | "Good" | "Needs Optimization" | "Risky";
@@ -50,6 +70,7 @@ export type QueryFeatures = {
   uses_functions: string[];
   has_aggregation: boolean;
   has_window_functions: boolean;
+  tables?: string[];
   parse_confidence?: "high" | "low";
 };
 
@@ -75,6 +96,8 @@ export type IntelligenceResult = {
   complexity_rating: ComplexityRating;
   reasons: ScoreReason[];
   recommendations: Recommendation[];
+  risk_reasons?: RiskReason[];
+  risk_gate?: RiskGate;
   plan_summary?: PlanSummary;
 };
 
@@ -119,6 +142,8 @@ export type ScoreEngineMode = "fast" | "plan";
 export type ScoreEngineOptions = {
   mode?: ScoreEngineMode;
   config?: PartialScoreEngineConfig;
+  queryText?: string;
+  policy?: import("./risk/policy").RiskPolicy;
 };
 
 export type RuleMatch = {
