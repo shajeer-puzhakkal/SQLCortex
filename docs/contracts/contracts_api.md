@@ -80,6 +80,21 @@ Tokens authenticate via `Authorization: Bearer <token>`.
 - Success: `200 { "queryId", "executionTimeMs", "rowsReturned", "columns", "rows", "error" }`
 - Errors: `400 INVALID_INPUT` / `SQL_NOT_READ_ONLY`, `504 ANALYZER_TIMEOUT`
 
+### POST `/api/intelligence/score`
+- Request body:
+  - `mode` (`fast` | `plan`, required)
+  - `sql` (string, required)
+  - `project_id` (uuid, required when `mode=plan`)
+  - `connection_id` (uuid, required when `mode=plan`)
+- Behavior:
+  - `fast`: AST/heuristics scoring only.
+  - `plan`: executes `EXPLAIN (FORMAT JSON)` with read-only safeguards and timeout.
+- Success: `200 IntelligenceScoreResponse` including:
+  - `performance_score`, `performance_label`, `cost_bucket`, `risk_level`, `complexity_rating`
+  - `reasons[]`, `recommendations[]`
+  - `plan_summary` (when `mode=plan`)
+- Errors: `400 INVALID_INPUT` / `SQL_NOT_READ_ONLY` / `INVALID_EXPLAIN_JSON`, `504 ANALYZER_TIMEOUT`, `502 ANALYZER_ERROR`
+
 ## Analyzer Service (`services/analyzer`)
 
 ### POST `/analyze`

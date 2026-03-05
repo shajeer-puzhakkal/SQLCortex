@@ -73,6 +73,7 @@ import { createRateLimitMiddleware } from "./rateLimit";
 import { logAiSqlTelemetry, logAnalysisTelemetry } from "./telemetry";
 import { recordMeterEvent } from "./metering";
 import { evaluate } from "./rules";
+import { registerIntelligenceRoutes } from "./routes/intelligence";
 import {
   applyGraceCredits,
   buildCreditEstimate,
@@ -373,11 +374,11 @@ type AiSqlFallbackReason =
 
 type GateReason = "PLAN_LIMIT" | "AI_DISABLED" | "CREDITS_EXHAUSTED";
 
-type RunConnectionQueryFn = <T>(
+type RunConnectionQueryFn = (
   connectionString: string,
   sql: string,
   timeoutMs?: number
-) => Promise<T>;
+) => Promise<unknown>;
 
 type ResolveProjectConnectionFn = (
   auth: NonNullable<AuthenticatedRequest["auth"]>,
@@ -2269,6 +2270,14 @@ async function listAnalysesByProject(
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const loginAttempts = new Map<string, { count: number; firstAttemptAt: number }>();
+
+registerIntelligenceRoutes({
+  app,
+  prisma,
+  resolveProjectConnection,
+  runConnectionQuery,
+  explainTimeoutMs: EXPLAIN_TIMEOUT_MS,
+});
 
 app.get("/health", (_req, res: Response<HealthResponse>) =>
   res.json({ ok: true, service: "api" })

@@ -85,6 +85,64 @@ export type AnalyzeResponse = {
   };
 };
 
+export type IntelligenceMode = "fast" | "plan";
+
+export type IntelligenceCostBucket = "Unknown" | "Low" | "Medium" | "High" | "Extreme";
+
+export type IntelligenceRiskLevel = "Unknown" | "Pending" | "Safe" | "Warning" | "Dangerous";
+
+export type IntelligenceComplexityRating = "Simple" | "Moderate" | "Complex";
+
+export type IntelligencePerformanceLabel = "Excellent" | "Good" | "Needs Optimization" | "Risky";
+
+export type IntelligenceReason = {
+  code: string;
+  severity: "info" | "warn" | "high";
+  delta: number;
+  message: string;
+};
+
+export type IntelligenceRecommendation = {
+  code: string;
+  message: string;
+  confidence: number;
+};
+
+export type IntelligencePlanNodeSummary = {
+  node_type: string;
+  count: number;
+};
+
+export type IntelligencePlanSummary = {
+  total_cost: number | null;
+  plan_rows: number | null;
+  plan_width: number | null;
+  node_summary: IntelligencePlanNodeSummary[];
+  has_seq_scan: boolean;
+  has_hash_join: boolean;
+  has_sort: boolean;
+  has_nested_loop: boolean;
+};
+
+export type IntelligenceScoreRequest = {
+  mode: IntelligenceMode;
+  sql: string;
+  project_id?: string | null;
+  connection_id?: string | null;
+};
+
+export type IntelligenceScoreResponse = {
+  version: "v1";
+  performance_score: number;
+  performance_label: IntelligencePerformanceLabel;
+  cost_bucket: IntelligenceCostBucket;
+  risk_level: IntelligenceRiskLevel;
+  complexity_rating: IntelligenceComplexityRating;
+  reasons: IntelligenceReason[];
+  recommendations: IntelligenceRecommendation[];
+  plan_summary?: IntelligencePlanSummary;
+};
+
 export type SchemaInsightsStats = {
   tableCount: number;
   viewCount: number;
