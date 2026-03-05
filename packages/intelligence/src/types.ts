@@ -15,7 +15,23 @@ export type ComplexityRating = "Simple" | "Moderate" | "Complex";
 
 export type PerformanceLabel = "Excellent" | "Good" | "Needs Optimization" | "Risky";
 
-export type CostBucket = "Unknown" | "Low" | "Medium" | "High";
+export type CostBucket = "Unknown" | "Low" | "Medium" | "High" | "Extreme";
+
+export type PlanNodeSummary = {
+  node_type: string;
+  count: number;
+};
+
+export type PlanSummary = {
+  total_cost: number | null;
+  plan_rows: number | null;
+  plan_width: number | null;
+  node_summary: PlanNodeSummary[];
+  has_seq_scan: boolean;
+  has_hash_join: boolean;
+  has_sort: boolean;
+  has_nested_loop: boolean;
+};
 
 export type QueryFeatures = {
   statement_type: StatementType;
@@ -59,6 +75,7 @@ export type IntelligenceResult = {
   complexity_rating: ComplexityRating;
   reasons: ScoreReason[];
   recommendations: Recommendation[];
+  plan_summary?: PlanSummary;
 };
 
 export type RuleWeightConfig = {
@@ -107,4 +124,18 @@ export type ScoreEngineOptions = {
 export type RuleMatch = {
   reason: ScoreReason;
   recommendation?: Recommendation;
+};
+
+export type CostThresholds = {
+  lowMax: number;
+  mediumMax: number;
+  highMax: number;
+};
+
+export type CostNormalizationOptions = {
+  thresholds?: Partial<CostThresholds>;
+  // Reserved for future size-aware normalization.
+  tableStats?: {
+    estimatedRows?: number | null;
+  };
 };

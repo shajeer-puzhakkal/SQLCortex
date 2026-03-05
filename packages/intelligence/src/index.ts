@@ -5,3 +5,5 @@ export * from "./extract/features";
 export * from "./extract/tokenizerFallback";
 export * from "./parse/getActiveStatement";
 export * from "./parse/pgParser";
+export * from "./plan/parsePlan";
+export * from "./plan/normalizeCost";
