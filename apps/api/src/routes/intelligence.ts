@@ -167,7 +167,7 @@ export function registerIntelligenceRoutes(options: {
 
       const mode: IntelligenceMode = isIntelligenceMode(req.body?.mode) ? req.body.mode : "fast";
       const features = extractQueryFeatures(sql);
-      const baseResult = evaluateQueryFeatures(features, { mode });
+      const baseResult = evaluateQueryFeatures(features, { mode, queryText: sql });
 
       if (mode !== "plan") {
         return res.json({

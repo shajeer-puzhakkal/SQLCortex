@@ -1,0 +1,80 @@
+{
+  "environment": "dev",
+  "environments": {
+    "dev": {
+      "ddl": {
+        "allowTruncate": true,
+        "allowDropTable": true,
+        "allowAlterTable": true
+      },
+      "ddlAllowlist": [
+        "schema_migrations"
+      ],
+      "warningThresholds": {
+        "selectStarWithoutLimitTableCount": 2,
+        "orderByWithoutLimitTableCount": 2
+      },
+      "sensitiveSelectTables": [
+        "audit",
+        "audits",
+        "audit_log",
+        "audit_logs",
+        "event_audit",
+        "event_log",
+        "logs",
+        "log",
+        "query_log"
+      ]
+    },
+    "qa": {
+      "ddl": {
+        "allowTruncate": false,
+        "allowDropTable": false,
+        "allowAlterTable": true
+      },
+      "ddlAllowlist": [
+        "schema_migrations"
+      ],
+      "warningThresholds": {
+        "selectStarWithoutLimitTableCount": 2,
+        "orderByWithoutLimitTableCount": 1
+      },
+      "sensitiveSelectTables": [
+        "audit",
+        "audits",
+        "audit_log",
+        "audit_logs",
+        "event_audit",
+        "event_log",
+        "logs",
+        "log",
+        "query_log"
+      ]
+    },
+    "prod": {
+      "ddl": {
+        "allowTruncate": false,
+        "allowDropTable": false,
+        "allowAlterTable": false
+      },
+      "ddlAllowlist": [
+        "schema_migrations"
+      ],
+      "warningThresholds": {
+        "selectStarWithoutLimitTableCount": 1,
+        "orderByWithoutLimitTableCount": 1
+      },
+      "sensitiveSelectTables": [
+        "audit",
+        "audits",
+        "audit_log",
+        "audit_logs",
+        "event_audit",
+        "event_log",
+        "logs",
+        "log",
+        "query_log"
+      ]
+    }
+  }
+}

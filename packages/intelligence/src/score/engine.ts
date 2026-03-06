@@ -1,5 +1,7 @@
 import defaultConfigJson from "../../intelligence.config.json";
 import { createRuleMatch, scoreRules } from "../rules/catalog";
+import { evaluateRisk } from "../risk/engine";
+import { defaultRiskPolicy } from "../risk/policy";
 import {
   type ComplexityRating,
   type IntelligenceModeConfig,
@@ -106,6 +108,7 @@ export function evaluateQueryFeatures(
 ): IntelligenceResult {
   const mode = options.mode ?? "fast";
   const config = resolveScoreEngineConfig(options.config, mode);
+  const riskAssessment = evaluateRisk(features, options.queryText ?? "", options.policy ?? defaultRiskPolicy);
   const reasons: IntelligenceResult["reasons"] = [];
   const recommendations: IntelligenceResult["recommendations"] = [];
   let score = 100;
@@ -136,9 +139,11 @@ export function evaluateQueryFeatures(
     performance_score: performanceScore,
     performance_label: getPerformanceLabel(performanceScore),
     cost_bucket: "Unknown",
-    risk_level: "Unknown",
+    risk_level: riskAssessment.risk_level,
     complexity_rating: getComplexityRating(features, config),
     reasons,
     recommendations,
+    risk_reasons: riskAssessment.reasons,
+    risk_gate: riskAssessment.gate,
   };
 }

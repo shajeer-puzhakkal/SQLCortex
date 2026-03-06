@@ -277,8 +277,15 @@ export function extractFallbackFeatures(sql: string): QueryFeatures {
   const whereClause = extractClause(sanitized, "where");
   const joinClause = extractClause(sanitized, "join");
   const tableMatches = sanitized.match(/\b(from|join|update|into|using|truncate(?:\s+table)?)\s+([a-z_"][a-z0-9_$".]*)/gi);
+  const extractedTables =
+    tableMatches
+      ?.map((value) =>
+        value.replace(/\b(from|join|update|into|using|truncate(?:\s+table)?)\s+/i, "").trim(),
+      )
+      .filter(Boolean) ?? [];
 
   features.select_star = /\bselect\s+(distinct\s+)?([a-z_][a-z0-9_$]*\s*\.\s*)?\*/i.test(sanitized);
+  features.tables = Array.from(new Set(extractedTables.map((tableName) => tableName.toLowerCase())));
   features.table_count = tableMatches?.length ?? 0;
   features.join_count = sanitized.match(/\bjoin\b/gi)?.length ?? 0;
   features.where_present = /\bwhere\b/i.test(sanitized);

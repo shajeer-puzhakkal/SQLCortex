@@ -3,7 +3,7 @@
   "performance_score": 80,
   "performance_label": "Good",
   "cost_bucket": "Unknown",
-  "risk_level": "Unknown",
+  "risk_level": "Safe",
   "complexity_rating": "Moderate",
   "reasons": [
     {
@@ -31,6 +31,12 @@
       "message": "LIMIT keeps exploratory queries bounded."
     }
   ],
+  "risk_reasons": [],
+  "risk_gate": {
+    "can_execute": true,
+    "requires_confirmation": false,
+    "message": "No dangerous risk patterns detected."
+  },
   "recommendations": [
     {
       "code": "REDUCE_JOINS",

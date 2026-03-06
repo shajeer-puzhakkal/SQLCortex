@@ -92,6 +92,7 @@ Tokens authenticate via `Authorization: Bearer <token>`.
 - Success: `200 IntelligenceScoreResponse` including:
   - `performance_score`, `performance_label`, `cost_bucket`, `risk_level`, `complexity_rating`
   - `reasons[]`, `recommendations[]`
+  - `risk_reasons[]`, `risk_gate`
   - `plan_summary` (when `mode=plan`)
 - Errors: `400 INVALID_INPUT` / `SQL_NOT_READ_ONLY` / `INVALID_EXPLAIN_JSON`, `504 ANALYZER_TIMEOUT`, `502 ANALYZER_ERROR`
 

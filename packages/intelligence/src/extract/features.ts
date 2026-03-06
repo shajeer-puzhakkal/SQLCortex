@@ -48,6 +48,7 @@ function createFeaturesFromAst(ast: ParsedSqlAst): QueryFeatures {
   return {
     statement_type: ast.statementType,
     select_star: ast.selectStar,
+    tables: ast.tables,
     table_count: tableCount,
     join_count: joinCount,
     where_present: Boolean(ast.clauses.WHERE),

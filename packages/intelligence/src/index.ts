@@ -7,3 +7,6 @@ export * from "./parse/getActiveStatement";
 export * from "./parse/pgParser";
 export * from "./plan/parsePlan";
 export * from "./plan/normalizeCost";
+export * from "./risk/engine";
+export * from "./risk/policy";
+export * from "./risk/rules";

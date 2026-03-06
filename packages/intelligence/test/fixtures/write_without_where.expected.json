@@ -3,7 +3,7 @@
   "performance_score": 60,
   "performance_label": "Needs Optimization",
   "cost_bucket": "Unknown",
-  "risk_level": "Unknown",
+  "risk_level": "Dangerous",
   "complexity_rating": "Simple",
   "reasons": [
     {
@@ -13,6 +13,18 @@
       "message": "UPDATE without WHERE affects every matching row."
     }
   ],
+  "risk_reasons": [
+    {
+      "code": "UPDATE_WITHOUT_WHERE",
+      "severity": "high",
+      "message": "UPDATE without WHERE is dangerous and can affect all rows."
+    }
+  ],
+  "risk_gate": {
+    "can_execute": false,
+    "requires_confirmation": true,
+    "message": "UPDATE without WHERE is dangerous and can affect all rows."
+  },
   "recommendations": [
     {
       "code": "ADD_WRITE_FILTER",

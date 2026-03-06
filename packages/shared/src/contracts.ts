@@ -91,6 +91,18 @@ export type IntelligenceCostBucket = "Unknown" | "Low" | "Medium" | "High" | "Ex
 
 export type IntelligenceRiskLevel = "Unknown" | "Pending" | "Safe" | "Warning" | "Dangerous";
 
+export type IntelligenceRiskReason = {
+  code: string;
+  severity: "warn" | "high";
+  message: string;
+};
+
+export type IntelligenceRiskGate = {
+  can_execute: boolean;
+  requires_confirmation: boolean;
+  message: string;
+};
+
 export type IntelligenceComplexityRating = "Simple" | "Moderate" | "Complex";
 
 export type IntelligencePerformanceLabel = "Excellent" | "Good" | "Needs Optimization" | "Risky";
@@ -140,6 +152,8 @@ export type IntelligenceScoreResponse = {
   complexity_rating: IntelligenceComplexityRating;
   reasons: IntelligenceReason[];
   recommendations: IntelligenceRecommendation[];
+  risk_reasons?: IntelligenceRiskReason[];
+  risk_gate?: IntelligenceRiskGate;
   plan_summary?: IntelligencePlanSummary;
 };
 
