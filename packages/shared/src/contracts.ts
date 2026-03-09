@@ -139,7 +139,7 @@ export type IntelligencePlanSummary = {
 export type IntelligenceScoreRequest = {
   mode: IntelligenceMode;
   sql: string;
-  project_id?: string | null;
+  project_id: string;
   connection_id?: string | null;
 };
 
@@ -155,6 +155,69 @@ export type IntelligenceScoreResponse = {
   risk_reasons?: IntelligenceRiskReason[];
   risk_gate?: IntelligenceRiskGate;
   plan_summary?: IntelligencePlanSummary;
+};
+
+export type IntelligenceHistoryEvent = {
+  id: string;
+  project_id: string;
+  user_id: string | null;
+  query_fingerprint: string;
+  score: number;
+  risk_level: IntelligenceRiskLevel;
+  cost_bucket: IntelligenceCostBucket;
+  complexity: IntelligenceComplexityRating;
+  mode: IntelligenceMode;
+  reasons_json: unknown;
+  created_at: string;
+};
+
+export type IntelligenceHistoryResponse = {
+  project_id: string;
+  page: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+  events: IntelligenceHistoryEvent[];
+};
+
+export type IntelligenceTopRiskyItem = {
+  query_fingerprint: string;
+  events_count: number;
+  avg_score: number;
+  min_score: number;
+  risk_level: IntelligenceRiskLevel;
+  cost_bucket: IntelligenceCostBucket;
+  last_seen_at: string;
+};
+
+export type IntelligenceTopRiskyResponse = {
+  project_id: string;
+  range: "7d" | "30d";
+  items: IntelligenceTopRiskyItem[];
+};
+
+export type IntelligenceTrendPoint = {
+  date: string;
+  events: number;
+  avg_score: number | null;
+  dangerous: number;
+  warning: number;
+  safe: number;
+};
+
+export type IntelligenceHeatmapCell = {
+  day_of_week: number;
+  hour_of_day: number;
+  events: number;
+};
+
+export type IntelligenceTrendsResponse = {
+  project_id: string;
+  range: "7d" | "30d";
+  points: IntelligenceTrendPoint[];
+  risk_distribution: Array<{ risk_level: IntelligenceRiskLevel; count: number }>;
+  cost_distribution: Array<{ cost_bucket: IntelligenceCostBucket; count: number }>;
+  heatmap: IntelligenceHeatmapCell[];
 };
 
 export type SchemaInsightsStats = {

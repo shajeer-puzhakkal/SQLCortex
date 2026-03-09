@@ -12,6 +12,7 @@ COPY apps/api/src ./src
 COPY apps/api/tests ./tests
 COPY apps/api/tsconfig.json ./tsconfig.json
 COPY packages/shared /app/packages/shared
+COPY packages/intelligence /app/packages/intelligence
 EXPOSE 4000
 ENTRYPOINT ["/app/apps/api/docker-entrypoint.sh"]
 CMD ["npm","run","dev"]

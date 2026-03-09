@@ -320,6 +320,28 @@ export default function DashboardPage() {
                 className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
                   isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
                 }`}
+                href="/dashboard/intelligence"
+                title="Intelligence Center"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10">
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M3 12h4l2-6 4 12 2-6h6" />
+                  </svg>
+                </span>
+                <span className={isSidebarOpen ? "" : "hidden"}>Intelligence</span>
+              </Link>
+              <Link
+                className={`flex items-center rounded-xl py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10 hover:text-white ${
+                  isSidebarOpen ? "gap-3 px-3" : "justify-center px-2"
+                }`}
                 href="/projects"
                 title="Projects"
               >
@@ -849,6 +871,12 @@ export default function DashboardPage() {
                       href="/projects"
                     >
                       Manage projects
+                    </Link>
+                    <Link
+                      className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"
+                      href="/dashboard/intelligence"
+                    >
+                      Intelligence center
                     </Link>
                     <Link
                       className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-black transition hover:border-black/30 hover:bg-black/5"

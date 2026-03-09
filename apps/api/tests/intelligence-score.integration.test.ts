@@ -22,6 +22,7 @@ test("POST /api/intelligence/score returns plan summary and blocks unsafe SQL", 
         : null,
     update: async () => null,
   };
+  prismaMock.$executeRawUnsafe = async () => 1;
 
   const explainJson = [
     {
