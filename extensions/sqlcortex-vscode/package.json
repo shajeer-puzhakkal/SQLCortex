@@ -29,6 +29,9 @@
     "onCommand:dbcopilot.disconnectDatabase",
     "onCommand:dbcopilot.refreshSchema",
     "onCommand:dbcopilot.captureSchemaSnapshot",
+    "onCommand:sqlcortex.scoreCurrentQueryFast",
+    "onCommand:sqlcortex.scoreCurrentQueryWithPlan",
+    "onCommand:sqlcortex.toggleRealtimeScoring",
     "onCommand:dbcopilot.optimizeCurrentQuery",
     "onCommand:dbcopilot.analyzeSchemaHealth",
     "onCommand:dbcopilot.createTableWizard",
@@ -128,6 +131,18 @@
       {
         "command": "sqlcortex.drawSchemaErd",
         "title": "SQLCortex: Draw ERD Diagram"
+      },
+      {
+        "command": "sqlcortex.scoreCurrentQueryFast",
+        "title": "SQLCortex: Score Current Query (Fast)"
+      },
+      {
+        "command": "sqlcortex.scoreCurrentQueryWithPlan",
+        "title": "SQLCortex: Score Current Query (With Plan)"
+      },
+      {
+        "command": "sqlcortex.toggleRealtimeScoring",
+        "title": "SQLCortex: Toggle Real-Time Scoring"
       },
       {
         "command": "dbcopilot.loginWithToken",
@@ -255,6 +270,18 @@
           "type": "boolean",
           "default": false,
           "description": "Show AI metering placeholder in DB Copilot overview."
+        },
+        "sqlcortex.intelligence.realTimeScoringEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline real-time SQL intelligence badges and hovers."
+        },
+        "sqlcortex.intelligence.debounceMs": {
+          "type": "number",
+          "default": 500,
+          "minimum": 400,
+          "maximum": 600,
+          "description": "Debounce interval for real-time SQL intelligence updates."
         }
       }
     },

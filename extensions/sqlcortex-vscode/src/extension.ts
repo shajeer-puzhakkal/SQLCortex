@@ -134,9 +134,23 @@ import { createLoginWithTokenCommand } from "./commands/loginWithToken";
 import { createLogoutCommand } from "./commands/logout";
 import { createSelectTargetCommand } from "./commands/selectTarget";
 import {
+  createIntelligenceCommandHandlers,
+  INTELLIGENCE_DEBOUNCE_SETTING,
+  INTELLIGENCE_REALTIME_SETTING,
+  SCORE_CURRENT_QUERY_FAST_COMMAND_ID,
+  SCORE_CURRENT_QUERY_WITH_PLAN_COMMAND_ID,
+  TOGGLE_REALTIME_SCORING_COMMAND_ID,
+} from "./commands/intelligenceCommands";
+import {
   createTargetStatusBarItem,
   updateTargetStatusBar,
 } from "./ui/statusbar/TargetStatusBar";
+import { IntelligenceDecorations } from "./intelligence/decorations";
+import {
+  evaluateLocalFastIntelligence,
+  IntelligencePipeline,
+} from "./intelligence/pipeline";
+import { registerIntelligenceHoverProvider } from "./intelligence/hover";
 
 const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.login", label: "Login" },
@@ -152,6 +166,9 @@ const COMMANDS: Array<{ id: string; label: string }> = [
   { id: "sqlcortex.runTableQuery", label: "Run Table Query" },
   { id: "sqlcortex.runQuery", label: "Run Query" },
   { id: "sqlcortex.runSelection", label: "Run Selection" },
+  { id: SCORE_CURRENT_QUERY_FAST_COMMAND_ID, label: "Score Current Query (Fast)" },
+  { id: SCORE_CURRENT_QUERY_WITH_PLAN_COMMAND_ID, label: "Score Current Query (With Plan)" },
+  { id: TOGGLE_REALTIME_SCORING_COMMAND_ID, label: "Toggle Real-Time Scoring" },
   { id: "sqlcortex.analyzeSelection", label: "Analyze Selection" },
   { id: "sqlcortex.analyzeSelectionWithAnalyze", label: "Analyze Selection (EXPLAIN ANALYZE)" },
   { id: "sqlcortex.analyzeDocument", label: "Analyze Query" },
@@ -511,6 +528,68 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(codeLensDisposable);
 
+  const intelligenceDecorations = new IntelligenceDecorations();
+  const intelligencePipeline = new IntelligencePipeline({
+    decorations: intelligenceDecorations,
+    output,
+    getRealtimeEnabled: () =>
+      resolveIntelligenceRealtimeEnabled(vscode.workspace.getConfiguration("sqlcortex")),
+    getDebounceMs: () =>
+      resolveIntelligenceDebounceMs(vscode.workspace.getConfiguration("sqlcortex")),
+  });
+  context.subscriptions.push(intelligenceDecorations, intelligencePipeline);
+  context.subscriptions.push(
+    registerIntelligenceHoverProvider({
+      pipeline: intelligencePipeline,
+      planCommandId: SCORE_CURRENT_QUERY_WITH_PLAN_COMMAND_ID,
+    })
+  );
+  intelligencePipeline.requestImmediateRefresh();
+
+  const intelligenceHandlers = createIntelligenceCommandHandlers({
+    context,
+    output,
+    pipeline: intelligencePipeline,
+    resolvePlanContext: async () => {
+      const auth = await resolveAuthContext(context, tokenStore, output);
+      if (!auth) {
+        return null;
+      }
+
+      const workspaceContext = await ensureActiveProject(
+        context,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider
+      );
+      if (!workspaceContext || !workspaceContext.projectId) {
+        return null;
+      }
+
+      if (!workspaceContext.connectionId) {
+        vscode.window.showErrorMessage(
+          "SQLCortex: Select a connection before running plan scoring."
+        );
+        return null;
+      }
+
+      const client = createAuthorizedClient(
+        context,
+        auth,
+        tokenStore,
+        output,
+        statusBars,
+        sidebarProvider
+      );
+      return {
+        client,
+        projectId: workspaceContext.projectId,
+        connectionId: workspaceContext.connectionId,
+      };
+    },
+  });
+
   const handlers: Record<string, (...args: unknown[]) => Thenable<unknown>> = {
     "sqlcortex.login": async () => {
       const didLogin = await loginFlow(context, tokenStore, output);
@@ -652,6 +731,7 @@ export function activate(context: vscode.ExtensionContext) {
         args[0]
       );
     },
+    ...intelligenceHandlers,
   };
 
   const dbCopilotHandlers: Record<string, (...args: unknown[]) => Thenable<unknown>> =
@@ -1482,6 +1562,20 @@ function resolveMaxSqlLength(config: vscode.WorkspaceConfiguration): number {
   return DEFAULT_MAX_SQL_LENGTH;
 }
 
+function resolveIntelligenceRealtimeEnabled(
+  config: vscode.WorkspaceConfiguration
+): boolean {
+  return config.get<boolean>(INTELLIGENCE_REALTIME_SETTING) ?? true;
+}
+
+function resolveIntelligenceDebounceMs(config: vscode.WorkspaceConfiguration): number {
+  const value = config.get<number>(INTELLIGENCE_DEBOUNCE_SETTING);
+  if (!Number.isFinite(value)) {
+    return 500;
+  }
+  return Math.max(400, Math.min(600, Math.round(value as number)));
+}
+
 async function confirmExplainAnalyze(
   config: vscode.WorkspaceConfiguration,
   mode: ExplainMode
@@ -2164,6 +2258,23 @@ async function analyzeSelectionFlow(
   if (!extracted.sql) {
     vscode.window.showWarningMessage("SQLCortex: Select SQL to analyze.");
     return;
+  }
+
+  const preflightIntelligence = evaluateLocalFastIntelligence(extracted.sql);
+  if (preflightIntelligence.risk_level === "Dangerous") {
+    const riskDetail = [
+      preflightIntelligence.risk_gate?.message ?? "Dangerous SQL pattern detected.",
+      "Execution remains subject to read-only SQL policy checks.",
+    ].join("\n");
+    const confirmation = await vscode.window.showWarningMessage(
+      "SQLCortex: Dangerous query detected. Continue?",
+      { modal: true, detail: riskDetail },
+      "Continue"
+    );
+    if (confirmation !== "Continue") {
+      output.appendLine("SQLCortex: Query execution canceled due to dangerous risk level.");
+      return;
+    }
   }
 
   const validation = validateReadOnlySql(extracted.sql);
