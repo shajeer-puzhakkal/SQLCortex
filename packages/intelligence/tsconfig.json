@@ -4,6 +4,12 @@
     "target": "ES2021",
     "moduleResolution": "Node",
     "types": ["node"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../apps/api/node_modules/@types",
+      "../../extensions/sqlcortex-vscode/node_modules/@types",
+      "../../apps/web/node_modules/@types"
+    ],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,

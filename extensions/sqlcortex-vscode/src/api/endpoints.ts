@@ -11,6 +11,8 @@ import type {
   Project,
   QueryChatRequest,
   QueryChatResponse,
+  IntelligenceScoreRequest,
+  IntelligenceScoreResponse,
   SchemaMetadataResponse,
   SchemaColumnResource,
   SchemaResource,
@@ -147,6 +149,13 @@ export async function askQueryInsightsChat(
   request: QueryChatRequest
 ): Promise<QueryChatResponse> {
   return client.post<QueryChatResponse>("/api/v1/query/insights/chat", request);
+}
+
+export async function scoreIntelligence(
+  client: ApiClient,
+  request: IntelligenceScoreRequest
+): Promise<IntelligenceScoreResponse> {
+  return client.post<IntelligenceScoreResponse>("/api/intelligence/score", request);
 }
 
 export async function getBillingPlan(
