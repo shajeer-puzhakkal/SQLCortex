@@ -84,7 +84,7 @@ Tokens authenticate via `Authorization: Bearer <token>`.
 - Request body:
   - `mode` (`fast` | `plan`, required)
   - `sql` (string, required)
-  - `project_id` (uuid, required when `mode=plan`)
+  - `project_id` (uuid, required)
   - `connection_id` (uuid, required when `mode=plan`)
 - Behavior:
   - `fast`: AST/heuristics scoring only.
@@ -95,6 +95,36 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `risk_reasons[]`, `risk_gate`
   - `plan_summary` (when `mode=plan`)
 - Errors: `400 INVALID_INPUT` / `SQL_NOT_READ_ONLY` / `INVALID_EXPLAIN_JSON`, `504 ANALYZER_TIMEOUT`, `502 ANALYZER_ERROR`
+
+### GET `/api/intelligence/history`
+- Query:
+  - `project_id` (uuid, required)
+  - `page` (number, optional, default `1`)
+  - `limit` (number, optional, default `25`, max `100`)
+- Returns paginated intelligence events with score/risk/cost/complexity plus `reasons_json`.
+- Success: `200 IntelligenceHistoryResponse`
+- Errors: `400 INVALID_INPUT`, `403 FORBIDDEN`, `429 RATE_LIMITED`
+
+### GET `/api/intelligence/top-risky`
+- Query:
+  - `project_id` (uuid, required)
+  - `range` (`7d` | `30d`, optional, default `7d`)
+  - `limit` (number, optional, default `10`, max `25`)
+- Returns top risky query fingerprints (no raw SQL) ranked by severity and score.
+- Success: `200 IntelligenceTopRiskyResponse`
+- Errors: `400 INVALID_INPUT`, `403 FORBIDDEN`, `429 RATE_LIMITED`
+
+### GET `/api/intelligence/trends`
+- Query:
+  - `project_id` (uuid, required)
+  - `range` (`7d` | `30d`, optional, default `7d`)
+- Returns daily score trends, risk/cost distributions, and heatmap data.
+- Success: `200 IntelligenceTrendsResponse`
+- Errors: `400 INVALID_INPUT`, `403 FORBIDDEN`, `429 RATE_LIMITED`
+
+Security defaults for intelligence history:
+- Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
+- Default storage is fingerprint + extracted feature JSON + scoring metadata.
 
 ## Analyzer Service (`services/analyzer`)
 
