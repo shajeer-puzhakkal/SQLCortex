@@ -7,16 +7,16 @@ export type IntelligenceDecorationSnapshot = {
   result: IntelligenceScoreResponse;
 };
 
-function riskBadgeIcon(level: IntelligenceScoreResponse["risk_level"]): string {
+function riskBadgePrefix(level: IntelligenceScoreResponse["risk_level"]): string {
   switch (level) {
     case "Dangerous":
-      return "$(error)";
+      return "[!]";
     case "Warning":
-      return "$(warning)";
+      return "[~]";
     case "Safe":
-      return "$(check)";
+      return "[OK]";
     default:
-      return "$(question)";
+      return "[?]";
   }
 }
 
@@ -46,6 +46,90 @@ function scoreBadgeColor(score: number): string {
   return "var(--vscode-errorForeground)";
 }
 
+function scoreBadgeBackground(score: number): string {
+  if (score >= 90) {
+    return "var(--vscode-testing-peekItemResultPassedBackground)";
+  }
+  if (score >= 70) {
+    return "var(--vscode-editorInfo-background)";
+  }
+  if (score >= 50) {
+    return "var(--vscode-editorWarning-background)";
+  }
+  return "var(--vscode-inputValidation-errorBackground)";
+}
+
+function riskBadgeBackground(level: IntelligenceScoreResponse["risk_level"]): string {
+  switch (level) {
+    case "Dangerous":
+      return "var(--vscode-inputValidation-errorBackground)";
+    case "Warning":
+      return "var(--vscode-editorWarning-background)";
+    case "Safe":
+      return "var(--vscode-testing-peekItemResultPassedBackground)";
+    default:
+      return "var(--vscode-editorWidget-background)";
+  }
+}
+
+function costBadgeColor(bucket: IntelligenceScoreResponse["cost_bucket"]): string {
+  switch (bucket) {
+    case "Low":
+      return "var(--vscode-testing-iconPassed)";
+    case "Medium":
+      return "var(--vscode-editorWarning-foreground)";
+    case "High":
+    case "Extreme":
+      return "var(--vscode-errorForeground)";
+    default:
+      return "var(--vscode-descriptionForeground)";
+  }
+}
+
+function costBadgeBackground(bucket: IntelligenceScoreResponse["cost_bucket"]): string {
+  switch (bucket) {
+    case "Low":
+      return "var(--vscode-testing-peekItemResultPassedBackground)";
+    case "Medium":
+      return "var(--vscode-editorWarning-background)";
+    case "High":
+    case "Extreme":
+      return "var(--vscode-inputValidation-errorBackground)";
+    default:
+      return "var(--vscode-editorWidget-background)";
+  }
+}
+
+function complexityBadgeColor(
+  rating: IntelligenceScoreResponse["complexity_rating"]
+): string {
+  switch (rating) {
+    case "Simple":
+      return "var(--vscode-testing-iconPassed)";
+    case "Moderate":
+      return "var(--vscode-editorWarning-foreground)";
+    case "Complex":
+      return "var(--vscode-errorForeground)";
+    default:
+      return "var(--vscode-descriptionForeground)";
+  }
+}
+
+function complexityBadgeBackground(
+  rating: IntelligenceScoreResponse["complexity_rating"]
+): string {
+  switch (rating) {
+    case "Simple":
+      return "var(--vscode-testing-peekItemResultPassedBackground)";
+    case "Moderate":
+      return "var(--vscode-editorWarning-background)";
+    case "Complex":
+      return "var(--vscode-inputValidation-errorBackground)";
+    default:
+      return "var(--vscode-editorWidget-background)";
+  }
+}
+
 function createBadgeDecoration(baseBackground: string): vscode.TextEditorDecorationType {
   return vscode.window.createTextEditorDecorationType({
     after: {
@@ -57,6 +141,12 @@ function createBadgeDecoration(baseBackground: string): vscode.TextEditorDecorat
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
+}
+
+function approximateBadgeWidthEm(text: string): number {
+  // Decoration attachments are rendered with a proportional UI font in many themes.
+  // Using `ch` can overestimate width, so we use an approximate per-character `em` width.
+  return Math.max(3, text.length * 0.58);
 }
 
 export class IntelligenceDecorations implements vscode.Disposable {
@@ -80,10 +170,15 @@ export class IntelligenceDecorations implements vscode.Disposable {
     editor: vscode.TextEditor,
     snapshot: IntelligenceDecorationSnapshot
   ): readonly vscode.Range[] {
-    const scoreText = ` Score ${snapshot.result.performance_score}/100 `;
-    const riskText = ` ${riskBadgeIcon(snapshot.result.risk_level)} ${snapshot.result.risk_level} `;
-    const costText = ` Cost ${snapshot.result.cost_bucket} `;
-    const complexityText = ` Complexity ${snapshot.result.complexity_rating} `;
+    const scoreText = `Score ${snapshot.result.performance_score}/100`;
+    const riskText = `${riskBadgePrefix(snapshot.result.risk_level)} ${snapshot.result.risk_level}`;
+    const costText = `Cost ${snapshot.result.cost_bucket}`;
+    const complexityText = `Complexity ${snapshot.result.complexity_rating}`;
+    const badgeGapEm = 0.25;
+    const scoreOffsetEm = 0.5;
+    const riskOffsetEm = scoreOffsetEm + approximateBadgeWidthEm(scoreText) + badgeGapEm;
+    const costOffsetEm = riskOffsetEm + approximateBadgeWidthEm(riskText) + badgeGapEm;
+    const complexityOffsetEm = costOffsetEm + approximateBadgeWidthEm(costText) + badgeGapEm;
 
     const shared = { range: snapshot.anchorRange };
     editor.setDecorations(this.scoreDecoration, [
@@ -93,6 +188,8 @@ export class IntelligenceDecorations implements vscode.Disposable {
           after: {
             contentText: scoreText,
             color: scoreBadgeColor(snapshot.result.performance_score),
+            backgroundColor: scoreBadgeBackground(snapshot.result.performance_score),
+            margin: `0 0 0 ${scoreOffsetEm}em`,
           },
         },
       },
@@ -104,7 +201,8 @@ export class IntelligenceDecorations implements vscode.Disposable {
           after: {
             contentText: riskText,
             color: riskBadgeColor(snapshot.result.risk_level),
-            margin: "0 0 0 6.5rem",
+            backgroundColor: riskBadgeBackground(snapshot.result.risk_level),
+            margin: `0 0 0 ${riskOffsetEm}em`,
           },
         },
       },
@@ -115,8 +213,9 @@ export class IntelligenceDecorations implements vscode.Disposable {
         renderOptions: {
           after: {
             contentText: costText,
-            color: "var(--vscode-descriptionForeground)",
-            margin: "0 0 0 13rem",
+            color: costBadgeColor(snapshot.result.cost_bucket),
+            backgroundColor: costBadgeBackground(snapshot.result.cost_bucket),
+            margin: `0 0 0 ${costOffsetEm}em`,
           },
         },
       },
@@ -127,8 +226,9 @@ export class IntelligenceDecorations implements vscode.Disposable {
         renderOptions: {
           after: {
             contentText: complexityText,
-            color: "var(--vscode-descriptionForeground)",
-            margin: "0 0 0 18.25rem",
+            color: complexityBadgeColor(snapshot.result.complexity_rating),
+            backgroundColor: complexityBadgeBackground(snapshot.result.complexity_rating),
+            margin: `0 0 0 ${complexityOffsetEm}em`,
           },
         },
       },
