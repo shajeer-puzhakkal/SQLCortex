@@ -134,6 +134,15 @@ const queryPrisma =
   queryDatabaseUrl !== process.env.DATABASE_URL
     ? new PrismaClient({ datasources: { db: { url: queryDatabaseUrl } } })
     : prisma;
+const LEGACY_LOCAL_DB_PORT = 5433;
+const localDbFallbackPortEnv = Number(process.env.POSTGRES_PORT ?? "");
+const LOCAL_DB_FALLBACK_PORT =
+  Number.isFinite(localDbFallbackPortEnv) &&
+  localDbFallbackPortEnv > 0 &&
+  localDbFallbackPortEnv <= 65535
+    ? Math.round(localDbFallbackPortEnv)
+    : null;
+const LOCAL_DB_HOST_ALIASES = new Set(["localhost", "127.0.0.1", "host.docker.internal"]);
 const schemaCacheTtlSecondsEnv = Number(
   process.env.SCHEMA_CACHE_TTL_SECONDS ?? process.env.SCHEMA_CACHE_TTL ?? 60
 );
@@ -949,14 +958,93 @@ function sanitizeConnectionError(message: string): string {
   return message.replace(/postgres(?:ql)?:\/\/[^@\s]+@/gi, "postgresql://***@");
 }
 
-async function testPostgresConnection(connectionString: string): Promise<void> {
-  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
-  try {
-    await client.$connect();
-    await client.$queryRaw`SELECT 1`;
-  } finally {
-    await client.$disconnect();
+function isPrismaReachabilityError(err: unknown): boolean {
+  if (!err || typeof err !== "object") {
+    return false;
   }
+
+  const withCode = err as { code?: unknown; errorCode?: unknown; message?: unknown };
+  const code = typeof withCode.code === "string" ? withCode.code : null;
+  const errorCode = typeof withCode.errorCode === "string" ? withCode.errorCode : null;
+  if (code === "P1001" || errorCode === "P1001") {
+    return true;
+  }
+
+  const message = typeof withCode.message === "string" ? withCode.message : "";
+  return message.includes("Can't reach database server");
+}
+
+function buildLegacyLocalPortFallbackConnectionString(connectionString: string): string | null {
+  if (
+    !LOCAL_DB_FALLBACK_PORT ||
+    LOCAL_DB_FALLBACK_PORT === LEGACY_LOCAL_DB_PORT
+  ) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    return null;
+  }
+
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+    return null;
+  }
+
+  if (!LOCAL_DB_HOST_ALIASES.has(parsed.hostname.toLowerCase())) {
+    return null;
+  }
+
+  const parsedPort = parsed.port ? Number(parsed.port) : 5432;
+  if (!Number.isFinite(parsedPort) || parsedPort !== LEGACY_LOCAL_DB_PORT) {
+    return null;
+  }
+
+  parsed.port = String(LOCAL_DB_FALLBACK_PORT);
+  return parsed.toString();
+}
+
+async function runWithLegacyLocalPortFallback<T>(
+  connectionString: string,
+  operation: (url: string) => Promise<T>
+): Promise<T> {
+  try {
+    return await operation(connectionString);
+  } catch (err) {
+    if (!isPrismaReachabilityError(err)) {
+      throw err;
+    }
+
+    const fallbackConnectionString =
+      buildLegacyLocalPortFallbackConnectionString(connectionString);
+    if (!fallbackConnectionString || fallbackConnectionString === connectionString) {
+      throw err;
+    }
+
+    try {
+      const result = await operation(fallbackConnectionString);
+      console.warn(
+        `Applied connection fallback from local port ${LEGACY_LOCAL_DB_PORT} to ${LOCAL_DB_FALLBACK_PORT}.`
+      );
+      return result;
+    } catch {
+      throw err;
+    }
+  }
+}
+
+async function testPostgresConnection(connectionString: string): Promise<void> {
+  await runWithLegacyLocalPortFallback(connectionString, async (resolvedConnectionString) => {
+    const client = new PrismaClient({ datasources: { db: { url: resolvedConnectionString } } });
+    try {
+      await client.$connect();
+      await client.$queryRaw`SELECT 1`;
+    } finally {
+      await client.$disconnect();
+    }
+  });
 }
 
 const schemaCache = new Map<string, SchemaCacheEntry<unknown>>();
@@ -1084,17 +1172,19 @@ async function runSchemaQuery<T>(
   connectionString: string,
   fn: (tx: Prisma.TransactionClient) => Promise<T>
 ): Promise<T> {
-  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
-  try {
-    await client.$connect();
-    return await client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SCHEMA_QUERY_TIMEOUT_MS}`);
-      await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
-      return fn(tx);
-    });
-  } finally {
-    await client.$disconnect();
-  }
+  return runWithLegacyLocalPortFallback(connectionString, async (resolvedConnectionString) => {
+    const client = new PrismaClient({ datasources: { db: { url: resolvedConnectionString } } });
+    try {
+      await client.$connect();
+      return await client.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SCHEMA_QUERY_TIMEOUT_MS}`);
+        await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
+        return fn(tx);
+      });
+    } finally {
+      await client.$disconnect();
+    }
+  });
 }
 
 function mapFkAction(value: string | null): string {
@@ -1312,18 +1402,20 @@ async function runConnectionQuery<T>(
     return apiOverrides.runConnectionQuery(connectionString, sql, timeoutMs) as Promise<T>;
   }
 
-  const client = new PrismaClient({ datasources: { db: { url: connectionString } } });
   const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : QUERY_TIMEOUT_MS;
-  try {
-    await client.$connect();
-    return await client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeout}`);
-      await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
-      return tx.$queryRawUnsafe(sql) as Promise<T>;
-    });
-  } finally {
-    await client.$disconnect();
-  }
+  return runWithLegacyLocalPortFallback(connectionString, async (resolvedConnectionString) => {
+    const client = new PrismaClient({ datasources: { db: { url: resolvedConnectionString } } });
+    try {
+      await client.$connect();
+      return await client.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeout}`);
+        await tx.$executeRawUnsafe("SET LOCAL default_transaction_read_only = on");
+        return tx.$queryRawUnsafe(sql) as Promise<T>;
+      });
+    } finally {
+      await client.$disconnect();
+    }
+  });
 }
 
 async function resolveProjectConnection(
