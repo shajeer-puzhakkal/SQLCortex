@@ -136,17 +136,11 @@ function createBadgeDecoration(baseBackground: string): vscode.TextEditorDecorat
       color: "var(--vscode-editor-foreground)",
       backgroundColor: baseBackground,
       border: "1px solid var(--vscode-editorWidget-border)",
-      margin: "0 0 0 0.75rem",
+      margin: "0 0 0 0.3rem",
       fontWeight: "600",
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
-}
-
-function approximateBadgeWidthEm(text: string): number {
-  // Decoration attachments are rendered with a proportional UI font in many themes.
-  // Using `ch` can overestimate width, so we use an approximate per-character `em` width.
-  return Math.max(3, text.length * 0.58);
 }
 
 export class IntelligenceDecorations implements vscode.Disposable {
@@ -174,11 +168,8 @@ export class IntelligenceDecorations implements vscode.Disposable {
     const riskText = `${riskBadgePrefix(snapshot.result.risk_level)} ${snapshot.result.risk_level}`;
     const costText = `Cost ${snapshot.result.cost_bucket}`;
     const complexityText = `Complexity ${snapshot.result.complexity_rating}`;
-    const badgeGapEm = 0.25;
-    const scoreOffsetEm = 0.5;
-    const riskOffsetEm = scoreOffsetEm + approximateBadgeWidthEm(scoreText) + badgeGapEm;
-    const costOffsetEm = riskOffsetEm + approximateBadgeWidthEm(riskText) + badgeGapEm;
-    const complexityOffsetEm = costOffsetEm + approximateBadgeWidthEm(costText) + badgeGapEm;
+    const firstBadgeOffsetEm = 0.35;
+    const badgeGapEm = 0.22;
 
     const shared = { range: snapshot.anchorRange };
     editor.setDecorations(this.scoreDecoration, [
@@ -189,7 +180,7 @@ export class IntelligenceDecorations implements vscode.Disposable {
             contentText: scoreText,
             color: scoreBadgeColor(snapshot.result.performance_score),
             backgroundColor: scoreBadgeBackground(snapshot.result.performance_score),
-            margin: `0 0 0 ${scoreOffsetEm}em`,
+            margin: `0 0 0 ${firstBadgeOffsetEm}em`,
           },
         },
       },
@@ -202,7 +193,7 @@ export class IntelligenceDecorations implements vscode.Disposable {
             contentText: riskText,
             color: riskBadgeColor(snapshot.result.risk_level),
             backgroundColor: riskBadgeBackground(snapshot.result.risk_level),
-            margin: `0 0 0 ${riskOffsetEm}em`,
+            margin: `0 0 0 ${badgeGapEm}em`,
           },
         },
       },
@@ -215,7 +206,7 @@ export class IntelligenceDecorations implements vscode.Disposable {
             contentText: costText,
             color: costBadgeColor(snapshot.result.cost_bucket),
             backgroundColor: costBadgeBackground(snapshot.result.cost_bucket),
-            margin: `0 0 0 ${costOffsetEm}em`,
+            margin: `0 0 0 ${badgeGapEm}em`,
           },
         },
       },
@@ -228,7 +219,7 @@ export class IntelligenceDecorations implements vscode.Disposable {
             contentText: complexityText,
             color: complexityBadgeColor(snapshot.result.complexity_rating),
             backgroundColor: complexityBadgeBackground(snapshot.result.complexity_rating),
-            margin: `0 0 0 ${complexityOffsetEm}em`,
+            margin: `0 0 0 ${badgeGapEm}em`,
           },
         },
       },
