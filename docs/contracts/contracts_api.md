@@ -122,6 +122,23 @@ Tokens authenticate via `Authorization: Bearer <token>`.
 - Success: `200 IntelligenceTrendsResponse`
 - Errors: `400 INVALID_INPUT`, `403 FORBIDDEN`, `429 RATE_LIMITED`
 
+### POST `/api/intelligence/observability/collect`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+- Behavior:
+  - Resolves the project DB connection and collects metrics from:
+    - `pg_stat_user_tables`
+    - `pg_stat_user_indexes`
+    - `pg_stat_statements` (gracefully marks unavailable when extension is not enabled)
+  - Persists one snapshot row per metric type into `observability_snapshots`.
+  - Intended to be triggered by a scheduler every 15 minutes per active connection.
+- Success: `200 ObservabilityCollectResponse`
+  - `snapshot_time`
+  - `inserted_count` (typically `3`)
+  - `metrics[]` with `metric_type`, `source`, `rows_collected`, optional `unavailable`
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 Security defaults for intelligence history:
 - Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
 - Default storage is fingerprint + extracted feature JSON + scoring metadata.

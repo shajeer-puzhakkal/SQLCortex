@@ -12,6 +12,9 @@ import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../../packag
 import type {
   IntelligenceHistoryResponse,
   IntelligenceMode,
+  ObservabilityCollectRequest,
+  ObservabilityCollectResponse,
+  ObservabilitySnapshotMetric,
   IntelligenceScoreRequest,
   IntelligenceScoreResponse,
   IntelligenceTopRiskyResponse,
@@ -46,11 +49,24 @@ type ThrottleBucket = { windowStartMs: number; count: number; lastSeenMs: number
 type PlanCacheEntry = { expiresAt: number; payload: IntelligenceScoreResponse };
 type EndpointCacheEntry = { expiresAt: number; payload: unknown };
 type CircuitState = { timeoutCount: number; lastTimeoutMs: number; openUntilMs: number; lastSeenMs: number };
+type ObservabilityCollectedMetric = ObservabilitySnapshotMetric & { metric_data: Record<string, unknown> };
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
 const TOP_RISKY_LIMIT_DEFAULT = 10;
 const TOP_RISKY_LIMIT_MAX = 25;
+const OBSERVABILITY_TABLE_STATS_LIMIT = Math.max(
+  50,
+  Number(process.env.OBSERVABILITY_TABLE_STATS_LIMIT ?? 500) || 500,
+);
+const OBSERVABILITY_INDEX_STATS_LIMIT = Math.max(
+  50,
+  Number(process.env.OBSERVABILITY_INDEX_STATS_LIMIT ?? 1000) || 1000,
+);
+const OBSERVABILITY_QUERY_STATS_LIMIT = Math.max(
+  10,
+  Number(process.env.OBSERVABILITY_QUERY_STATS_LIMIT ?? 100) || 100,
+);
 const THROTTLE_WINDOW_MS = 60_000;
 const THROTTLE_BUCKET_TTL_MS = 10 * 60_000;
 const THROTTLE_LIMIT_PER_MIN = Math.max(
@@ -404,6 +420,253 @@ function redactSqlLiterals(sql: string): string {
     .replace(/\$\d+/g, "?");
 }
 
+function toNumeric(value: unknown): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function toText(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  return null;
+}
+
+function toObjectRows(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (row): row is Record<string, unknown> =>
+      Boolean(row) && typeof row === "object" && !Array.isArray(row),
+  );
+}
+
+function roundTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+function computeIndexUsagePercent(idxScan: number, seqScan: number): number {
+  const total = idxScan + seqScan;
+  if (total <= 0) {
+    return 0;
+  }
+  return roundTo((idxScan / total) * 100, 2);
+}
+
+function isPgStatStatementsUnavailable(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    message.includes("pg_stat_statements") &&
+    (message.includes("does not exist") ||
+      message.includes("permission denied") ||
+      message.includes("must be loaded"))
+  );
+}
+
+function buildObservabilityQueries(): {
+  tableStats: string;
+  indexStats: string;
+  queryStats: string;
+} {
+  return {
+    tableStats: `
+      SELECT
+        schemaname AS schema_name,
+        relname AS table_name,
+        seq_scan::bigint AS seq_scan,
+        idx_scan::bigint AS idx_scan,
+        n_tup_ins::bigint AS rows_inserted,
+        n_tup_upd::bigint AS rows_updated,
+        n_tup_del::bigint AS rows_deleted
+      FROM pg_stat_user_tables
+      ORDER BY (seq_scan + idx_scan) DESC, relname ASC
+      LIMIT ${OBSERVABILITY_TABLE_STATS_LIMIT}
+    `,
+    indexStats: `
+      SELECT
+        s.schemaname AS schema_name,
+        s.relname AS table_name,
+        s.indexrelname AS index_name,
+        s.idx_scan::bigint AS idx_scan,
+        s.idx_tup_read::bigint AS idx_tup_read,
+        s.idx_tup_fetch::bigint AS idx_tup_fetch
+      FROM pg_stat_user_indexes s
+      ORDER BY s.idx_scan DESC, s.indexrelname ASC
+      LIMIT ${OBSERVABILITY_INDEX_STATS_LIMIT}
+    `,
+    queryStats: `
+      SELECT
+        queryid::text AS query_id,
+        calls::bigint AS calls,
+        total_exec_time::double precision AS total_exec_time_ms,
+        mean_exec_time::double precision AS mean_exec_time_ms,
+        rows::bigint AS rows
+      FROM pg_stat_statements
+      ORDER BY total_exec_time DESC
+      LIMIT ${OBSERVABILITY_QUERY_STATS_LIMIT}
+    `,
+  };
+}
+
+async function collectObservabilityMetrics(params: {
+  runConnectionQuery: RunConnectionQueryFn;
+  connectionString: string;
+  snapshotTime: Date;
+}): Promise<ObservabilityCollectedMetric[]> {
+  const queries = buildObservabilityQueries();
+  const tableRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.tableStats);
+  const indexRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.indexStats);
+  const tableRows = toObjectRows(tableRowsRaw).map((row) => {
+    const seqScan = toNumeric(row.seq_scan);
+    const idxScan = toNumeric(row.idx_scan);
+    const rowsInserted = toNumeric(row.rows_inserted);
+    const rowsUpdated = toNumeric(row.rows_updated);
+    const rowsDeleted = toNumeric(row.rows_deleted);
+    return {
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+      seq_scan: seqScan,
+      idx_scan: idxScan,
+      rows_inserted: rowsInserted,
+      rows_updated: rowsUpdated,
+      rows_deleted: rowsDeleted,
+      index_usage_pct: computeIndexUsagePercent(idxScan, seqScan),
+    };
+  });
+  const tableTotals = tableRows.reduce(
+    (acc, row) => {
+      acc.seq_scan += row.seq_scan;
+      acc.idx_scan += row.idx_scan;
+      acc.rows_inserted += row.rows_inserted;
+      acc.rows_updated += row.rows_updated;
+      acc.rows_deleted += row.rows_deleted;
+      return acc;
+    },
+    {
+      seq_scan: 0,
+      idx_scan: 0,
+      rows_inserted: 0,
+      rows_updated: 0,
+      rows_deleted: 0,
+    },
+  );
+
+  const indexRows = toObjectRows(indexRowsRaw).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    index_name: toText(row.index_name) ?? "unknown",
+    idx_scan: toNumeric(row.idx_scan),
+    idx_tup_read: toNumeric(row.idx_tup_read),
+    idx_tup_fetch: toNumeric(row.idx_tup_fetch),
+  }));
+
+  let queryRows: Array<{
+    query_id: string | null;
+    calls: number;
+    total_exec_time_ms: number;
+    mean_exec_time_ms: number;
+    rows: number;
+  }> = [];
+  let queryStatsUnavailable = false;
+  try {
+    const queryRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.queryStats);
+    queryRows = toObjectRows(queryRowsRaw).map((row) => ({
+      query_id: toText(row.query_id),
+      calls: toNumeric(row.calls),
+      total_exec_time_ms: toNumeric(row.total_exec_time_ms),
+      mean_exec_time_ms: toNumeric(row.mean_exec_time_ms),
+      rows: toNumeric(row.rows),
+    }));
+  } catch (err) {
+    if (!isPgStatStatementsUnavailable(err)) {
+      throw err;
+    }
+    queryStatsUnavailable = true;
+  }
+
+  const collectedAt = params.snapshotTime.toISOString();
+  const metrics: ObservabilityCollectedMetric[] = [
+    {
+      metric_type: "table_stats",
+      source: "pg_stat_user_tables",
+      rows_collected: tableRows.length,
+      metric_data: {
+        source: "pg_stat_user_tables",
+        collected_at: collectedAt,
+        totals: {
+          ...tableTotals,
+          index_usage_pct: computeIndexUsagePercent(tableTotals.idx_scan, tableTotals.seq_scan),
+        },
+        tables: tableRows,
+      },
+    },
+    {
+      metric_type: "index_stats",
+      source: "pg_stat_user_indexes",
+      rows_collected: indexRows.length,
+      metric_data: {
+        source: "pg_stat_user_indexes",
+        collected_at: collectedAt,
+        indexes: indexRows,
+      },
+    },
+    {
+      metric_type: "query_stats",
+      source: "pg_stat_statements",
+      rows_collected: queryRows.length,
+      ...(queryStatsUnavailable ? { unavailable: true } : {}),
+      metric_data: {
+        source: "pg_stat_statements",
+        collected_at: collectedAt,
+        unavailable: queryStatsUnavailable,
+        statements: queryRows,
+      },
+    },
+  ];
+
+  return metrics;
+}
+
+async function persistObservabilitySnapshots(params: {
+  prisma: PrismaClient;
+  projectId: string;
+  snapshotTime: Date;
+  metrics: ObservabilityCollectedMetric[];
+}): Promise<number> {
+  let inserted = 0;
+  for (const metric of params.metrics) {
+    await params.prisma.$executeRawUnsafe(
+      `INSERT INTO "observability_snapshots" (
+        "project_id",
+        "snapshot_time",
+        "metric_type",
+        "metric_data"
+      ) VALUES ($1, $2, $3, $4::jsonb)`,
+      params.projectId,
+      params.snapshotTime,
+      metric.metric_type,
+      JSON.stringify(metric.metric_data),
+    );
+    inserted += 1;
+  }
+  return inserted;
+}
+
 async function persistIntelligenceEvent(params: {
   prisma: PrismaClient;
   projectId: string;
@@ -659,6 +922,94 @@ export function registerIntelligenceRoutes(options: {
         response,
       });
       return res.json(response);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/observability/collect",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<ObservabilityCollectRequest>>,
+      res: Response<ObservabilityCollectResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Observability collection is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const snapshotTime = new Date();
+      let metrics: ObservabilityCollectedMetric[];
+      try {
+        metrics = await collectObservabilityMetrics({
+          runConnectionQuery: options.runConnectionQuery,
+          connectionString: connectionContext.connectionString,
+          snapshotTime,
+        });
+      } catch (err) {
+        console.error("Failed to collect observability metrics", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to collect observability metrics."));
+      }
+
+      let insertedCount = 0;
+      try {
+        insertedCount = await persistObservabilitySnapshots({
+          prisma: options.prisma,
+          projectId: connectionContext.projectId,
+          snapshotTime,
+          metrics,
+        });
+      } catch (err) {
+        console.error("Failed to persist observability snapshots", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to persist observability snapshots."));
+      }
+
+      const payload: ObservabilityCollectResponse = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        snapshot_time: snapshotTime.toISOString(),
+        inserted_count: insertedCount,
+        metrics: metrics.map((metric) => ({
+          metric_type: metric.metric_type,
+          source: metric.source,
+          rows_collected: metric.rows_collected,
+          ...(metric.unavailable ? { unavailable: true } : {}),
+        })),
+      };
+      return res.json(payload);
     },
   );
 

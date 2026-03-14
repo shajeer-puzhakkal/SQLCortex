@@ -220,6 +220,28 @@ export type IntelligenceTrendsResponse = {
   heatmap: IntelligenceHeatmapCell[];
 };
 
+export type ObservabilityMetricType = "table_stats" | "index_stats" | "query_stats";
+
+export type ObservabilitySnapshotMetric = {
+  metric_type: ObservabilityMetricType;
+  source: "pg_stat_user_tables" | "pg_stat_user_indexes" | "pg_stat_statements";
+  rows_collected: number;
+  unavailable?: boolean;
+};
+
+export type ObservabilityCollectRequest = {
+  project_id: string;
+  connection_id: string;
+};
+
+export type ObservabilityCollectResponse = {
+  project_id: string;
+  connection_id: string;
+  snapshot_time: string;
+  inserted_count: number;
+  metrics: ObservabilitySnapshotMetric[];
+};
+
 export type SchemaInsightsStats = {
   tableCount: number;
   viewCount: number;

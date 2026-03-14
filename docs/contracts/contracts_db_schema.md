@@ -104,3 +104,13 @@ Sprint 1 pricing/quota limits (max projects, retention days, rate limit, etc.) a
 - `created_at` timestamptz default now()
 - `updated_at` timestamptz default now()
 - UNIQUE (`subject_type`, `user_id`, `org_id`, `month`)
+
+## observability_snapshots
+- `id` uuid PK
+- `project_id` uuid FK -> projects.id (cascade)
+- `snapshot_time` timestamptz default now()
+- `metric_type` text (`table_stats` | `index_stats` | `query_stats`)
+- `metric_data` jsonb
+- Indexes:
+  - (`project_id`, `snapshot_time` desc)
+  - (`project_id`, `metric_type`, `snapshot_time` desc)
