@@ -262,6 +262,27 @@ export type SchemaSnapshotCaptureResponse = {
   };
 };
 
+export type IndexHealthStatus = "unused_index" | "missing_index";
+
+export type IndexHealthFinding = {
+  index_name: string;
+  status: IndexHealthStatus;
+  recommendation: string;
+};
+
+export type IndexHealthAnalyzeRequest = {
+  project_id: string;
+  connection_id: string;
+};
+
+export type IndexHealthAnalyzeResponse = {
+  project_id: string;
+  connection_id: string;
+  analyzed_at: string;
+  inserted_count: number;
+  findings: IndexHealthFinding[];
+};
+
 export type SchemaInsightsStats = {
   tableCount: number;
   viewCount: number;
