@@ -94,6 +94,7 @@ model Project {
   queryIntelligenceEvents QueryIntelligenceEvent[]
   observabilitySnapshots ObservabilitySnapshot[]
   schemaSnapshots SchemaSnapshot[]
+  schemaChanges SchemaChange[]
 
   @@map("projects")
 }
@@ -185,6 +186,19 @@ model SchemaSnapshot {
   @@index([projectId, snapshotTime(sort: Desc)])
   @@index([projectId, schemaHash])
   @@map("schema_snapshots")
+}
+
+model SchemaChange {
+  id         String   @id @default(uuid()) @db.Uuid
+  projectId  String   @db.Uuid @map("project_id")
+  changeType String   @map("change_type")
+  objectName String   @map("object_name")
+  detectedAt DateTime @default(now()) @map("detected_at")
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, detectedAt(sort: Desc)])
+  @@index([projectId, changeType, detectedAt(sort: Desc)])
+  @@map("schema_changes")
 }
 
 model MeterEvent {

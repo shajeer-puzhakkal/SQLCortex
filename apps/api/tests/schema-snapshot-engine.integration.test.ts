@@ -40,6 +40,7 @@ test("POST /api/intelligence/schema/snapshots/capture stores schema snapshot wit
     });
     return 1;
   };
+  prismaMock.$queryRawUnsafe = async () => [];
 
   setApiOverrides({
     resolveProjectConnection: async () => ({

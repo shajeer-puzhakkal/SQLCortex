@@ -95,6 +95,17 @@ type SchemaSnapshotJson = {
     ordinal_position: number;
   }>;
 };
+type SchemaChangeType =
+  | "table_added"
+  | "table_dropped"
+  | "column_added"
+  | "column_removed"
+  | "index_created"
+  | "index_dropped";
+type SchemaChangeRecord = {
+  change_type: SchemaChangeType;
+  object_name: string;
+};
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
@@ -530,6 +541,141 @@ function toObjectRows(value: unknown): Array<Record<string, unknown>> {
   );
 }
 
+function mapSchemaSnapshotTables(rows: unknown): SchemaSnapshotJson["tables"] {
+  return toObjectRows(rows).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+  }));
+}
+
+function mapSchemaSnapshotColumns(rows: unknown): SchemaSnapshotJson["columns"] {
+  return toObjectRows(rows).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    column_name: toText(row.column_name) ?? "unknown",
+    data_type: toText(row.data_type) ?? "unknown",
+    is_nullable: (toText(row.is_nullable) ?? "").toUpperCase() === "YES",
+    column_default: toText(row.column_default),
+    ordinal_position: toNumeric(row.ordinal_position),
+  }));
+}
+
+function mapSchemaSnapshotIndexes(rows: unknown): SchemaSnapshotJson["indexes"] {
+  return toObjectRows(rows).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    index_name: toText(row.index_name) ?? "unknown",
+    is_unique: toBoolean(row.is_unique),
+    index_definition: toText(row.index_definition) ?? "",
+  }));
+}
+
+function mapSchemaSnapshotConstraints(rows: unknown): SchemaSnapshotJson["constraints"] {
+  return toObjectRows(rows).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    constraint_name: toText(row.constraint_name) ?? "unknown",
+    constraint_type: toText(row.constraint_type) ?? "UNKNOWN",
+  }));
+}
+
+function mapSchemaSnapshotForeignKeys(rows: unknown): SchemaSnapshotJson["foreign_keys"] {
+  return toObjectRows(rows).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    constraint_name: toText(row.constraint_name) ?? "unknown",
+    column_name: toText(row.column_name) ?? "unknown",
+    foreign_schema_name: toText(row.foreign_schema_name) ?? "public",
+    foreign_table_name: toText(row.foreign_table_name) ?? "unknown",
+    foreign_column_name: toText(row.foreign_column_name) ?? "unknown",
+    ordinal_position: toNumeric(row.ordinal_position),
+  }));
+}
+
+function normalizeStoredSchemaSnapshot(value: unknown): SchemaSnapshotJson | null {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const snapshot = parsed as Record<string, unknown>;
+  return {
+    tables: mapSchemaSnapshotTables(snapshot.tables),
+    columns: mapSchemaSnapshotColumns(snapshot.columns),
+    indexes: mapSchemaSnapshotIndexes(snapshot.indexes),
+    constraints: mapSchemaSnapshotConstraints(snapshot.constraints),
+    foreign_keys: mapSchemaSnapshotForeignKeys(snapshot.foreign_keys),
+  };
+}
+
+function toTableObjectName(entry: SchemaSnapshotJson["tables"][number]): string {
+  return `${entry.schema_name}.${entry.table_name}`;
+}
+
+function toColumnObjectName(entry: SchemaSnapshotJson["columns"][number]): string {
+  return `${entry.schema_name}.${entry.table_name}.${entry.column_name}`;
+}
+
+function toIndexObjectName(entry: SchemaSnapshotJson["indexes"][number]): string {
+  return `${entry.schema_name}.${entry.table_name}.${entry.index_name}`;
+}
+
+function detectSchemaChanges(params: {
+  previous: SchemaSnapshotJson;
+  current: SchemaSnapshotJson;
+}): SchemaChangeRecord[] {
+  const changes: SchemaChangeRecord[] = [];
+
+  const previousTables = new Set(params.previous.tables.map((entry) => toTableObjectName(entry)));
+  const currentTables = new Set(params.current.tables.map((entry) => toTableObjectName(entry)));
+  for (const objectName of currentTables) {
+    if (!previousTables.has(objectName)) {
+      changes.push({ change_type: "table_added", object_name: objectName });
+    }
+  }
+  for (const objectName of previousTables) {
+    if (!currentTables.has(objectName)) {
+      changes.push({ change_type: "table_dropped", object_name: objectName });
+    }
+  }
+
+  const previousColumns = new Set(params.previous.columns.map((entry) => toColumnObjectName(entry)));
+  const currentColumns = new Set(params.current.columns.map((entry) => toColumnObjectName(entry)));
+  for (const objectName of currentColumns) {
+    if (!previousColumns.has(objectName)) {
+      changes.push({ change_type: "column_added", object_name: objectName });
+    }
+  }
+  for (const objectName of previousColumns) {
+    if (!currentColumns.has(objectName)) {
+      changes.push({ change_type: "column_removed", object_name: objectName });
+    }
+  }
+
+  const previousIndexes = new Set(params.previous.indexes.map((entry) => toIndexObjectName(entry)));
+  const currentIndexes = new Set(params.current.indexes.map((entry) => toIndexObjectName(entry)));
+  for (const objectName of currentIndexes) {
+    if (!previousIndexes.has(objectName)) {
+      changes.push({ change_type: "index_created", object_name: objectName });
+    }
+  }
+  for (const objectName of previousIndexes) {
+    if (!currentIndexes.has(objectName)) {
+      changes.push({ change_type: "index_dropped", object_name: objectName });
+    }
+  }
+
+  return changes;
+}
+
 function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -698,42 +844,11 @@ async function collectSchemaSnapshot(params: {
   const foreignKeyRowsRaw = await params.runConnectionQuery(params.connectionString, queries.foreignKeys);
 
   const schemaJson: SchemaSnapshotJson = {
-    tables: toObjectRows(tableRowsRaw).map((row) => ({
-      schema_name: toText(row.schema_name) ?? "public",
-      table_name: toText(row.table_name) ?? "unknown",
-    })),
-    columns: toObjectRows(columnRowsRaw).map((row) => ({
-      schema_name: toText(row.schema_name) ?? "public",
-      table_name: toText(row.table_name) ?? "unknown",
-      column_name: toText(row.column_name) ?? "unknown",
-      data_type: toText(row.data_type) ?? "unknown",
-      is_nullable: (toText(row.is_nullable) ?? "").toUpperCase() === "YES",
-      column_default: toText(row.column_default),
-      ordinal_position: toNumeric(row.ordinal_position),
-    })),
-    indexes: toObjectRows(indexRowsRaw).map((row) => ({
-      schema_name: toText(row.schema_name) ?? "public",
-      table_name: toText(row.table_name) ?? "unknown",
-      index_name: toText(row.index_name) ?? "unknown",
-      is_unique: toBoolean(row.is_unique),
-      index_definition: toText(row.index_definition) ?? "",
-    })),
-    constraints: toObjectRows(constraintRowsRaw).map((row) => ({
-      schema_name: toText(row.schema_name) ?? "public",
-      table_name: toText(row.table_name) ?? "unknown",
-      constraint_name: toText(row.constraint_name) ?? "unknown",
-      constraint_type: toText(row.constraint_type) ?? "UNKNOWN",
-    })),
-    foreign_keys: toObjectRows(foreignKeyRowsRaw).map((row) => ({
-      schema_name: toText(row.schema_name) ?? "public",
-      table_name: toText(row.table_name) ?? "unknown",
-      constraint_name: toText(row.constraint_name) ?? "unknown",
-      column_name: toText(row.column_name) ?? "unknown",
-      foreign_schema_name: toText(row.foreign_schema_name) ?? "public",
-      foreign_table_name: toText(row.foreign_table_name) ?? "unknown",
-      foreign_column_name: toText(row.foreign_column_name) ?? "unknown",
-      ordinal_position: toNumeric(row.ordinal_position),
-    })),
+    tables: mapSchemaSnapshotTables(tableRowsRaw),
+    columns: mapSchemaSnapshotColumns(columnRowsRaw),
+    indexes: mapSchemaSnapshotIndexes(indexRowsRaw),
+    constraints: mapSchemaSnapshotConstraints(constraintRowsRaw),
+    foreign_keys: mapSchemaSnapshotForeignKeys(foreignKeyRowsRaw),
   };
 
   const schemaHash = createHash("sha256")
@@ -917,6 +1032,59 @@ async function persistSchemaSnapshot(params: {
     params.schemaHash,
     JSON.stringify(params.schemaJson),
   );
+}
+
+async function fetchLatestSchemaSnapshot(params: {
+  prisma: PrismaClient;
+  projectId: string;
+}): Promise<{ schema_hash: string; schema_json: SchemaSnapshotJson } | null> {
+  const rows = await params.prisma.$queryRawUnsafe<Array<{ schema_hash: unknown; schema_json: unknown }>>(
+    `SELECT "schema_hash", "schema_json"
+     FROM "schema_snapshots"
+     WHERE "project_id" = $1
+     ORDER BY "snapshot_time" DESC, "id" DESC
+     LIMIT 1`,
+    params.projectId,
+  );
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+
+  const schemaHash = toText(row.schema_hash);
+  if (!schemaHash) {
+    return null;
+  }
+  const schemaJson = normalizeStoredSchemaSnapshot(row.schema_json);
+  if (!schemaJson) {
+    return null;
+  }
+  return { schema_hash: schemaHash, schema_json: schemaJson };
+}
+
+async function persistSchemaChanges(params: {
+  prisma: PrismaClient;
+  projectId: string;
+  detectedAt: Date;
+  changes: SchemaChangeRecord[];
+}): Promise<number> {
+  let inserted = 0;
+  for (const change of params.changes) {
+    await params.prisma.$executeRawUnsafe(
+      `INSERT INTO "schema_changes" (
+        "project_id",
+        "change_type",
+        "object_name",
+        "detected_at"
+      ) VALUES ($1, $2, $3, $4)`,
+      params.projectId,
+      change.change_type,
+      change.object_name,
+      params.detectedAt,
+    );
+    inserted += 1;
+  }
+  return inserted;
 }
 
 async function persistIntelligenceEvent(params: {
@@ -1323,6 +1491,17 @@ export function registerIntelligenceRoutes(options: {
         return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to collect schema snapshot."));
       }
 
+      let previousSnapshot: Awaited<ReturnType<typeof fetchLatestSchemaSnapshot>> = null;
+      try {
+        previousSnapshot = await fetchLatestSchemaSnapshot({
+          prisma: options.prisma,
+          projectId: connectionContext.projectId,
+        });
+      } catch (err) {
+        console.error("Failed to load previous schema snapshot", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to detect schema changes."));
+      }
+
       let insertedCount = 0;
       try {
         insertedCount = await persistSchemaSnapshot({
@@ -1335,6 +1514,26 @@ export function registerIntelligenceRoutes(options: {
       } catch (err) {
         console.error("Failed to persist schema snapshot", err);
         return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to persist schema snapshot."));
+      }
+
+      if (previousSnapshot && previousSnapshot.schema_hash !== schemaSnapshot.schema_hash) {
+        const changes = detectSchemaChanges({
+          previous: previousSnapshot.schema_json,
+          current: schemaSnapshot.schema_json,
+        });
+        if (changes.length > 0) {
+          try {
+            await persistSchemaChanges({
+              prisma: options.prisma,
+              projectId: connectionContext.projectId,
+              detectedAt: snapshotTime,
+              changes,
+            });
+          } catch (err) {
+            console.error("Failed to persist schema changes", err);
+            return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to persist schema changes."));
+          }
+        }
       }
 
       const payload: SchemaSnapshotCaptureResponse = {
