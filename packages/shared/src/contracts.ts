@@ -242,6 +242,26 @@ export type ObservabilityCollectResponse = {
   metrics: ObservabilitySnapshotMetric[];
 };
 
+export type SchemaSnapshotCaptureRequest = {
+  project_id: string;
+  connection_id: string;
+};
+
+export type SchemaSnapshotCaptureResponse = {
+  project_id: string;
+  connection_id: string;
+  snapshot_time: string;
+  schema_hash: string;
+  inserted_count: number;
+  object_counts: {
+    tables: number;
+    columns: number;
+    indexes: number;
+    constraints: number;
+    foreign_keys: number;
+  };
+};
+
 export type SchemaInsightsStats = {
   tableCount: number;
   viewCount: number;

@@ -114,3 +114,13 @@ Sprint 1 pricing/quota limits (max projects, retention days, rate limit, etc.) a
 - Indexes:
   - (`project_id`, `snapshot_time` desc)
   - (`project_id`, `metric_type`, `snapshot_time` desc)
+
+## schema_snapshots
+- `id` uuid PK
+- `project_id` uuid FK -> projects.id (cascade)
+- `snapshot_time` timestamptz default now()
+- `schema_hash` text (sha256 hash of normalized `schema_json`)
+- `schema_json` jsonb (tables, columns, indexes, constraints, foreign keys)
+- Indexes:
+  - (`project_id`, `snapshot_time` desc)
+  - (`project_id`, `schema_hash`)
