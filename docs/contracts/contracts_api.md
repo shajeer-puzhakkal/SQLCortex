@@ -139,6 +139,27 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `metrics[]` with `metric_type`, `source`, `rows_collected`, optional `unavailable`
 - Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
 
+### POST `/api/intelligence/schema/snapshots/capture`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+- Behavior:
+  - Resolves the project DB connection and captures schema objects:
+    - tables
+    - columns
+    - indexes
+    - constraints
+    - foreign keys
+  - Builds a deterministic `schema_hash` (sha256) from normalized `schema_json`.
+  - Persists one row into `schema_snapshots`.
+  - Intended to be triggered by a scheduler every 15 minutes per active connection.
+- Success: `200 SchemaSnapshotCaptureResponse`
+  - `snapshot_time`
+  - `schema_hash`
+  - `inserted_count` (typically `1`)
+  - `object_counts` (`tables`, `columns`, `indexes`, `constraints`, `foreign_keys`)
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 Security defaults for intelligence history:
 - Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
 - Default storage is fingerprint + extracted feature JSON + scoring metadata.

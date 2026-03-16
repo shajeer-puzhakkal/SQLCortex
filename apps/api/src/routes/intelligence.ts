@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import type { Express, Request, Response } from "express";
+import { createHash } from "node:crypto";
 import {
   extractQueryFeatures,
   type IntelligenceResult,
@@ -15,6 +16,8 @@ import type {
   ObservabilityCollectRequest,
   ObservabilityCollectResponse,
   ObservabilitySnapshotMetric,
+  SchemaSnapshotCaptureRequest,
+  SchemaSnapshotCaptureResponse,
   IntelligenceScoreRequest,
   IntelligenceScoreResponse,
   IntelligenceTopRiskyResponse,
@@ -50,6 +53,48 @@ type PlanCacheEntry = { expiresAt: number; payload: IntelligenceScoreResponse };
 type EndpointCacheEntry = { expiresAt: number; payload: unknown };
 type CircuitState = { timeoutCount: number; lastTimeoutMs: number; openUntilMs: number; lastSeenMs: number };
 type ObservabilityCollectedMetric = ObservabilitySnapshotMetric & { metric_data: Record<string, unknown> };
+type SchemaSnapshotRowCounts = {
+  tables: number;
+  columns: number;
+  indexes: number;
+  constraints: number;
+  foreign_keys: number;
+};
+type SchemaSnapshotJson = {
+  tables: Array<{ schema_name: string; table_name: string }>;
+  columns: Array<{
+    schema_name: string;
+    table_name: string;
+    column_name: string;
+    data_type: string;
+    is_nullable: boolean;
+    column_default: string | null;
+    ordinal_position: number;
+  }>;
+  indexes: Array<{
+    schema_name: string;
+    table_name: string;
+    index_name: string;
+    is_unique: boolean;
+    index_definition: string;
+  }>;
+  constraints: Array<{
+    schema_name: string;
+    table_name: string;
+    constraint_name: string;
+    constraint_type: string;
+  }>;
+  foreign_keys: Array<{
+    schema_name: string;
+    table_name: string;
+    constraint_name: string;
+    column_name: string;
+    foreign_schema_name: string;
+    foreign_table_name: string;
+    foreign_column_name: string;
+    ordinal_position: number;
+  }>;
+};
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
@@ -445,6 +490,36 @@ function toText(value: unknown): string | null {
   return null;
 }
 
+function toBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "t" || normalized === "1" || normalized === "yes";
+  }
+  return false;
+}
+
+function sortObjectKeysForHash(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sortObjectKeysForHash(entry));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = sortObjectKeysForHash(obj[key]);
+  }
+  return sorted;
+}
+
 function toObjectRows(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) {
     return [];
@@ -520,6 +595,162 @@ function buildObservabilityQueries(): {
       ORDER BY total_exec_time DESC
       LIMIT ${OBSERVABILITY_QUERY_STATS_LIMIT}
     `,
+  };
+}
+
+function buildSchemaSnapshotQueries(): {
+  tables: string;
+  columns: string;
+  indexes: string;
+  constraints: string;
+  foreignKeys: string;
+} {
+  return {
+    tables: `
+      SELECT
+        table_schema AS schema_name,
+        table_name
+      FROM information_schema.tables
+      WHERE table_type = 'BASE TABLE'
+        AND table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY table_schema ASC, table_name ASC
+    `,
+    columns: `
+      SELECT
+        table_schema AS schema_name,
+        table_name,
+        column_name,
+        data_type,
+        is_nullable,
+        column_default,
+        ordinal_position::int AS ordinal_position
+      FROM information_schema.columns
+      WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY table_schema ASC, table_name ASC, ordinal_position ASC
+    `,
+    indexes: `
+      SELECT
+        n.nspname AS schema_name,
+        t.relname AS table_name,
+        i.relname AS index_name,
+        idx.indisunique AS is_unique,
+        pg_get_indexdef(idx.indexrelid) AS index_definition
+      FROM pg_index idx
+      JOIN pg_class i ON i.oid = idx.indexrelid
+      JOIN pg_class t ON t.oid = idx.indrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY n.nspname ASC, t.relname ASC, i.relname ASC
+    `,
+    constraints: `
+      SELECT
+        tc.table_schema AS schema_name,
+        tc.table_name,
+        tc.constraint_name,
+        tc.constraint_type
+      FROM information_schema.table_constraints tc
+      WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY tc.table_schema ASC, tc.table_name ASC, tc.constraint_name ASC
+    `,
+    foreignKeys: `
+      SELECT
+        n.nspname AS schema_name,
+        c.relname AS table_name,
+        con.conname AS constraint_name,
+        a.attname AS column_name,
+        fn.nspname AS foreign_schema_name,
+        fc.relname AS foreign_table_name,
+        fa.attname AS foreign_column_name,
+        mapping.ordinal_position::int AS ordinal_position
+      FROM pg_constraint con
+      JOIN pg_class c ON c.oid = con.conrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_class fc ON fc.oid = con.confrelid
+      JOIN pg_namespace fn ON fn.oid = fc.relnamespace
+      JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY
+        AS mapping(column_attnum, foreign_attnum, ordinal_position) ON true
+      JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = mapping.column_attnum
+      JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = mapping.foreign_attnum
+      WHERE con.contype = 'f'
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY
+        n.nspname ASC,
+        c.relname ASC,
+        con.conname ASC,
+        mapping.ordinal_position ASC
+    `,
+  };
+}
+
+async function collectSchemaSnapshot(params: {
+  runConnectionQuery: RunConnectionQueryFn;
+  connectionString: string;
+}): Promise<{
+  schema_hash: string;
+  schema_json: SchemaSnapshotJson;
+  object_counts: SchemaSnapshotRowCounts;
+}> {
+  const queries = buildSchemaSnapshotQueries();
+  const tableRowsRaw = await params.runConnectionQuery(params.connectionString, queries.tables);
+  const columnRowsRaw = await params.runConnectionQuery(params.connectionString, queries.columns);
+  const indexRowsRaw = await params.runConnectionQuery(params.connectionString, queries.indexes);
+  const constraintRowsRaw = await params.runConnectionQuery(params.connectionString, queries.constraints);
+  const foreignKeyRowsRaw = await params.runConnectionQuery(params.connectionString, queries.foreignKeys);
+
+  const schemaJson: SchemaSnapshotJson = {
+    tables: toObjectRows(tableRowsRaw).map((row) => ({
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+    })),
+    columns: toObjectRows(columnRowsRaw).map((row) => ({
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+      column_name: toText(row.column_name) ?? "unknown",
+      data_type: toText(row.data_type) ?? "unknown",
+      is_nullable: (toText(row.is_nullable) ?? "").toUpperCase() === "YES",
+      column_default: toText(row.column_default),
+      ordinal_position: toNumeric(row.ordinal_position),
+    })),
+    indexes: toObjectRows(indexRowsRaw).map((row) => ({
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+      index_name: toText(row.index_name) ?? "unknown",
+      is_unique: toBoolean(row.is_unique),
+      index_definition: toText(row.index_definition) ?? "",
+    })),
+    constraints: toObjectRows(constraintRowsRaw).map((row) => ({
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+      constraint_name: toText(row.constraint_name) ?? "unknown",
+      constraint_type: toText(row.constraint_type) ?? "UNKNOWN",
+    })),
+    foreign_keys: toObjectRows(foreignKeyRowsRaw).map((row) => ({
+      schema_name: toText(row.schema_name) ?? "public",
+      table_name: toText(row.table_name) ?? "unknown",
+      constraint_name: toText(row.constraint_name) ?? "unknown",
+      column_name: toText(row.column_name) ?? "unknown",
+      foreign_schema_name: toText(row.foreign_schema_name) ?? "public",
+      foreign_table_name: toText(row.foreign_table_name) ?? "unknown",
+      foreign_column_name: toText(row.foreign_column_name) ?? "unknown",
+      ordinal_position: toNumeric(row.ordinal_position),
+    })),
+  };
+
+  const schemaHash = createHash("sha256")
+    .update(JSON.stringify(sortObjectKeysForHash(schemaJson)))
+    .digest("hex");
+  const objectCounts: SchemaSnapshotRowCounts = {
+    tables: schemaJson.tables.length,
+    columns: schemaJson.columns.length,
+    indexes: schemaJson.indexes.length,
+    constraints: schemaJson.constraints.length,
+    foreign_keys: schemaJson.foreign_keys.length,
+  };
+
+  return {
+    schema_hash: schemaHash,
+    schema_json: schemaJson,
+    object_counts: objectCounts,
   };
 }
 
@@ -665,6 +896,27 @@ async function persistObservabilitySnapshots(params: {
     inserted += 1;
   }
   return inserted;
+}
+
+async function persistSchemaSnapshot(params: {
+  prisma: PrismaClient;
+  projectId: string;
+  snapshotTime: Date;
+  schemaHash: string;
+  schemaJson: SchemaSnapshotJson;
+}): Promise<number> {
+  return params.prisma.$executeRawUnsafe(
+    `INSERT INTO "schema_snapshots" (
+      "project_id",
+      "snapshot_time",
+      "schema_hash",
+      "schema_json"
+    ) VALUES ($1, $2, $3, $4::jsonb)`,
+    params.projectId,
+    params.snapshotTime,
+    params.schemaHash,
+    JSON.stringify(params.schemaJson),
+  );
 }
 
 async function persistIntelligenceEvent(params: {
@@ -1008,6 +1260,90 @@ export function registerIntelligenceRoutes(options: {
           rows_collected: metric.rows_collected,
           ...(metric.unavailable ? { unavailable: true } : {}),
         })),
+      };
+      return res.json(payload);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/schema/snapshots/capture",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<SchemaSnapshotCaptureRequest>>,
+      res: Response<SchemaSnapshotCaptureResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Schema snapshot capture is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const snapshotTime = new Date();
+      let schemaSnapshot: Awaited<ReturnType<typeof collectSchemaSnapshot>>;
+      try {
+        schemaSnapshot = await collectSchemaSnapshot({
+          runConnectionQuery: options.runConnectionQuery,
+          connectionString: connectionContext.connectionString,
+        });
+      } catch (err) {
+        console.error("Failed to collect schema snapshot", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to collect schema snapshot."));
+      }
+
+      let insertedCount = 0;
+      try {
+        insertedCount = await persistSchemaSnapshot({
+          prisma: options.prisma,
+          projectId: connectionContext.projectId,
+          snapshotTime,
+          schemaHash: schemaSnapshot.schema_hash,
+          schemaJson: schemaSnapshot.schema_json,
+        });
+      } catch (err) {
+        console.error("Failed to persist schema snapshot", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to persist schema snapshot."));
+      }
+
+      const payload: SchemaSnapshotCaptureResponse = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        snapshot_time: snapshotTime.toISOString(),
+        schema_hash: schemaSnapshot.schema_hash,
+        inserted_count: insertedCount,
+        object_counts: schemaSnapshot.object_counts,
       };
       return res.json(payload);
     },
