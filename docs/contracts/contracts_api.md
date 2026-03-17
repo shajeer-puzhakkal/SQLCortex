@@ -152,6 +152,10 @@ Tokens authenticate via `Authorization: Bearer <token>`.
     - foreign keys
   - Builds a deterministic `schema_hash` (sha256) from normalized `schema_json`.
   - Persists one row into `schema_snapshots`.
+  - Compares against the previous snapshot and logs detected changes into `schema_changes`:
+    - `table_added`, `table_dropped`
+    - `column_added`, `column_removed`
+    - `index_created`, `index_dropped`
   - Intended to be triggered by a scheduler every 15 minutes per active connection.
 - Success: `200 SchemaSnapshotCaptureResponse`
   - `snapshot_time`
