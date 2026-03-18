@@ -12,6 +12,9 @@ import {
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../../packages/shared/src/sql";
 import type {
   IntelligenceHistoryResponse,
+  IndexHealthAnalyzeRequest,
+  IndexHealthAnalyzeResponse,
+  IndexHealthFinding,
   IntelligenceMode,
   ObservabilityCollectRequest,
   ObservabilityCollectResponse,
@@ -106,11 +109,43 @@ type SchemaChangeRecord = {
   change_type: SchemaChangeType;
   object_name: string;
 };
+type IndexHealthRow = {
+  schema_name: string;
+  table_name: string;
+  index_name: string;
+  idx_scan: number;
+  stats_reset: Date | null;
+};
+type HighSeqScanTableRow = {
+  schema_name: string;
+  table_name: string;
+  seq_scan: number;
+  idx_scan: number;
+};
+type TableIndexDefinitionRow = {
+  schema_name: string;
+  table_name: string;
+  index_name: string;
+  index_definition: string;
+};
+type QueryStatementRow = {
+  query_text: string | null;
+  calls: number;
+};
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
 const TOP_RISKY_LIMIT_DEFAULT = 10;
 const TOP_RISKY_LIMIT_MAX = 25;
+const INDEX_HEALTH_UNUSED_LOOKBACK_DAYS = 30;
+const INDEX_HEALTH_SEQ_SCAN_THRESHOLD = Math.max(
+  50,
+  Number(process.env.INDEX_HEALTH_SEQ_SCAN_THRESHOLD ?? 100) || 100,
+);
+const INDEX_HEALTH_STATEMENTS_LIMIT = Math.max(
+  25,
+  Number(process.env.INDEX_HEALTH_STATEMENTS_LIMIT ?? 300) || 300,
+);
 const OBSERVABILITY_TABLE_STATS_LIMIT = Math.max(
   50,
   Number(process.env.OBSERVABILITY_TABLE_STATS_LIMIT ?? 500) || 500,
@@ -676,6 +711,310 @@ function detectSchemaChanges(params: {
   return changes;
 }
 
+function toIndexHealthObjectName(schemaName: string, tableName: string, indexName: string): string {
+  return `${schemaName}.${tableName}.${indexName}`;
+}
+
+function normalizeIdentifier(value: string): string {
+  return value.replace(/"/g, "").trim().toLowerCase();
+}
+
+function normalizeTableReference(value: string): { schema_name: string; table_name: string } | null {
+  const normalized = normalizeIdentifier(value);
+  if (!normalized) {
+    return null;
+  }
+  const parts = normalized.split(".").filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    return null;
+  }
+  if (parts.length === 1) {
+    return { schema_name: "public", table_name: parts[0] ?? "unknown" };
+  }
+  return {
+    schema_name: parts[parts.length - 2] ?? "public",
+    table_name: parts[parts.length - 1] ?? "unknown",
+  };
+}
+
+function buildIndexHealthQueries(): {
+  unusedIndexes: string;
+  highSeqScanTables: string;
+  tableIndexes: string;
+  queryStatements: string;
+} {
+  return {
+    unusedIndexes: `
+      SELECT
+        s.schemaname AS schema_name,
+        s.relname AS table_name,
+        s.indexrelname AS index_name,
+        s.idx_scan::bigint AS idx_scan,
+        COALESCE(sd.stats_reset, TIMESTAMPTZ 'epoch') AS stats_reset
+      FROM pg_stat_user_indexes s
+      JOIN pg_class idx ON idx.relname = s.indexrelname
+      JOIN pg_namespace idxns ON idxns.oid = idx.relnamespace AND idxns.nspname = s.schemaname
+      JOIN pg_index i ON i.indexrelid = idx.oid
+      LEFT JOIN pg_stat_database sd ON sd.datname = current_database()
+      WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+        AND COALESCE(i.indisprimary, false) = false
+        AND COALESCE(i.indisunique, false) = false
+      ORDER BY s.idx_scan ASC, s.schemaname ASC, s.relname ASC, s.indexrelname ASC
+      LIMIT ${OBSERVABILITY_INDEX_STATS_LIMIT}
+    `,
+    highSeqScanTables: `
+      SELECT
+        schemaname AS schema_name,
+        relname AS table_name,
+        seq_scan::bigint AS seq_scan,
+        idx_scan::bigint AS idx_scan
+      FROM pg_stat_user_tables
+      WHERE seq_scan::bigint >= ${INDEX_HEALTH_SEQ_SCAN_THRESHOLD}
+      ORDER BY seq_scan DESC, relname ASC
+      LIMIT ${OBSERVABILITY_TABLE_STATS_LIMIT}
+    `,
+    tableIndexes: `
+      SELECT
+        n.nspname AS schema_name,
+        t.relname AS table_name,
+        i.relname AS index_name,
+        pg_get_indexdef(idx.indexrelid) AS index_definition
+      FROM pg_index idx
+      JOIN pg_class i ON i.oid = idx.indexrelid
+      JOIN pg_class t ON t.oid = idx.indrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      ORDER BY n.nspname ASC, t.relname ASC, i.relname ASC
+    `,
+    queryStatements: `
+      SELECT
+        query::text AS query_text,
+        calls::bigint AS calls
+      FROM pg_stat_statements
+      WHERE query ILIKE '% where %'
+      ORDER BY calls DESC
+      LIMIT ${INDEX_HEALTH_STATEMENTS_LIMIT}
+    `,
+  };
+}
+
+function extractIndexedColumns(indexDefinition: string): string[] {
+  const match = indexDefinition.match(/\(([^)]+)\)/);
+  if (!match?.[1]) {
+    return [];
+  }
+  const columns = new Set<string>();
+  for (const rawPart of match[1].split(",")) {
+    const cleaned = rawPart
+      .replace(/\bASC\b|\bDESC\b/gi, "")
+      .replace(/\bNULLS\s+FIRST\b|\bNULLS\s+LAST\b/gi, "")
+      .replace(/\bCOLLATE\s+\S+/gi, "")
+      .trim();
+    if (!cleaned || cleaned.includes("(") || cleaned.includes(")")) {
+      continue;
+    }
+    const identifierMatch = cleaned.match(/(?:(?:"?[\w$]+"?)\.)?"?([\w$]+)"?/);
+    const column = identifierMatch?.[1] ? normalizeIdentifier(identifierMatch[1]) : null;
+    if (column) {
+      columns.add(column);
+    }
+  }
+  return Array.from(columns);
+}
+
+function extractQueryFilterColumns(
+  queryText: string,
+): Array<{ schema_name: string; table_name: string; column_name: string }> {
+  const compact = queryText.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return [];
+  }
+
+  const fromMatch = compact.match(
+    /\bfrom\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)(?:\s+(?:as\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)))?/i,
+  );
+  if (!fromMatch?.[1]) {
+    return [];
+  }
+  const tableRef = normalizeTableReference(fromMatch[1]);
+  if (!tableRef) {
+    return [];
+  }
+  const alias = fromMatch[2] ? normalizeIdentifier(fromMatch[2]) : tableRef.table_name;
+
+  const whereMatch = compact.match(
+    /\bwhere\b\s+([\s\S]+?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|\boffset\b|\bfetch\b|\breturning\b|$)/i,
+  );
+  if (!whereMatch?.[1]) {
+    return [];
+  }
+
+  const predicateColumns = new Set<string>();
+  const predicateRegex =
+    /((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)\s*(=|<>|!=|>=|<=|>|<|\blike\b|\bilike\b|\bin\b|\bbetween\b|\bis\b)/gi;
+
+  let match: RegExpExecArray | null = predicateRegex.exec(whereMatch[1]);
+  while (match) {
+    const leftHand = match[1] ?? "";
+    const token = normalizeIdentifier(leftHand);
+    if (token && !token.includes("(") && !token.includes(")")) {
+      const parts = token.split(".");
+      if (parts.length === 1) {
+        predicateColumns.add(parts[0] ?? "");
+      } else if (parts.length >= 2) {
+        const qualifier = parts[parts.length - 2] ?? "";
+        const column = parts[parts.length - 1] ?? "";
+        if (qualifier === alias || qualifier === tableRef.table_name) {
+          predicateColumns.add(column);
+        }
+      }
+    }
+    match = predicateRegex.exec(whereMatch[1]);
+  }
+
+  return Array.from(predicateColumns)
+    .filter((column) => column.length > 0)
+    .map((column) => ({
+      schema_name: tableRef.schema_name,
+      table_name: tableRef.table_name,
+      column_name: column,
+    }));
+}
+
+async function collectIndexHealthFindings(params: {
+  runConnectionQuery: RunConnectionQueryFn;
+  connectionString: string;
+  analyzedAt: Date;
+}): Promise<IndexHealthFinding[]> {
+  const queries = buildIndexHealthQueries();
+  const [unusedRowsRaw, highSeqScanRowsRaw, tableIndexesRaw] = await Promise.all([
+    params.runConnectionQuery<unknown[]>(params.connectionString, queries.unusedIndexes),
+    params.runConnectionQuery<unknown[]>(params.connectionString, queries.highSeqScanTables),
+    params.runConnectionQuery<unknown[]>(params.connectionString, queries.tableIndexes),
+  ]);
+
+  let statementRowsRaw: unknown[] = [];
+  try {
+    statementRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.queryStatements);
+  } catch (err) {
+    if (!isPgStatStatementsUnavailable(err)) {
+      throw err;
+    }
+  }
+
+  const unusedRows: IndexHealthRow[] = toObjectRows(unusedRowsRaw).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    index_name: toText(row.index_name) ?? "unknown",
+    idx_scan: toNumeric(row.idx_scan),
+    stats_reset: row.stats_reset instanceof Date ? row.stats_reset : toText(row.stats_reset) ? new Date(String(row.stats_reset)) : null,
+  }));
+  const highSeqScanRows: HighSeqScanTableRow[] = toObjectRows(highSeqScanRowsRaw).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    seq_scan: toNumeric(row.seq_scan),
+    idx_scan: toNumeric(row.idx_scan),
+  }));
+  const tableIndexes: TableIndexDefinitionRow[] = toObjectRows(tableIndexesRaw).map((row) => ({
+    schema_name: toText(row.schema_name) ?? "public",
+    table_name: toText(row.table_name) ?? "unknown",
+    index_name: toText(row.index_name) ?? "unknown",
+    index_definition: toText(row.index_definition) ?? "",
+  }));
+  const statements: QueryStatementRow[] = toObjectRows(statementRowsRaw).map((row) => ({
+    query_text: toText(row.query_text),
+    calls: toNumeric(row.calls),
+  }));
+
+  const findings: IndexHealthFinding[] = [];
+  const seen = new Set<string>();
+
+  const lookbackThreshold = new Date(params.analyzedAt);
+  lookbackThreshold.setUTCDate(lookbackThreshold.getUTCDate() - INDEX_HEALTH_UNUSED_LOOKBACK_DAYS);
+  for (const row of unusedRows) {
+    const statsReset = row.stats_reset;
+    if (row.idx_scan !== 0 || !statsReset || Number.isNaN(statsReset.getTime()) || statsReset > lookbackThreshold) {
+      continue;
+    }
+    const objectName = toIndexHealthObjectName(row.schema_name, row.table_name, row.index_name);
+    const dedupeKey = `unused_index:${objectName}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    findings.push({
+      index_name: objectName,
+      status: "unused_index",
+      recommendation: `No index scans detected for 30+ days. Consider dropping or re-evaluating index ${objectName}.`,
+    });
+  }
+
+  const indexedColumnsByTable = new Map<string, Set<string>>();
+  for (const row of tableIndexes) {
+    const key = `${row.schema_name}.${row.table_name}`;
+    const existing = indexedColumnsByTable.get(key) ?? new Set<string>();
+    for (const column of extractIndexedColumns(row.index_definition)) {
+      existing.add(column);
+    }
+    indexedColumnsByTable.set(key, existing);
+  }
+
+  const predicateCountsByTable = new Map<string, Map<string, number>>();
+  for (const statement of statements) {
+    if (!statement.query_text || statement.calls <= 0) {
+      continue;
+    }
+    const predicateColumns = extractQueryFilterColumns(statement.query_text);
+    for (const predicate of predicateColumns) {
+      const tableKey = `${predicate.schema_name}.${predicate.table_name}`;
+      const existing = predicateCountsByTable.get(tableKey) ?? new Map<string, number>();
+      existing.set(
+        predicate.column_name,
+        (existing.get(predicate.column_name) ?? 0) + statement.calls,
+      );
+      predicateCountsByTable.set(tableKey, existing);
+    }
+  }
+
+  for (const table of highSeqScanRows) {
+    const tableKey = `${table.schema_name}.${table.table_name}`;
+    const predicateCounts = predicateCountsByTable.get(tableKey);
+    if (!predicateCounts || predicateCounts.size === 0) {
+      continue;
+    }
+    const indexedColumns = indexedColumnsByTable.get(tableKey) ?? new Set<string>();
+    const candidates = Array.from(predicateCounts.entries())
+      .filter(([columnName]) => !indexedColumns.has(columnName))
+      .sort((a, b) => b[1] - a[1]);
+    if (candidates.length === 0) {
+      continue;
+    }
+
+    const [topColumn, topCalls] = candidates[0] ?? [null, null];
+    if (!topColumn || topCalls === null) {
+      continue;
+    }
+    const objectName = `${table.schema_name}.${table.table_name}.${topColumn}`;
+    const dedupeKey = `missing_index:${objectName}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    findings.push({
+      index_name: objectName,
+      status: "missing_index",
+      recommendation: `High sequential scans detected (${table.seq_scan}) with frequent WHERE filters on ${topColumn} (${topCalls} calls). Consider adding an index.`,
+    });
+  }
+
+  return findings.sort((a, b) => {
+    if (a.status === b.status) {
+      return a.index_name.localeCompare(b.index_name);
+    }
+    return a.status.localeCompare(b.status);
+  });
+}
+
 function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -1081,6 +1420,35 @@ async function persistSchemaChanges(params: {
       change.change_type,
       change.object_name,
       params.detectedAt,
+    );
+    inserted += 1;
+  }
+  return inserted;
+}
+
+async function persistIndexHealthFindings(params: {
+  prisma: PrismaClient;
+  projectId: string;
+  findings: IndexHealthFinding[];
+}): Promise<number> {
+  await params.prisma.$executeRawUnsafe(
+    `DELETE FROM "index_health" WHERE "project_id" = $1`,
+    params.projectId,
+  );
+
+  let inserted = 0;
+  for (const finding of params.findings) {
+    await params.prisma.$executeRawUnsafe(
+      `INSERT INTO "index_health" (
+        "project_id",
+        "index_name",
+        "status",
+        "recommendation"
+      ) VALUES ($1, $2, $3, $4)`,
+      params.projectId,
+      finding.index_name,
+      finding.status,
+      finding.recommendation,
     );
     inserted += 1;
   }
@@ -1543,6 +1911,90 @@ export function registerIntelligenceRoutes(options: {
         schema_hash: schemaSnapshot.schema_hash,
         inserted_count: insertedCount,
         object_counts: schemaSnapshot.object_counts,
+      };
+      return res.json(payload);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/index-health/analyze",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<IndexHealthAnalyzeRequest>>,
+      res: Response<IndexHealthAnalyzeResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Index health analysis is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const analyzedAt = new Date();
+      let findings: IndexHealthFinding[];
+      try {
+        findings = await collectIndexHealthFindings({
+          runConnectionQuery: options.runConnectionQuery,
+          connectionString: connectionContext.connectionString,
+          analyzedAt,
+        });
+      } catch (err) {
+        console.error("Failed to analyze index health", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to analyze index health."));
+      }
+
+      let insertedCount = 0;
+      try {
+        insertedCount = await persistIndexHealthFindings({
+          prisma: options.prisma,
+          projectId: connectionContext.projectId,
+          findings,
+        });
+      } catch (err) {
+        console.error("Failed to persist index health findings", err);
+        return res
+          .status(502)
+          .json(makeError("ANALYZER_ERROR", "Failed to persist index health findings."));
+      }
+
+      const payload: IndexHealthAnalyzeResponse = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        analyzed_at: analyzedAt.toISOString(),
+        inserted_count: insertedCount,
+        findings,
       };
       return res.json(payload);
     },

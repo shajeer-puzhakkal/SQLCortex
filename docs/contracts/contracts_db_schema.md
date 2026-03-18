@@ -134,3 +134,13 @@ Sprint 1 pricing/quota limits (max projects, retention days, rate limit, etc.) a
 - Indexes:
   - (`project_id`, `detected_at` desc)
   - (`project_id`, `change_type`, `detected_at` desc)
+
+## index_health
+- `id` uuid PK
+- `project_id` uuid FK -> projects.id (cascade)
+- `index_name` text (existing index name or candidate index target)
+- `status` text (`unused_index` | `missing_index`)
+- `recommendation` text
+- Indexes:
+  - (`project_id`)
+  - (`project_id`, `status`)

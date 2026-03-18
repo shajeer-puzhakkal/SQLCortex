@@ -164,6 +164,21 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `object_counts` (`tables`, `columns`, `indexes`, `constraints`, `foreign_keys`)
 - Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
 
+### POST `/api/intelligence/index-health/analyze`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+- Behavior:
+  - Resolves the project DB connection and analyzes index efficiency.
+  - Detects `unused_index` when `idx_scan = 0` and stats reset is older than 30 days.
+  - Detects `missing_index` for high sequential-scan tables with frequent `WHERE` predicates on non-indexed columns.
+  - Replaces current project rows in `index_health` with latest findings.
+- Success: `200 IndexHealthAnalyzeResponse`
+  - `analyzed_at`
+  - `inserted_count`
+  - `findings[]` (`index_name`, `status`, `recommendation`)
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 Security defaults for intelligence history:
 - Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
 - Default storage is fingerprint + extracted feature JSON + scoring metadata.
