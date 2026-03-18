@@ -179,6 +179,33 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `findings[]` (`index_name`, `status`, `recommendation`)
 - Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
 
+### POST `/api/intelligence/health-report/generate`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+- Behavior:
+  - Builds a weekly health report window (last 7 days, UTC).
+  - Computes `health_score` from:
+    - query performance
+    - schema quality
+    - index efficiency
+    - lock contention
+  - Includes report sections:
+    - `top_slow_queries`
+    - `missing_indexes`
+    - `unused_indexes`
+    - `schema_risks`
+  - Persists/upserts one row per project + week in `database_health_reports`.
+  - Intended to be triggered by a weekly scheduler per active connection.
+- Success: `200 DatabaseHealthReportGenerateResponse`
+  - `report_week_start`
+  - `generated_at`
+  - `inserted_count` (upsert result, `1`)
+  - `health_score`
+  - `score_breakdown` (`query_performance`, `schema_quality`, `index_efficiency`, `lock_contention`)
+  - report sections listed above plus `ai_summary`
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 Security defaults for intelligence history:
 - Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
 - Default storage is fingerprint + extracted feature JSON + scoring metadata.
