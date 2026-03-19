@@ -283,6 +283,54 @@ export type IndexHealthAnalyzeResponse = {
   findings: IndexHealthFinding[];
 };
 
+export type DatabaseHealthScoreBreakdown = {
+  query_performance: number;
+  schema_quality: number;
+  index_efficiency: number;
+  lock_contention: number;
+};
+
+export type DatabaseHealthSlowQuery = {
+  query_id: string | null;
+  query_text: string;
+  calls: number;
+  mean_exec_time_ms: number;
+  total_exec_time_ms: number;
+};
+
+export type DatabaseHealthIndexFinding = {
+  index_name: string;
+  recommendation: string;
+};
+
+export type DatabaseHealthSchemaRisk = {
+  change_type: string;
+  object_name: string;
+  detected_at: string;
+  risk_level: "low" | "medium" | "high";
+  recommendation: string;
+};
+
+export type DatabaseHealthReportGenerateRequest = {
+  project_id: string;
+  connection_id: string;
+};
+
+export type DatabaseHealthReportGenerateResponse = {
+  project_id: string;
+  connection_id: string;
+  report_week_start: string;
+  generated_at: string;
+  inserted_count: number;
+  health_score: number;
+  score_breakdown: DatabaseHealthScoreBreakdown;
+  top_slow_queries: DatabaseHealthSlowQuery[];
+  missing_indexes: DatabaseHealthIndexFinding[];
+  unused_indexes: DatabaseHealthIndexFinding[];
+  schema_risks: DatabaseHealthSchemaRisk[];
+  ai_summary: string;
+};
+
 export type SchemaInsightsStats = {
   tableCount: number;
   viewCount: number;

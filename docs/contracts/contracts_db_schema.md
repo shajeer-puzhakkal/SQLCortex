@@ -144,3 +144,14 @@ Sprint 1 pricing/quota limits (max projects, retention days, rate limit, etc.) a
 - Indexes:
   - (`project_id`)
   - (`project_id`, `status`)
+
+## database_health_reports
+- `id` uuid PK
+- `project_id` uuid FK -> projects.id (cascade)
+- `report_week_start` timestamptz (weekly bucket start, UTC)
+- `generated_at` timestamptz default now()
+- `health_score` int (0-100)
+- `report_json` jsonb (score breakdown + report sections + AI summary)
+- Indexes:
+  - UNIQUE (`project_id`, `report_week_start`)
+  - (`project_id`, `generated_at` desc)

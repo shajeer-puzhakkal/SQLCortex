@@ -11,6 +11,12 @@ import {
 } from "../../../../packages/intelligence/src";
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../../packages/shared/src/sql";
 import type {
+  DatabaseHealthIndexFinding,
+  DatabaseHealthReportGenerateRequest,
+  DatabaseHealthReportGenerateResponse,
+  DatabaseHealthSchemaRisk,
+  DatabaseHealthScoreBreakdown,
+  DatabaseHealthSlowQuery,
   IntelligenceHistoryResponse,
   IndexHealthAnalyzeRequest,
   IndexHealthAnalyzeResponse,
@@ -132,6 +138,15 @@ type QueryStatementRow = {
   query_text: string | null;
   calls: number;
 };
+type LockContentionStatsRow = {
+  waiting_sessions: number;
+  active_sessions: number;
+};
+type SchemaRiskRow = {
+  change_type: string;
+  object_name: string;
+  detected_at: Date;
+};
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
@@ -146,6 +161,11 @@ const INDEX_HEALTH_STATEMENTS_LIMIT = Math.max(
   25,
   Number(process.env.INDEX_HEALTH_STATEMENTS_LIMIT ?? 300) || 300,
 );
+const DATABASE_HEALTH_TOP_SLOW_QUERIES_LIMIT = Math.max(
+  3,
+  Number(process.env.DATABASE_HEALTH_TOP_SLOW_QUERIES_LIMIT ?? 5) || 5,
+);
+const DATABASE_HEALTH_REPORT_WINDOW_DAYS = 7;
 const OBSERVABILITY_TABLE_STATS_LIMIT = Math.max(
   50,
   Number(process.env.OBSERVABILITY_TABLE_STATS_LIMIT ?? 500) || 500,
@@ -332,6 +352,15 @@ function resolveRangeStart(range: "7d" | "30d"): { start: Date; endExclusive: Da
   const endExclusive = new Date(dayStart);
   endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
   return { start, endExclusive };
+}
+
+function resolveWeeklyWindow(reference: Date): { weekStart: Date; weekEndExclusive: Date } {
+  const dayStart = new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth(), reference.getUTCDate()));
+  const weekStart = new Date(dayStart);
+  weekStart.setUTCDate(weekStart.getUTCDate() - (DATABASE_HEALTH_REPORT_WINDOW_DAYS - 1));
+  const weekEndExclusive = new Date(dayStart);
+  weekEndExclusive.setUTCDate(weekEndExclusive.getUTCDate() + 1);
+  return { weekStart, weekEndExclusive };
 }
 
 function resolvePrincipalKey(auth: NonNullable<AuthenticatedRequest["auth"]>): string {
@@ -888,14 +917,14 @@ async function collectIndexHealthFindings(params: {
 }): Promise<IndexHealthFinding[]> {
   const queries = buildIndexHealthQueries();
   const [unusedRowsRaw, highSeqScanRowsRaw, tableIndexesRaw] = await Promise.all([
-    params.runConnectionQuery<unknown[]>(params.connectionString, queries.unusedIndexes),
-    params.runConnectionQuery<unknown[]>(params.connectionString, queries.highSeqScanTables),
-    params.runConnectionQuery<unknown[]>(params.connectionString, queries.tableIndexes),
+    params.runConnectionQuery(params.connectionString, queries.unusedIndexes),
+    params.runConnectionQuery(params.connectionString, queries.highSeqScanTables),
+    params.runConnectionQuery(params.connectionString, queries.tableIndexes),
   ]);
 
-  let statementRowsRaw: unknown[] = [];
+  let statementRowsRaw: unknown = [];
   try {
-    statementRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.queryStatements);
+    statementRowsRaw = await params.runConnectionQuery(params.connectionString, queries.queryStatements);
   } catch (err) {
     if (!isPgStatStatementsUnavailable(err)) {
       throw err;
@@ -1013,6 +1042,349 @@ async function collectIndexHealthFindings(params: {
     }
     return a.status.localeCompare(b.status);
   });
+}
+
+function buildDatabaseHealthQueries(): { topSlowQueries: string; lockContention: string } {
+  return {
+    topSlowQueries: `
+      SELECT
+        queryid::text AS query_id,
+        query::text AS query_text,
+        calls::bigint AS calls,
+        total_exec_time::double precision AS total_exec_time_ms,
+        mean_exec_time::double precision AS mean_exec_time_ms
+      FROM pg_stat_statements
+      ORDER BY mean_exec_time DESC, total_exec_time DESC
+      LIMIT ${DATABASE_HEALTH_TOP_SLOW_QUERIES_LIMIT}
+    `,
+    lockContention: `
+      SELECT
+        COUNT(*) FILTER (WHERE wait_event_type = 'Lock')::bigint AS waiting_sessions,
+        COUNT(*) FILTER (WHERE state = 'active')::bigint AS active_sessions
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+    `,
+  };
+}
+
+function normalizeStoredJsonObject(value: unknown): Record<string, unknown> | null {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function readLatestIndexUsagePercent(metricData: unknown): number | null {
+  const metricObject = normalizeStoredJsonObject(metricData);
+  if (!metricObject) {
+    return null;
+  }
+  const totals = normalizeStoredJsonObject(metricObject.totals);
+  if (!totals) {
+    return null;
+  }
+  const usage = toNumeric(totals.index_usage_pct);
+  if (!Number.isFinite(usage)) {
+    return null;
+  }
+  return Math.min(100, Math.max(0, usage));
+}
+
+function schemaRiskLevel(changeType: string): DatabaseHealthSchemaRisk["risk_level"] {
+  switch (changeType) {
+    case "table_dropped":
+    case "column_removed":
+      return "high";
+    case "index_dropped":
+      return "medium";
+    case "table_added":
+    case "column_added":
+    case "index_created":
+      return "low";
+    default:
+      return "medium";
+  }
+}
+
+function schemaRiskRecommendation(changeType: string, objectName: string): string {
+  switch (changeType) {
+    case "table_dropped":
+      return `Verify table drop impact and recovery path for ${objectName} before production rollout.`;
+    case "column_removed":
+      return `Validate application compatibility and backfill strategy for removed column ${objectName}.`;
+    case "index_dropped":
+      return `Re-check query plans tied to ${objectName} to avoid regressions after index removal.`;
+    case "table_added":
+      return `Review ownership, retention, and indexing strategy for new table ${objectName}.`;
+    case "column_added":
+      return `Confirm nullability/default behavior and migration safety for ${objectName}.`;
+    case "index_created":
+      return `Track write overhead and usage trend for new index ${objectName}.`;
+    default:
+      return `Review schema change ${changeType} on ${objectName}.`;
+  }
+}
+
+function computeQueryPerformanceScore(
+  topSlowQueries: DatabaseHealthSlowQuery[],
+  queryStatsUnavailable: boolean,
+): number {
+  if (queryStatsUnavailable) {
+    return 70;
+  }
+  if (topSlowQueries.length === 0) {
+    return 100;
+  }
+  const aggregate = topSlowQueries.reduce(
+    (acc, query) => {
+      const weight = Math.max(1, query.calls);
+      acc.weightedMean += query.mean_exec_time_ms * weight;
+      acc.totalWeight += weight;
+      return acc;
+    },
+    { weightedMean: 0, totalWeight: 0 },
+  );
+  if (aggregate.totalWeight <= 0) {
+    return 100;
+  }
+  const weightedMeanMs = aggregate.weightedMean / aggregate.totalWeight;
+  const penalty = weightedMeanMs / 5;
+  return clampScore(100 - penalty);
+}
+
+function computeSchemaQualityScore(schemaRisks: DatabaseHealthSchemaRisk[]): number {
+  const penalty = schemaRisks.reduce((acc, risk) => {
+    if (risk.risk_level === "high") {
+      return acc + 20;
+    }
+    if (risk.risk_level === "medium") {
+      return acc + 10;
+    }
+    return acc + 4;
+  }, 0);
+  return clampScore(100 - penalty);
+}
+
+function computeIndexEfficiencyScore(params: {
+  indexUsagePercent: number | null;
+  missingIndexCount: number;
+  unusedIndexCount: number;
+}): number {
+  const baseScore = params.indexUsagePercent === null ? 80 : params.indexUsagePercent;
+  const penalty = params.missingIndexCount * 12 + params.unusedIndexCount * 6;
+  return clampScore(baseScore - penalty);
+}
+
+function computeLockContentionScore(lockContention: LockContentionStatsRow): number {
+  if (lockContention.active_sessions <= 0) {
+    return 100;
+  }
+  const ratio = lockContention.waiting_sessions / lockContention.active_sessions;
+  const penalty = ratio * 220 + lockContention.waiting_sessions * 2;
+  return clampScore(100 - penalty);
+}
+
+function computeDatabaseHealthScore(breakdown: DatabaseHealthScoreBreakdown): number {
+  return clampScore(
+    breakdown.query_performance * 0.35 +
+      breakdown.schema_quality * 0.25 +
+      breakdown.index_efficiency * 0.25 +
+      breakdown.lock_contention * 0.15,
+  );
+}
+
+function databaseHealthLabel(score: number): string {
+  if (score >= 90) {
+    return "excellent";
+  }
+  if (score >= 75) {
+    return "good";
+  }
+  if (score >= 55) {
+    return "moderate";
+  }
+  return "high-risk";
+}
+
+function buildAiDatabaseHealthSummary(params: {
+  healthScore: number;
+  missingIndexes: DatabaseHealthIndexFinding[];
+  unusedIndexes: DatabaseHealthIndexFinding[];
+  schemaRisks: DatabaseHealthSchemaRisk[];
+  topSlowQueries: DatabaseHealthSlowQuery[];
+  scoreBreakdown: DatabaseHealthScoreBreakdown;
+  queryStatsUnavailable: boolean;
+}): string {
+  const healthLabel = databaseHealthLabel(params.healthScore);
+  const worstComponent = (
+    [
+      ["query performance", params.scoreBreakdown.query_performance],
+      ["schema quality", params.scoreBreakdown.schema_quality],
+      ["index efficiency", params.scoreBreakdown.index_efficiency],
+      ["lock contention", params.scoreBreakdown.lock_contention],
+    ] as Array<[string, number]>
+  ).sort((a, b) => a[1] - b[1])[0];
+  const hottestQuery = params.topSlowQueries[0];
+  const schemaHighRiskCount = params.schemaRisks.filter((risk) => risk.risk_level === "high").length;
+  const queryNote = params.queryStatsUnavailable
+    ? "pg_stat_statements unavailable, so slow-query coverage is partial."
+    : hottestQuery
+      ? `Top slow query mean time is ${roundTo(hottestQuery.mean_exec_time_ms, 2)} ms.`
+      : "No slow query sample was available for this window.";
+  return `Weekly health is ${healthLabel} (${params.healthScore}/100). Lowest component is ${worstComponent?.[0] ?? "n/a"} (${worstComponent?.[1] ?? 0}/100). Missing indexes: ${params.missingIndexes.length}; unused indexes: ${params.unusedIndexes.length}; high-risk schema changes: ${schemaHighRiskCount}. ${queryNote}`;
+}
+
+async function collectWeeklyDatabaseHealthReport(params: {
+  prisma: PrismaClient;
+  runConnectionQuery: RunConnectionQueryFn;
+  connectionString: string;
+  projectId: string;
+  generatedAt: Date;
+}): Promise<{
+  week_start: Date;
+  health_score: number;
+  score_breakdown: DatabaseHealthScoreBreakdown;
+  top_slow_queries: DatabaseHealthSlowQuery[];
+  missing_indexes: DatabaseHealthIndexFinding[];
+  unused_indexes: DatabaseHealthIndexFinding[];
+  schema_risks: DatabaseHealthSchemaRisk[];
+  ai_summary: string;
+}> {
+  const { weekStart } = resolveWeeklyWindow(params.generatedAt);
+
+  const [indexFindings, schemaRiskRowsRaw, latestTableStatsRaw] = await Promise.all([
+    collectIndexHealthFindings({
+      runConnectionQuery: params.runConnectionQuery,
+      connectionString: params.connectionString,
+      analyzedAt: params.generatedAt,
+    }),
+    params.prisma.$queryRawUnsafe<
+      Array<{ change_type: unknown; object_name: unknown; detected_at: unknown }>
+    >(
+      `SELECT "change_type", "object_name", "detected_at"
+       FROM "schema_changes"
+       WHERE "project_id" = $1
+         AND "detected_at" >= $2
+       ORDER BY "detected_at" DESC`,
+      params.projectId,
+      weekStart,
+    ),
+    params.prisma.$queryRawUnsafe<Array<{ metric_data: unknown }>>(
+      `SELECT "metric_data"
+       FROM "observability_snapshots"
+       WHERE "project_id" = $1
+         AND "metric_type" = 'table_stats'
+         AND "snapshot_time" >= $2
+       ORDER BY "snapshot_time" DESC
+       LIMIT 1`,
+      params.projectId,
+      weekStart,
+    ),
+  ]);
+
+  const reportQueries = buildDatabaseHealthQueries();
+  let slowQueryRowsRaw: unknown = [];
+  let queryStatsUnavailable = false;
+  try {
+    slowQueryRowsRaw = await params.runConnectionQuery(params.connectionString, reportQueries.topSlowQueries);
+  } catch (err) {
+    if (!isPgStatStatementsUnavailable(err)) {
+      throw err;
+    }
+    queryStatsUnavailable = true;
+  }
+
+  const lockRowsRaw = await params.runConnectionQuery(params.connectionString, reportQueries.lockContention);
+  const lockRow = toObjectRows(lockRowsRaw)[0] ?? {};
+  const lockContention: LockContentionStatsRow = {
+    waiting_sessions: toNumeric(lockRow.waiting_sessions),
+    active_sessions: toNumeric(lockRow.active_sessions),
+  };
+
+  const topSlowQueries: DatabaseHealthSlowQuery[] = toObjectRows(slowQueryRowsRaw).map((row) => ({
+    query_id: toText(row.query_id),
+    query_text: redactSqlLiterals(toText(row.query_text) ?? "").slice(0, 600),
+    calls: toNumeric(row.calls),
+    total_exec_time_ms: roundTo(toNumeric(row.total_exec_time_ms), 2),
+    mean_exec_time_ms: roundTo(toNumeric(row.mean_exec_time_ms), 2),
+  }));
+
+  const missingIndexes: DatabaseHealthIndexFinding[] = indexFindings
+    .filter((finding) => finding.status === "missing_index")
+    .map((finding) => ({
+      index_name: finding.index_name,
+      recommendation: finding.recommendation,
+    }));
+  const unusedIndexes: DatabaseHealthIndexFinding[] = indexFindings
+    .filter((finding) => finding.status === "unused_index")
+    .map((finding) => ({
+      index_name: finding.index_name,
+      recommendation: finding.recommendation,
+    }));
+
+  const schemaRiskRows: SchemaRiskRow[] = toObjectRows(schemaRiskRowsRaw).map((row) => {
+    const detectedAtRaw = row.detected_at;
+    const detectedAt =
+      detectedAtRaw instanceof Date
+        ? detectedAtRaw
+        : toText(detectedAtRaw)
+          ? new Date(String(detectedAtRaw))
+          : params.generatedAt;
+    return {
+      change_type: toText(row.change_type) ?? "unknown_change",
+      object_name: toText(row.object_name) ?? "unknown.object",
+      detected_at: Number.isNaN(detectedAt.getTime()) ? params.generatedAt : detectedAt,
+    };
+  });
+
+  const schemaRisks: DatabaseHealthSchemaRisk[] = schemaRiskRows.map((row) => ({
+    change_type: row.change_type,
+    object_name: row.object_name,
+    detected_at: row.detected_at.toISOString(),
+    risk_level: schemaRiskLevel(row.change_type),
+    recommendation: schemaRiskRecommendation(row.change_type, row.object_name),
+  }));
+
+  const latestIndexUsagePercent = readLatestIndexUsagePercent(latestTableStatsRaw[0]?.metric_data);
+  const scoreBreakdown: DatabaseHealthScoreBreakdown = {
+    query_performance: computeQueryPerformanceScore(topSlowQueries, queryStatsUnavailable),
+    schema_quality: computeSchemaQualityScore(schemaRisks),
+    index_efficiency: computeIndexEfficiencyScore({
+      indexUsagePercent: latestIndexUsagePercent,
+      missingIndexCount: missingIndexes.length,
+      unusedIndexCount: unusedIndexes.length,
+    }),
+    lock_contention: computeLockContentionScore(lockContention),
+  };
+  const healthScore = computeDatabaseHealthScore(scoreBreakdown);
+  const aiSummary = buildAiDatabaseHealthSummary({
+    healthScore,
+    missingIndexes,
+    unusedIndexes,
+    schemaRisks,
+    topSlowQueries,
+    scoreBreakdown,
+    queryStatsUnavailable,
+  });
+
+  return {
+    week_start: weekStart,
+    health_score: healthScore,
+    score_breakdown: scoreBreakdown,
+    top_slow_queries: topSlowQueries,
+    missing_indexes: missingIndexes,
+    unused_indexes: unusedIndexes,
+    schema_risks: schemaRisks,
+    ai_summary: aiSummary,
+  };
 }
 
 function roundTo(value: number, decimals: number): number {
@@ -1214,8 +1586,8 @@ async function collectObservabilityMetrics(params: {
   snapshotTime: Date;
 }): Promise<ObservabilityCollectedMetric[]> {
   const queries = buildObservabilityQueries();
-  const tableRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.tableStats);
-  const indexRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.indexStats);
+  const tableRowsRaw = await params.runConnectionQuery(params.connectionString, queries.tableStats);
+  const indexRowsRaw = await params.runConnectionQuery(params.connectionString, queries.indexStats);
   const tableRows = toObjectRows(tableRowsRaw).map((row) => {
     const seqScan = toNumeric(row.seq_scan);
     const idxScan = toNumeric(row.idx_scan);
@@ -1269,7 +1641,7 @@ async function collectObservabilityMetrics(params: {
   }> = [];
   let queryStatsUnavailable = false;
   try {
-    const queryRowsRaw = await params.runConnectionQuery<unknown[]>(params.connectionString, queries.queryStats);
+    const queryRowsRaw = await params.runConnectionQuery(params.connectionString, queries.queryStats);
     queryRows = toObjectRows(queryRowsRaw).map((row) => ({
       query_id: toText(row.query_id),
       calls: toNumeric(row.calls),
@@ -1453,6 +1825,37 @@ async function persistIndexHealthFindings(params: {
     inserted += 1;
   }
   return inserted;
+}
+
+async function persistDatabaseHealthReport(params: {
+  prisma: PrismaClient;
+  projectId: string;
+  reportWeekStart: Date;
+  generatedAt: Date;
+  healthScore: number;
+  reportJson: Record<string, unknown>;
+}): Promise<number> {
+  await params.prisma.$executeRawUnsafe(
+    `INSERT INTO "database_health_reports" (
+      "project_id",
+      "report_week_start",
+      "generated_at",
+      "health_score",
+      "report_json"
+    ) VALUES ($1, $2, $3, $4, $5::jsonb)
+    ON CONFLICT ("project_id", "report_week_start")
+    DO UPDATE SET
+      "generated_at" = EXCLUDED."generated_at",
+      "health_score" = EXCLUDED."health_score",
+      "report_json" = EXCLUDED."report_json"`,
+    params.projectId,
+    params.reportWeekStart,
+    params.generatedAt,
+    params.healthScore,
+    JSON.stringify(params.reportJson),
+  );
+  invalidateEndpointCache(params.projectId);
+  return 1;
 }
 
 async function persistIntelligenceEvent(params: {
@@ -1995,6 +2398,116 @@ export function registerIntelligenceRoutes(options: {
         analyzed_at: analyzedAt.toISOString(),
         inserted_count: insertedCount,
         findings,
+      };
+      return res.json(payload);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/health-report/generate",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<DatabaseHealthReportGenerateRequest>>,
+      res: Response<DatabaseHealthReportGenerateResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Database health report generation is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const generatedAt = new Date();
+      let reportData: Awaited<ReturnType<typeof collectWeeklyDatabaseHealthReport>>;
+      try {
+        reportData = await collectWeeklyDatabaseHealthReport({
+          prisma: options.prisma,
+          runConnectionQuery: options.runConnectionQuery,
+          connectionString: connectionContext.connectionString,
+          projectId: connectionContext.projectId,
+          generatedAt,
+        });
+      } catch (err) {
+        console.error("Failed to build database health report", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to generate database health report."));
+      }
+
+      const reportJson: Record<string, unknown> = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        report_week_start: reportData.week_start.toISOString(),
+        generated_at: generatedAt.toISOString(),
+        health_score: reportData.health_score,
+        score_breakdown: reportData.score_breakdown,
+        sections: {
+          top_slow_queries: reportData.top_slow_queries,
+          missing_indexes: reportData.missing_indexes,
+          unused_indexes: reportData.unused_indexes,
+          schema_risks: reportData.schema_risks,
+        },
+        ai_summary: reportData.ai_summary,
+      };
+
+      let insertedCount = 0;
+      try {
+        insertedCount = await persistDatabaseHealthReport({
+          prisma: options.prisma,
+          projectId: connectionContext.projectId,
+          reportWeekStart: reportData.week_start,
+          generatedAt,
+          healthScore: reportData.health_score,
+          reportJson,
+        });
+      } catch (err) {
+        console.error("Failed to persist database health report", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to persist database health report."));
+      }
+
+      const payload: DatabaseHealthReportGenerateResponse = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        report_week_start: reportData.week_start.toISOString(),
+        generated_at: generatedAt.toISOString(),
+        inserted_count: insertedCount,
+        health_score: reportData.health_score,
+        score_breakdown: reportData.score_breakdown,
+        top_slow_queries: reportData.top_slow_queries,
+        missing_indexes: reportData.missing_indexes,
+        unused_indexes: reportData.unused_indexes,
+        schema_risks: reportData.schema_risks,
+        ai_summary: reportData.ai_summary,
       };
       return res.json(payload);
     },
