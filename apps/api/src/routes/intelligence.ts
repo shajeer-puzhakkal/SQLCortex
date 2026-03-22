@@ -12,6 +12,7 @@ import {
 import { hashSql, normalizeSql as normalizeSqlForHash } from "../../../../packages/shared/src/sql";
 import type {
   DatabaseHealthIndexFinding,
+  DatabaseHealthReportExportPdfRequest,
   DatabaseHealthReportGenerateRequest,
   DatabaseHealthReportGenerateResponse,
   DatabaseHealthSchemaRisk,
@@ -35,12 +36,16 @@ import type {
 import { makeError, type ErrorResponse } from "../contracts";
 import { requireAuth, type AuthenticatedRequest } from "../auth";
 import { ExplainRunnerError, runExplainJson, type RunConnectionQueryFn } from "../explain/runExplainJson";
+import { buildDatabaseHealthPdfFileName, renderDatabaseHealthReportPdf } from "./databaseHealthReportPdf";
 
 type ResolvedProjectConnection =
   | { error: ErrorResponse; status: number }
   | {
       projectId: string;
       orgId: string | null;
+      project?: {
+        name?: string | null;
+      } | null;
       connection: {
         id: string;
       };
@@ -2510,6 +2515,99 @@ export function registerIntelligenceRoutes(options: {
         ai_summary: reportData.ai_summary,
       };
       return res.json(payload);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/health-report/export-pdf",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<DatabaseHealthReportExportPdfRequest>>,
+      res: Response<ErrorResponse | Buffer>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Database health report export is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const generatedAt = new Date();
+      let reportData: Awaited<ReturnType<typeof collectWeeklyDatabaseHealthReport>>;
+      try {
+        reportData = await collectWeeklyDatabaseHealthReport({
+          prisma: options.prisma,
+          runConnectionQuery: options.runConnectionQuery,
+          connectionString: connectionContext.connectionString,
+          projectId: connectionContext.projectId,
+          generatedAt,
+        });
+      } catch (err) {
+        console.error("Failed to build database health report for PDF export", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to generate database health report."));
+      }
+
+      const projectName =
+        typeof connectionContext.project?.name === "string" && connectionContext.project.name.trim().length > 0
+          ? connectionContext.project.name
+          : connectionContext.projectId;
+
+      let pdfBuffer: Buffer;
+      try {
+        pdfBuffer = await renderDatabaseHealthReportPdf({
+          projectName,
+          reportWeekStartIso: reportData.week_start.toISOString(),
+          generatedAtIso: generatedAt.toISOString(),
+          healthScore: reportData.health_score,
+          scoreBreakdown: reportData.score_breakdown,
+          topSlowQueries: reportData.top_slow_queries,
+          missingIndexes: reportData.missing_indexes,
+          unusedIndexes: reportData.unused_indexes,
+          schemaRisks: reportData.schema_risks,
+          aiSummary: reportData.ai_summary,
+        });
+      } catch (err) {
+        console.error("Failed to export database health report PDF", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to export database health report PDF."));
+      }
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${buildDatabaseHealthPdfFileName(projectName)}"`);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      return res.status(200).send(pdfBuffer);
     },
   );
 
