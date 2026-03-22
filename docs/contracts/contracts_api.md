@@ -206,6 +206,20 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - report sections listed above plus `ai_summary`
 - Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
 
+### POST `/api/intelligence/health-report/export-pdf`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+- Behavior:
+  - Rebuilds the current weekly database health report using the same scoring/data pipeline as `/api/intelligence/health-report/generate`.
+  - Renders report sections into a PDF document (Puppeteer renderer with built-in fallback).
+  - Returns a downloadable attachment named like `SQLCortex_Health_Report_ProjectA.pdf`.
+- Success: `200 application/pdf`
+  - Headers:
+    - `Content-Type: application/pdf`
+    - `Content-Disposition: attachment; filename="SQLCortex_Health_Report_<Project>.pdf"`
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 Security defaults for intelligence history:
 - Raw SQL text is not stored unless `INTELLIGENCE_STORE_QUERY_TEXT=true`.
 - Default storage is fingerprint + extracted feature JSON + scoring metadata.

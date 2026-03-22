@@ -188,6 +188,26 @@ test("POST /api/intelligence/health-report/generate builds and stores weekly rep
     assert.ok(persisted[0]?.generated_at instanceof Date);
     const storedReport = JSON.parse(persisted[0]?.report_json ?? "{}");
     assert.equal(storedReport.health_score, payload.health_score);
+
+    const exportResponse = await fetch(`http://127.0.0.1:${port}/api/intelligence/health-report/export-pdf`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer token-123",
+      },
+      body: JSON.stringify({
+        project_id: "project-1",
+        connection_id: "conn-1",
+      }),
+    });
+    assert.equal(exportResponse.status, 200);
+    assert.equal(exportResponse.headers.get("content-type"), "application/pdf");
+    const contentDisposition = exportResponse.headers.get("content-disposition");
+    assert.ok(contentDisposition?.includes("attachment;"));
+    assert.ok(contentDisposition?.includes("SQLCortex_Health_Report_Test_Project.pdf"));
+    const pdfBuffer = Buffer.from(await exportResponse.arrayBuffer());
+    assert.ok(pdfBuffer.length > 128);
+    assert.equal(pdfBuffer.subarray(0, 4).toString("utf8"), "%PDF");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     clearApiOverrides();

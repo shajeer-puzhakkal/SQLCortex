@@ -316,6 +316,11 @@ export type DatabaseHealthReportGenerateRequest = {
   connection_id: string;
 };
 
+export type DatabaseHealthReportExportPdfRequest = {
+  project_id: string;
+  connection_id: string;
+};
+
 export type DatabaseHealthReportGenerateResponse = {
   project_id: string;
   connection_id: string;
