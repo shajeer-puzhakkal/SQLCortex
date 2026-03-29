@@ -262,6 +262,65 @@ export type SchemaSnapshotCaptureResponse = {
   };
 };
 
+export type SchemaTimelineRange = "7d" | "30d";
+
+export type SchemaTimelineChange = {
+  change_type: string;
+  object_name: string;
+  detected_at: string;
+  risk_level: "low" | "medium" | "high";
+  recommendation: string;
+};
+
+export type SchemaTimelineTableGrowth = {
+  snapshot_time: string;
+  table_name: string;
+  rows_inserted_delta: number;
+  rows_updated_delta: number;
+  rows_deleted_delta: number;
+  net_growth_rows: number;
+};
+
+export type SchemaTimelinePoint = {
+  date: string;
+  schema_changes: number;
+  index_changes: number;
+  table_growth_rows: number;
+};
+
+export type SchemaTimelineResponse = {
+  project_id: string;
+  range: SchemaTimelineRange;
+  points: SchemaTimelinePoint[];
+  schema_changes: SchemaTimelineChange[];
+  index_changes: SchemaTimelineChange[];
+  table_growth: SchemaTimelineTableGrowth[];
+};
+
+export type MigrationRiskScoreLevel = "low" | "medium" | "high" | "critical";
+
+export type MigrationRiskScoreRequest = {
+  project_id: string;
+  connection_id: string;
+  lookback_days?: number;
+};
+
+export type MigrationRiskScoreResponse = {
+  project_id: string;
+  connection_id: string;
+  analyzed_at: string;
+  lookback_days: number;
+  risk_score: number;
+  risk_level: MigrationRiskScoreLevel;
+  factors: {
+    table_size_rows: number;
+    active_connections: number;
+    indexes_affected: number;
+    lock_duration_seconds: number;
+  };
+  recommendations: string[];
+};
+
 export type IndexHealthStatus = "unused_index" | "missing_index";
 
 export type IndexHealthFinding = {
