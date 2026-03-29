@@ -164,6 +164,42 @@ Tokens authenticate via `Authorization: Bearer <token>`.
   - `object_counts` (`tables`, `columns`, `indexes`, `constraints`, `foreign_keys`)
 - Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
 
+### GET `/api/intelligence/schema/timeline`
+- Query:
+  - `project_id` (uuid, required)
+  - `range` (`7d` | `30d`, optional, default `7d`)
+- Behavior:
+  - Returns schema evolution timeline points for the selected range.
+  - Includes:
+    - schema change events (from `schema_changes`)
+    - index change events (subset of schema changes)
+    - table growth deltas derived from `observability_snapshots.metric_data.tables`
+- Success: `200 SchemaTimelineResponse`
+  - `points[]` (`date`, `schema_changes`, `index_changes`, `table_growth_rows`)
+  - `schema_changes[]` (`change_type`, `object_name`, `detected_at`, `risk_level`, `recommendation`)
+  - `index_changes[]` (same shape as above, filtered to index events)
+  - `table_growth[]` (`snapshot_time`, `table_name`, `rows_inserted_delta`, `rows_updated_delta`, `rows_deleted_delta`, `net_growth_rows`)
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`
+
+### POST `/api/intelligence/schema/migration-risk/score`
+- Request body:
+  - `project_id` (uuid, required)
+  - `connection_id` (uuid, required)
+  - `lookback_days` (number, optional, default `7`, max `90`)
+- Behavior:
+  - Scores migration risk on a `0-10` scale using:
+    - table size (`pg_stat_user_tables`)
+    - active connections (`pg_stat_activity`)
+    - indexes affected recently (`schema_changes`)
+    - observed lock wait duration (`pg_stat_activity`)
+  - Returns risk level buckets (`low`, `medium`, `high`, `critical`) with operational recommendations.
+- Success: `200 MigrationRiskScoreResponse`
+  - `risk_score` (e.g. `8.5`)
+  - `risk_level`
+  - `factors` (`table_size_rows`, `active_connections`, `indexes_affected`, `lock_duration_seconds`)
+  - `recommendations[]`
+- Errors: `400 INVALID_INPUT`, `401 UNAUTHORIZED`, `403 FORBIDDEN`, `429 RATE_LIMITED`, `502 ANALYZER_ERROR`
+
 ### POST `/api/intelligence/index-health/analyze`
 - Request body:
   - `project_id` (uuid, required)

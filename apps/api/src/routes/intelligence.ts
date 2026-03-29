@@ -23,11 +23,18 @@ import type {
   IndexHealthAnalyzeResponse,
   IndexHealthFinding,
   IntelligenceMode,
+  MigrationRiskScoreRequest,
+  MigrationRiskScoreResponse,
+  MigrationRiskScoreLevel,
   ObservabilityCollectRequest,
   ObservabilityCollectResponse,
   ObservabilitySnapshotMetric,
+  SchemaTimelineResponse,
   SchemaSnapshotCaptureRequest,
   SchemaSnapshotCaptureResponse,
+  SchemaTimelineRange,
+  SchemaTimelineChange,
+  SchemaTimelineTableGrowth,
   IntelligenceScoreRequest,
   IntelligenceScoreResponse,
   IntelligenceTopRiskyResponse,
@@ -152,6 +159,21 @@ type SchemaRiskRow = {
   object_name: string;
   detected_at: Date;
 };
+type SchemaTimelineChangeRow = {
+  change_type: string;
+  object_name: string;
+  detected_at: Date;
+};
+type MigrationTableSizeRow = {
+  total_live_rows: number;
+  largest_table_rows: number;
+};
+type MigrationActiveConnectionsRow = {
+  active_connections: number;
+};
+type MigrationLockDurationRow = {
+  max_lock_wait_seconds: number;
+};
 
 const HISTORY_LIMIT_DEFAULT = 25;
 const HISTORY_LIMIT_MAX = 100;
@@ -171,6 +193,8 @@ const DATABASE_HEALTH_TOP_SLOW_QUERIES_LIMIT = Math.max(
   Number(process.env.DATABASE_HEALTH_TOP_SLOW_QUERIES_LIMIT ?? 5) || 5,
 );
 const DATABASE_HEALTH_REPORT_WINDOW_DAYS = 7;
+const MIGRATION_RISK_LOOKBACK_DAYS_DEFAULT = 7;
+const MIGRATION_RISK_LOOKBACK_DAYS_MAX = 90;
 const OBSERVABILITY_TABLE_STATS_LIMIT = Math.max(
   50,
   Number(process.env.OBSERVABILITY_TABLE_STATS_LIMIT ?? 500) || 500,
@@ -1136,6 +1160,140 @@ function schemaRiskRecommendation(changeType: string, objectName: string): strin
     default:
       return `Review schema change ${changeType} on ${objectName}.`;
   }
+}
+
+function parseLookbackDays(raw: unknown): number {
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(value) || value <= 0) {
+    return MIGRATION_RISK_LOOKBACK_DAYS_DEFAULT;
+  }
+  return Math.min(MIGRATION_RISK_LOOKBACK_DAYS_MAX, Math.max(1, Math.floor(value)));
+}
+
+function normalizeSchemaTimelineChange(row: SchemaTimelineChangeRow): SchemaTimelineChange {
+  return {
+    change_type: row.change_type,
+    object_name: row.object_name,
+    detected_at: row.detected_at.toISOString(),
+    risk_level: schemaRiskLevel(row.change_type),
+    recommendation: schemaRiskRecommendation(row.change_type, row.object_name),
+  };
+}
+
+function readTableStatsSnapshotRows(metricData: unknown): Array<{
+  table_name: string;
+  rows_inserted: number;
+  rows_updated: number;
+  rows_deleted: number;
+}> {
+  const metricObject = normalizeStoredJsonObject(metricData);
+  if (!metricObject || !Array.isArray(metricObject.tables)) {
+    return [];
+  }
+  return toObjectRows(metricObject.tables).map((row) => ({
+    table_name: `${toText(row.schema_name) ?? "public"}.${toText(row.table_name) ?? "unknown"}`,
+    rows_inserted: toNumeric(row.rows_inserted),
+    rows_updated: toNumeric(row.rows_updated),
+    rows_deleted: toNumeric(row.rows_deleted),
+  }));
+}
+
+function counterDelta(current: number, previous: number | undefined): number {
+  if (!Number.isFinite(current) || current <= 0) {
+    return 0;
+  }
+  if (typeof previous !== "number" || !Number.isFinite(previous) || current < previous) {
+    return current;
+  }
+  return current - previous;
+}
+
+function buildSchemaTimelineTableGrowth(
+  rows: Array<{ snapshot_time: Date; metric_data: unknown }>,
+): SchemaTimelineTableGrowth[] {
+  const previousByTable = new Map<string, { inserted: number; updated: number; deleted: number }>();
+  const growth: SchemaTimelineTableGrowth[] = [];
+
+  for (const row of rows) {
+    const tableRows = readTableStatsSnapshotRows(row.metric_data);
+    for (const tableRow of tableRows) {
+      const previous = previousByTable.get(tableRow.table_name);
+      const insertedDelta = counterDelta(tableRow.rows_inserted, previous?.inserted);
+      const updatedDelta = counterDelta(tableRow.rows_updated, previous?.updated);
+      const deletedDelta = counterDelta(tableRow.rows_deleted, previous?.deleted);
+      previousByTable.set(tableRow.table_name, {
+        inserted: tableRow.rows_inserted,
+        updated: tableRow.rows_updated,
+        deleted: tableRow.rows_deleted,
+      });
+      if (insertedDelta === 0 && updatedDelta === 0 && deletedDelta === 0) {
+        continue;
+      }
+      growth.push({
+        snapshot_time: row.snapshot_time.toISOString(),
+        table_name: tableRow.table_name,
+        rows_inserted_delta: insertedDelta,
+        rows_updated_delta: updatedDelta,
+        rows_deleted_delta: deletedDelta,
+        net_growth_rows: insertedDelta - deletedDelta,
+      });
+    }
+  }
+
+  return growth;
+}
+
+function clampRiskScore(score: number): number {
+  if (!Number.isFinite(score)) {
+    return 0;
+  }
+  return Math.min(10, Math.max(0, score));
+}
+
+function toRiskScoreOneDecimal(score: number): number {
+  return roundTo(clampRiskScore(score), 1);
+}
+
+function resolveMigrationRiskLevel(score: number): MigrationRiskScoreLevel {
+  if (score >= 8) {
+    return "critical";
+  }
+  if (score >= 6) {
+    return "high";
+  }
+  if (score >= 3) {
+    return "medium";
+  }
+  return "low";
+}
+
+function buildMigrationRiskRecommendations(params: {
+  riskLevel: MigrationRiskScoreLevel;
+  activeConnections: number;
+  indexesAffected: number;
+  lockDurationSeconds: number;
+  tableSizeRows: number;
+}): string[] {
+  const recommendations: string[] = [];
+  if (params.riskLevel === "critical" || params.riskLevel === "high") {
+    recommendations.push("Run migration during low traffic.");
+  }
+  if (params.activeConnections >= 25) {
+    recommendations.push("Reduce active sessions before migration window to lower lock amplification.");
+  }
+  if (params.indexesAffected > 0) {
+    recommendations.push("Use concurrent index operations where possible and monitor query plans post-change.");
+  }
+  if (params.lockDurationSeconds >= 20) {
+    recommendations.push("Set conservative lock_timeout/statement_timeout and define a rollback path.");
+  }
+  if (params.tableSizeRows >= 1_000_000) {
+    recommendations.push("Prefer batched or phased migrations for large tables to reduce long lock windows.");
+  }
+  if (recommendations.length === 0) {
+    recommendations.push("Risk is low; proceed with normal observability and rollback safeguards.");
+  }
+  return recommendations;
 }
 
 function computeQueryPerformanceScore(
@@ -2319,6 +2477,308 @@ export function registerIntelligenceRoutes(options: {
         schema_hash: schemaSnapshot.schema_hash,
         inserted_count: insertedCount,
         object_counts: schemaSnapshot.object_counts,
+      };
+      return res.json(payload);
+    },
+  );
+
+  options.app.get(
+    "/api/intelligence/schema/timeline",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, unknown, { project_id?: string; range?: string }>,
+      res: Response<SchemaTimelineResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.query.project_id === "string" && req.query.project_id.trim().length > 0
+          ? req.query.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const projectScope = await resolveProjectScope(options.prisma, auth, projectId);
+      if ("error" in projectScope) {
+        return res.status(projectScope.status).json(projectScope.error);
+      }
+
+      const throttle = checkThrottle({ auth, projectId: projectScope.projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Schema timeline request is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const range = normalizeRange(req.query.range) as SchemaTimelineRange;
+      const cacheKey = endpointCacheKey(projectScope.projectId, "schema-timeline", [range]);
+      const cached = readEndpointCache<SchemaTimelineResponse>(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
+      const { start, endExclusive } = resolveRangeStart(range);
+      const [schemaChangeRowsRaw, tableSnapshotRowsRaw] = await Promise.all([
+        options.prisma.$queryRawUnsafe<Array<{ change_type: unknown; object_name: unknown; detected_at: unknown }>>(
+          `SELECT "change_type", "object_name", "detected_at"
+           FROM "schema_changes"
+           WHERE "project_id" = $1
+             AND "detected_at" >= $2
+             AND "detected_at" < $3
+           ORDER BY "detected_at" DESC`,
+          projectScope.projectId,
+          start,
+          endExclusive,
+        ),
+        options.prisma.$queryRawUnsafe<Array<{ snapshot_time: unknown; metric_data: unknown }>>(
+          `SELECT "snapshot_time", "metric_data"
+           FROM "observability_snapshots"
+           WHERE "project_id" = $1
+             AND "metric_type" = 'table_stats'
+             AND "snapshot_time" >= $2
+             AND "snapshot_time" < $3
+           ORDER BY "snapshot_time" ASC`,
+          projectScope.projectId,
+          start,
+          endExclusive,
+        ),
+      ]);
+
+      const schemaChangeRows: SchemaTimelineChangeRow[] = toObjectRows(schemaChangeRowsRaw).map((row) => {
+        const detectedAtRaw = row.detected_at;
+        const detectedAt =
+          detectedAtRaw instanceof Date
+            ? detectedAtRaw
+            : toText(detectedAtRaw)
+              ? new Date(String(detectedAtRaw))
+              : start;
+        return {
+          change_type: toText(row.change_type) ?? "unknown_change",
+          object_name: toText(row.object_name) ?? "unknown.object",
+          detected_at: Number.isNaN(detectedAt.getTime()) ? start : detectedAt,
+        };
+      });
+
+      const schemaChanges = schemaChangeRows.map((row) => normalizeSchemaTimelineChange(row));
+      const indexChanges = schemaChanges.filter((change) => change.change_type.startsWith("index_"));
+      const tableSnapshotRows = toObjectRows(tableSnapshotRowsRaw)
+        .map((row) => {
+          const raw = row.snapshot_time;
+          const snapshotTime =
+            raw instanceof Date ? raw : toText(raw) ? new Date(String(raw)) : null;
+          if (!snapshotTime || Number.isNaN(snapshotTime.getTime())) {
+            return null;
+          }
+          return { snapshot_time: snapshotTime, metric_data: row.metric_data };
+        })
+        .filter((row): row is { snapshot_time: Date; metric_data: unknown } => row !== null);
+      const tableGrowth = buildSchemaTimelineTableGrowth(tableSnapshotRows);
+
+      const pointsByDate = new Map<string, SchemaTimelineResponse["points"][number]>();
+      const days = range === "30d" ? 30 : 7;
+      for (let offset = 0; offset < days; offset += 1) {
+        const day = new Date(start);
+        day.setUTCDate(start.getUTCDate() + offset);
+        const date = day.toISOString().slice(0, 10);
+        pointsByDate.set(date, {
+          date,
+          schema_changes: 0,
+          index_changes: 0,
+          table_growth_rows: 0,
+        });
+      }
+
+      for (const change of schemaChanges) {
+        const date = change.detected_at.slice(0, 10);
+        const point = pointsByDate.get(date);
+        if (!point) {
+          continue;
+        }
+        point.schema_changes += 1;
+        if (change.change_type.startsWith("index_")) {
+          point.index_changes += 1;
+        }
+      }
+      for (const growth of tableGrowth) {
+        const date = growth.snapshot_time.slice(0, 10);
+        const point = pointsByDate.get(date);
+        if (!point) {
+          continue;
+        }
+        point.table_growth_rows += growth.net_growth_rows;
+      }
+
+      const payload: SchemaTimelineResponse = {
+        project_id: projectScope.projectId,
+        range,
+        points: Array.from(pointsByDate.values()),
+        schema_changes: schemaChanges,
+        index_changes: indexChanges,
+        table_growth: tableGrowth,
+      };
+      writeEndpointCache(cacheKey, payload);
+      return res.json(payload);
+    },
+  );
+
+  options.app.post(
+    "/api/intelligence/schema/migration-risk/score",
+    requireAuth(options.prisma),
+    async (
+      req: Request<unknown, unknown, Partial<MigrationRiskScoreRequest>>,
+      res: Response<MigrationRiskScoreResponse | ErrorResponse>,
+    ) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      if (!auth) {
+        return res.status(401).json(makeError("UNAUTHORIZED", "Authentication required"));
+      }
+
+      const projectId =
+        typeof req.body?.project_id === "string" && req.body.project_id.trim().length > 0
+          ? req.body.project_id
+          : null;
+      if (!projectId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`project_id` is required"));
+      }
+
+      const connectionId =
+        typeof req.body?.connection_id === "string" && req.body.connection_id.trim().length > 0
+          ? req.body.connection_id
+          : null;
+      if (!connectionId) {
+        return res.status(400).json(makeError("INVALID_INPUT", "`connection_id` is required"));
+      }
+
+      const lookbackDays = parseLookbackDays(req.body?.lookback_days);
+
+      const throttle = checkThrottle({ auth, projectId, mode: "read" });
+      if (throttle.limited) {
+        if (throttle.retryAfterSeconds) {
+          res.setHeader("Retry-After", throttle.retryAfterSeconds.toString());
+        }
+        return res.status(429).json(
+          makeError("RATE_LIMITED", "Migration risk scoring is rate limited.", {
+            retry_after_seconds: throttle.retryAfterSeconds ?? null,
+            reason: "intelligence_throttle",
+          }),
+        );
+      }
+
+      const connectionContext = await options.resolveProjectConnection(auth, projectId, connectionId);
+      if ("error" in connectionContext) {
+        return res.status(connectionContext.status).json(connectionContext.error);
+      }
+
+      const analyzedAt = new Date();
+      const lookbackStart = new Date(analyzedAt);
+      lookbackStart.setUTCDate(lookbackStart.getUTCDate() - (lookbackDays - 1));
+
+      let indexRowsRaw: Array<{ indexes_affected: unknown }> = [];
+      let tableSizeRowsRaw: unknown = [];
+      let activeConnectionRowsRaw: unknown = [];
+      let lockDurationRowsRaw: unknown = [];
+      try {
+        [indexRowsRaw, tableSizeRowsRaw, activeConnectionRowsRaw, lockDurationRowsRaw] = await Promise.all([
+          options.prisma.$queryRawUnsafe<Array<{ indexes_affected: unknown }>>(
+            `SELECT COUNT(*)::int AS indexes_affected
+             FROM "schema_changes"
+             WHERE "project_id" = $1
+               AND "detected_at" >= $2
+               AND "change_type" IN ('index_created', 'index_dropped')`,
+            connectionContext.projectId,
+            lookbackStart,
+          ),
+          options.runConnectionQuery(
+            connectionContext.connectionString,
+            `SELECT
+               COALESCE(SUM(n_live_tup), 0)::bigint AS total_live_rows,
+               COALESCE(MAX(n_live_tup), 0)::bigint AS largest_table_rows
+             FROM pg_stat_user_tables`,
+          ),
+          options.runConnectionQuery(
+            connectionContext.connectionString,
+            `SELECT
+               COUNT(*) FILTER (WHERE state = 'active')::bigint AS active_connections
+             FROM pg_stat_activity
+             WHERE datname = current_database()`,
+          ),
+          options.runConnectionQuery(
+            connectionContext.connectionString,
+            `SELECT
+               COALESCE(MAX(EXTRACT(EPOCH FROM (clock_timestamp() - query_start))), 0)::double precision AS max_lock_wait_seconds
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND wait_event_type = 'Lock'
+               AND query_start IS NOT NULL`,
+          ),
+        ]);
+      } catch (err) {
+        console.error("Failed to collect migration risk factors", err);
+        return res.status(502).json(makeError("ANALYZER_ERROR", "Failed to collect migration risk factors."));
+      }
+
+      const indexRows = toObjectRows(indexRowsRaw);
+      const tableSizeRows = toObjectRows(tableSizeRowsRaw);
+      const activeConnectionRows = toObjectRows(activeConnectionRowsRaw);
+      const lockDurationRows = toObjectRows(lockDurationRowsRaw);
+
+      const tableSizeRow: MigrationTableSizeRow = {
+        total_live_rows: toNumeric(tableSizeRows[0]?.total_live_rows),
+        largest_table_rows: toNumeric(tableSizeRows[0]?.largest_table_rows),
+      };
+      const activeConnectionsRow: MigrationActiveConnectionsRow = {
+        active_connections: toNumeric(activeConnectionRows[0]?.active_connections),
+      };
+      const lockDurationRow: MigrationLockDurationRow = {
+        max_lock_wait_seconds: Math.max(0, toNumeric(lockDurationRows[0]?.max_lock_wait_seconds)),
+      };
+      const indexesAffected = toNumeric(indexRows[0]?.indexes_affected);
+      const tableSizeRowsValue = Math.max(tableSizeRow.total_live_rows, tableSizeRow.largest_table_rows);
+      const activeConnections = activeConnectionsRow.active_connections;
+      const lockDurationSeconds = roundTo(lockDurationRow.max_lock_wait_seconds, 2);
+
+      const tableSizeFactor = clampRiskScore(Math.log10(tableSizeRowsValue + 1) * 1.6);
+      const activeConnectionsFactor = clampRiskScore((activeConnections / 40) * 10);
+      const indexesAffectedFactor = clampRiskScore((indexesAffected / 6) * 10);
+      const lockDurationFactor = clampRiskScore((lockDurationSeconds / 45) * 10);
+      const riskScore = toRiskScoreOneDecimal(
+        tableSizeFactor * 0.35 +
+          activeConnectionsFactor * 0.25 +
+          indexesAffectedFactor * 0.2 +
+          lockDurationFactor * 0.2,
+      );
+      const riskLevel = resolveMigrationRiskLevel(riskScore);
+
+      const payload: MigrationRiskScoreResponse = {
+        project_id: connectionContext.projectId,
+        connection_id: connectionContext.connection.id,
+        analyzed_at: analyzedAt.toISOString(),
+        lookback_days: lookbackDays,
+        risk_score: riskScore,
+        risk_level: riskLevel,
+        factors: {
+          table_size_rows: tableSizeRowsValue,
+          active_connections: activeConnections,
+          indexes_affected: indexesAffected,
+          lock_duration_seconds: lockDurationSeconds,
+        },
+        recommendations: buildMigrationRiskRecommendations({
+          riskLevel,
+          activeConnections,
+          indexesAffected,
+          lockDurationSeconds,
+          tableSizeRows: tableSizeRowsValue,
+        }),
       };
       return res.json(payload);
     },
